@@ -16,14 +16,16 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 
-use crate::app::event::AppEvent;
+use crate::app::event::{AnswerTag, AppEvent, EventChannel};
 use crate::app::{Action, App, AppError, DRAW_INTERVAL, Focus};
+use crate::client::ClientError;
 use crate::render::chat_view::ChatView;
 use crate::ui::composer::{ComposerView, SeedPopup};
 use crate::ui::sidebar::{SidebarView, sidebar_width};
 use crate::ui::takeover::{ApprovalView, Mode, QuestionView};
 use crate::wire::approvals::ApprovalResponseOutcome;
 use crate::wire::questions::{AskUserQuestionAnswer, QuestionAnswerItem};
+use crate::wire::rpc::{RpcReceipt, RpcReceiptReason};
 use crate::wire::session::{PromptContentPart, PromptMode};
 
 impl App {
@@ -37,17 +39,20 @@ impl App {
     pub async fn run<B>(
         &mut self,
         term: &mut Terminal<B>,
-        events: &mut mpsc::UnboundedReceiver<AppEvent>,
+        events: &mut EventChannel,
     ) -> Result<(), AppError>
     where
         B: Backend,
         B::Error: Into<AppError>,
     {
+        // Spawned back-channel tasks (answers, prompts) send their results
+        // through this sender; the loop reads them from `events.rx`.
+        let event_tx = events.tx.clone();
         let mut tick = tokio::time::interval(DRAW_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                maybe = events.recv() => {
+                maybe = events.rx.recv() => {
                     match maybe {
                         Some(AppEvent::Key(key)) => {
                             match self.handle_key(key) {
@@ -55,12 +60,30 @@ impl App {
                                     self.running = false;
                                     break;
                                 }
-                                Some(Action::Submit(text)) => self.dispatch_prompt(text),
-                                Some(Action::AnswerApproval(outcome)) => {
-                                    self.answer_approval(outcome).await;
+                                Some(Action::Submit(text)) => {
+                                    self.dispatch_prompt(text, event_tx.clone())
                                 }
-                                Some(Action::AnswerQuestion) => self.answer_question().await,
+                                // Spawned: the loop keeps pumping while the
+                                // respond POST is in flight.
+                                Some(Action::AnswerApproval(outcome)) => {
+                                    self.answer_approval(outcome, event_tx.clone())
+                                }
+                                Some(Action::AnswerQuestion) => {
+                                    self.answer_question(event_tx.clone())
+                                }
                                 _ => {}
+                            }
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::AnswerDone { tag, result }) => {
+                            self.on_answer_done(tag, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::PromptDone { result }) => {
+                            if let Err(error) = result {
+                                self.set_toast(format!("prompt failed: {error}"));
                             }
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
@@ -258,18 +281,17 @@ impl App {
         Ok(())
     }
 
-    /// Fire-and-forget `session.prompt` for a submitted composer buffer
-    /// (mode `queue`, one text part — web parity). No-op without an attached
-    /// client (keyless tests) or an active session.
-    fn dispatch_prompt(&mut self, text: String) {
+    /// Spawn `session.prompt` for a submitted composer buffer (mode `queue`,
+    /// one text part — web parity). The result comes back as
+    /// [`AppEvent::PromptDone`]; errors toast without stalling the loop.
+    /// No-op without an attached client (keyless tests) or an active session.
+    fn dispatch_prompt(&mut self, text: String, event_tx: mpsc::UnboundedSender<AppEvent>) {
         let (Some(client), Some(session_id)) = (self.client.clone(), self.active_session.clone())
         else {
             return;
         };
-        // TODO: surface prompt errors in the status line (needs an event
-        // back-channel from the spawned task).
         tokio::spawn(async move {
-            let _ = client
+            let result = client
                 .session_prompt(
                     session_id,
                     PromptMode::Queue,
@@ -277,47 +299,68 @@ impl App {
                     None,
                 )
                 .await;
+            let _ = event_tx.send(AppEvent::PromptDone { result });
         });
     }
 
-    /// Post the approval answer and resolve the takeover. The respond POST
-    /// is awaited inline (loopback, normally instant — v1; a hung gateway
-    /// stalls the loop until the RPC timeout, so a spawned answer task with
-    /// an event back-channel is a TODO). On success: optimistic resolution
-    /// (pending dropped, next takeover promoted or back to chat, toast). On
-    /// error: toast and STAY in the takeover — the key can be pressed again.
-    async fn answer_approval(&mut self, outcome: ApprovalResponseOutcome) {
-        let Mode::Approval(takeover) = &self.mode else {
+    /// Spawn the approval answer POST. The loop keeps pumping while it is in
+    /// flight; the result arrives as [`AppEvent::AnswerDone`] and is applied
+    /// in [`App::on_answer_done`]. While in flight the takeover ignores
+    /// further answer keys and shows a "sending…" hint. Without an attached
+    /// client (keyless tests) the resolution is optimistic — there is no
+    /// gateway to answer.
+    fn answer_approval(
+        &mut self,
+        outcome: ApprovalResponseOutcome,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Mode::Approval(takeover) = &mut self.mode else {
             return;
         };
-        let (rpc_id, session_id, approval_id) = (
-            takeover.rpc_id.clone(),
-            takeover.session_id.clone(),
-            takeover.approval_id.clone(),
-        );
-        if let Some(client) = &self.client
-            && let Err(error) = client
-                .respond_approval(rpc_id, session_id, approval_id.clone(), outcome)
-                .await
-        {
-            self.set_toast(format!("answer failed: {error}"));
+        if takeover.sending {
+            return; // an answer is already in flight
+        }
+        let tag = AnswerTag::Approval {
+            approval_id: takeover.approval_id.clone(),
+            outcome,
+        };
+        let Some(client) = self.client.clone() else {
+            // Keyless: resolve optimistically (mirrors the pre-back-channel
+            // behavior with no client attached).
+            let AnswerTag::Approval { approval_id, .. } = &tag else {
+                return;
+            };
+            self.pending_approvals.remove(approval_id);
+            self.mode = self.next_takeover().unwrap_or(Mode::Chat);
+            self.set_toast(match outcome {
+                ApprovalResponseOutcome::AllowedOnce => "allowed once",
+                ApprovalResponseOutcome::Rejected => "rejected",
+            });
+            return;
+        };
+        takeover.sending = true;
+        self.hint = Some("sending…".into());
+        let rpc_id = takeover.rpc_id.clone();
+        let session_id = takeover.session_id.clone();
+        let approval_id = takeover.approval_id.clone();
+        tokio::spawn(async move {
+            let result = client
+                .respond_approval(rpc_id, session_id, approval_id, outcome)
+                .await;
+            let _ = event_tx.send(AppEvent::AnswerDone { tag, result });
+        });
+    }
+
+    /// Spawn the question answer POST — same spawned policy as
+    /// [`App::answer_approval`]; one answer entry per question (`selected`
+    /// carries the option labels).
+    fn answer_question(&mut self, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let Mode::Question(takeover) = &mut self.mode else {
+            return;
+        };
+        if takeover.sending {
             return;
         }
-        self.pending_approvals.remove(&approval_id);
-        self.mode = self.next_takeover().unwrap_or(Mode::Chat);
-        self.set_toast(match outcome {
-            ApprovalResponseOutcome::AllowedOnce => "allowed once",
-            ApprovalResponseOutcome::Rejected => "rejected",
-        });
-    }
-
-    /// Post the question answers (one entry per question; `selected` carries
-    /// the option labels) and resolve the takeover — same inline-await and
-    /// error policy as [`App::answer_approval`].
-    async fn answer_question(&mut self) {
-        let Mode::Question(takeover) = &self.mode else {
-            return;
-        };
         let answer = AskUserQuestionAnswer {
             answers: takeover
                 .questions
@@ -329,18 +372,95 @@ impl App {
                 })
                 .collect(),
         };
+        let tag = AnswerTag::Question(takeover.rpc_id.clone());
+        let rpc_id_echo = takeover.rpc_id.clone();
+        let Some(client) = self.client.clone() else {
+            self.pending_questions.remove(&rpc_id_echo.to_string());
+            self.mode = self.next_takeover().unwrap_or(Mode::Chat);
+            self.set_toast("answered");
+            return;
+        };
+        takeover.sending = true;
+        self.hint = Some("sending…".into());
         let rpc_id = takeover.rpc_id.clone();
-        if let Some(client) = &self.client
-            && let Err(error) = client
-                .respond_question(rpc_id.clone(), takeover.session_id.clone(), answer)
-                .await
-        {
-            self.set_toast(format!("answer failed: {error}"));
+        let session_id = takeover.session_id.clone();
+        tokio::spawn(async move {
+            let result = client
+                .respond_question(rpc_id.clone(), session_id, answer)
+                .await;
+            let _ = event_tx.send(AppEvent::AnswerDone { tag, result });
+        });
+    }
+
+    /// Apply a finished answer: success resolves the takeover it belongs to
+    /// (pending dropped, next takeover promoted or back to chat, toast);
+    /// failure (transport error or a `not-pending`/`bad-response` receipt)
+    /// toasts and STAYS in the takeover with `sending` re-armed so the user
+    /// can retry.
+    fn on_answer_done(&mut self, tag: AnswerTag, result: Result<RpcReceipt, ClientError>) {
+        self.hint = None; // clear the "sending…" hint
+        let accepted = matches!(&result, Ok(receipt) if receipt.accepted);
+        if accepted {
+            match &tag {
+                AnswerTag::Approval { approval_id, .. } => {
+                    self.pending_approvals.remove(approval_id);
+                }
+                AnswerTag::Question(rpc_id) => {
+                    self.pending_questions.remove(&rpc_id.to_string());
+                }
+            }
+            // Resolve only if this takeover is still the displayed one (a
+            // newer frame may have replaced it while the answer was in
+            // flight); a stale success still drops its pending entry.
+            let current = match (&tag, &self.mode) {
+                (AnswerTag::Approval { approval_id, .. }, Mode::Approval(takeover))
+                    if takeover.approval_id == *approval_id =>
+                {
+                    true
+                }
+                (AnswerTag::Question(rpc_id), Mode::Question(takeover))
+                    if takeover.rpc_id == *rpc_id =>
+                {
+                    true
+                }
+                _ => false,
+            };
+            if current {
+                self.mode = self.next_takeover().unwrap_or(Mode::Chat);
+            }
+            let toast = match &tag {
+                AnswerTag::Approval { outcome, .. } => match outcome {
+                    ApprovalResponseOutcome::AllowedOnce => "allowed once",
+                    ApprovalResponseOutcome::Rejected => "rejected",
+                },
+                AnswerTag::Question(_) => "answered",
+            };
+            self.set_toast(toast);
             return;
         }
-        self.pending_questions.remove(&rpc_id.to_string());
-        self.mode = self.next_takeover().unwrap_or(Mode::Chat);
-        self.set_toast("answered");
+        // Failure: stay in the takeover and re-arm the answer keys.
+        let reason = match &result {
+            Err(error) => error.to_string(),
+            Ok(receipt) => match receipt.reason {
+                Some(RpcReceiptReason::NotPending) => "not pending".to_string(),
+                Some(RpcReceiptReason::BadResponse) => "bad response".to_string(),
+                None => "not accepted".to_string(),
+            },
+        };
+        self.set_toast(format!("answer failed: {reason}"));
+        match (&tag, &mut self.mode) {
+            (AnswerTag::Approval { approval_id, .. }, Mode::Approval(takeover))
+                if takeover.approval_id == *approval_id =>
+            {
+                takeover.sending = false;
+            }
+            (AnswerTag::Question(rpc_id), Mode::Question(takeover))
+                if takeover.rpc_id == *rpc_id =>
+            {
+                takeover.sending = false;
+            }
+            _ => {}
+        }
     }
 
     /// The one-line status: session id · last seq · truncated flag · running

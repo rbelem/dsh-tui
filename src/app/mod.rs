@@ -18,7 +18,7 @@ pub mod event;
 pub mod run;
 
 pub use attach::attach;
-pub use event::{AppEvent, spawn_frame_bridge, spawn_input_bridge};
+pub use event::{AnswerTag, AppEvent, EventChannel, spawn_frame_bridge, spawn_input_bridge};
 pub use run::{TerminalGuard, setup_terminal, teardown_terminal};
 
 use std::collections::HashMap;
@@ -374,6 +374,7 @@ impl App {
             call_id: pending.call_id.clone(),
             reason: pending.reason.clone(),
             tool_summary: self.tool_summary(&pending.session_id, pending.call_id.as_deref()),
+            sending: false,
         }
     }
 
@@ -446,13 +447,21 @@ impl App {
     fn handle_takeover_key(&mut self, key: KeyEvent) -> Action {
         use crossterm::event::KeyCode;
         match &mut self.mode {
-            Mode::Approval(_) => match key.code {
-                KeyCode::Char('y') => Action::AnswerApproval(ApprovalResponseOutcome::AllowedOnce),
-                KeyCode::Char('n') | KeyCode::Esc => {
-                    Action::AnswerApproval(ApprovalResponseOutcome::Rejected)
+            Mode::Approval(takeover) => {
+                if takeover.sending {
+                    // Answer in flight: further answer keys are ignored.
+                    return Action::None;
                 }
-                _ => Action::None,
-            },
+                match key.code {
+                    KeyCode::Char('y') => {
+                        Action::AnswerApproval(ApprovalResponseOutcome::AllowedOnce)
+                    }
+                    KeyCode::Char('n') | KeyCode::Esc => {
+                        Action::AnswerApproval(ApprovalResponseOutcome::Rejected)
+                    }
+                    _ => Action::None,
+                }
+            }
             Mode::Question(takeover) => match key.code {
                 KeyCode::Tab => {
                     takeover.focus_next();
@@ -476,6 +485,7 @@ impl App {
                     }
                     Action::Input
                 }
+                KeyCode::Enter if takeover.sending => Action::None,
                 KeyCode::Enter => Action::AnswerQuestion,
                 KeyCode::Esc => {
                     self.hint = Some("can't cancel yet — answer or wait".into());

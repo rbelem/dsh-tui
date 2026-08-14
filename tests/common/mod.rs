@@ -28,6 +28,9 @@ pub enum MockAction {
     BadJson,
     /// Accept the connection and never answer (client timeout path).
     Hang,
+    /// HTTP 200 after `delay_ms` (a slow gateway; the app loop must keep
+    /// pumping while the request is in flight).
+    Delayed { delay_ms: u64, body: &'static str },
 }
 
 #[derive(Clone, Debug)]
@@ -234,6 +237,10 @@ async fn handle_connection(
         MockAction::NotFound => respond(&mut stream, 404, "not found").await,
         MockAction::BadJson => respond(&mut stream, 400, "{not json").await,
         MockAction::Hang => tokio::time::sleep(Duration::from_secs(60)).await,
+        MockAction::Delayed { delay_ms, body } => {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            respond(&mut stream, 200, body).await;
+        }
     }
 }
 

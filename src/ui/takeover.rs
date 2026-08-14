@@ -50,6 +50,9 @@ pub struct ApprovalTakeover {
     /// One-line summary of the matching tool node (`name args…`), when the
     /// store has the call.
     pub tool_summary: Option<String>,
+    /// An answer is in flight: further answer keys are ignored, the action
+    /// line shows a "sending…" hint.
+    pub sending: bool,
 }
 
 /// One question's interaction state: its options (synthesized for a bare
@@ -150,6 +153,8 @@ pub struct QuestionTakeover {
     pub questions: Vec<QuestionState>,
     /// The focused question (cursor + Space apply to it).
     pub focused: usize,
+    /// An answer is in flight (see [`ApprovalTakeover::sending`]).
+    pub sending: bool,
 }
 
 impl QuestionTakeover {
@@ -159,6 +164,7 @@ impl QuestionTakeover {
             rpc_id,
             questions: questions.into_iter().map(QuestionState::new).collect(),
             focused: 0,
+            sending: false,
         }
     }
 

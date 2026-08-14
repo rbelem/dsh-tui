@@ -11,9 +11,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::json;
-use tokio::sync::mpsc;
 
-use dsh_tui::app::{Action, App, AppEvent, Focus, attach, spawn_frame_bridge};
+use dsh_tui::app::{Action, App, AppEvent, EventChannel, Focus, attach, spawn_frame_bridge};
 use dsh_tui::client::WireClient;
 use dsh_tui::store::SessionStore;
 use dsh_tui::ui::takeover::{ApprovalTakeover, Mode, QuestionTakeover};
@@ -122,11 +121,13 @@ fn mux_assistant_message(session: &str, seq: i64, text: &str) -> String {
 /// Feed buffered events into a fresh channel and run the loop to completion
 /// (the quit key breaks it).
 async fn run_with(app: &mut App, term: &mut Terminal<TestBackend>, events: Vec<AppEvent>) {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut channel = EventChannel::new();
     for event in events {
-        tx.send(event).expect("event channel");
+        channel.tx.send(event).expect("event channel");
     }
-    app.run(term, &mut rx).await.expect("run must not fail");
+    app.run(term, &mut channel)
+        .await
+        .expect("run must not fail");
 }
 
 // ---------------------------------------------------------------------------
@@ -186,12 +187,13 @@ async fn attach_history_draw_end_to_end() {
     app.active_session = opened;
     app.sessions = sessions;
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
     spawn_frame_bridge(client.mux_stream(), tx.clone());
     let backend = TestBackend::new(100, 30);
     let mut term = Terminal::new(backend).unwrap();
     let run_task = tokio::spawn(async move {
-        let result = app.run(&mut term, &mut rx).await;
+        let result = app.run(&mut term, &mut channel).await;
         (result, term)
     });
     // Let the mock's scripted frames arrive and be drawn.
@@ -266,6 +268,7 @@ fn keymap_table() {
             call_id: None,
             reason: None,
             tool_summary: None,
+            sending: false,
         });
     }
     fn question_mode(app: &mut App) {
@@ -421,9 +424,10 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
     app.active_session = Some(SessionId("s1".into()));
     let backend = TestBackend::new(100, 5);
     let mut term = Terminal::new(backend).unwrap();
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
     let run_task = tokio::spawn(async move {
-        let result = app.run(&mut term, &mut rx).await;
+        let result = app.run(&mut term, &mut channel).await;
         (result, app)
     });
     for seq in 1..=5 {
@@ -527,9 +531,10 @@ async fn resize_invalidates_and_rerenders() {
     // Re-wrap at the new width (backend resized between runs).
     term.backend_mut().resize(60, 15);
     app.running = true;
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
     let run_task = tokio::spawn(async move {
-        let result = app.run(&mut term, &mut rx).await;
+        let result = app.run(&mut term, &mut channel).await;
         (result, app)
     });
     // Duplicate seq: ignored by the store, still triggers a draw.
@@ -567,9 +572,10 @@ async fn approval_pending_tracking_and_respond_echo() {
     let mut app = App::default();
     let backend = TestBackend::new(100, 30);
     let mut term = Terminal::new(backend).unwrap();
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
     let run_task = tokio::spawn(async move {
-        let result = app.run(&mut term, &mut rx).await;
+        let result = app.run(&mut term, &mut channel).await;
         (result, app, term)
     });
     tx.send(AppEvent::Answerable {
@@ -621,9 +627,10 @@ async fn approval_pending_tracking_and_respond_echo() {
     // The resolved frame (a pure push with its own fresh rpcId) removes the
     // pending entry; correlation is by payload approvalId.
     app.running = true;
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
     let run_task = tokio::spawn(async move {
-        let result = app.run(&mut term, &mut rx).await;
+        let result = app.run(&mut term, &mut channel).await;
         (result, app, term)
     });
     tx.send(AppEvent::Frame(MuxFrame::ApprovalResolved {
@@ -670,4 +677,204 @@ async fn question_pending_tracking_by_echo_rpc_id() {
         app.pending_questions.is_empty(),
         "question/resolved removes the entry"
     );
+}
+
+// ---------------------------------------------------------------------------
+// RPC back-channel: spawned answers/prompts keep the loop live
+// ---------------------------------------------------------------------------
+
+/// An approval takeover in Approval mode with a client attached.
+fn approval_app(client: WireClient) -> App {
+    let mut app = App::default();
+    app.client = Some(client);
+    app.active_session = Some(SessionId("s1".into()));
+    app.mode = Mode::Approval(ApprovalTakeover {
+        session_id: SessionId("s1".into()),
+        approval_id: ApprovalRequestId("a1".into()),
+        rpc_id: RpcId("rpc-approval-1".into()),
+        tool_name: "read_file".into(),
+        call_id: Some("call-1".into()),
+        reason: Some("reads /etc".into()),
+        tool_summary: None,
+        sending: false,
+    });
+    app
+}
+
+#[tokio::test]
+async fn loop_stays_live_while_respond_in_flight() {
+    let mock = MockGateway::start().await;
+    mock.set_handler(
+        "respond",
+        MockAction::Delayed {
+            delay_ms: 200,
+            body: r#"{"accepted":true}"#,
+        },
+    )
+    .await;
+    let client = WireClient::attach(mock.port()).unwrap();
+    let mut app = approval_app(client);
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app, term)
+    });
+    // Answer twice back-to-back: the sending guard drops the second.
+    tx.send(AppEvent::Key(key(KeyCode::Char('y')))).expect("y");
+    tx.send(AppEvent::Key(key(KeyCode::Char('y'))))
+        .expect("y dup");
+    // A mux frame arrives while the respond is still in flight (200ms).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tx.send(AppEvent::Frame(frame(
+        "s1",
+        ev(1, "user/message", user_msg("m1", "hi")),
+    )))
+    .expect("frame");
+    // Quit before the respond completes (~100ms < 200ms).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
+        .expect("quit");
+    let (result, app, _term) = run_task.await.expect("run task");
+    result.expect("run");
+
+    // The frame was ingested while the respond was in flight — the loop
+    // never stalled on the POST.
+    assert_eq!(
+        app.store
+            .session(&SessionId("s1".into()))
+            .expect("session")
+            .last_seq,
+        1,
+        "mux frame processed while the respond was in flight"
+    );
+    // Still in the takeover at quit time (the AnswerDone had not landed).
+    assert!(matches!(app.mode, Mode::Approval(_)));
+    // Exactly one respond POST: the sending guard ignored the second y.
+    assert_eq!(
+        mock.respond_rpc_ids().await.len(),
+        1,
+        "one respond in flight"
+    );
+
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn prompt_error_surfaces_toast() {
+    let mock = MockGateway::start().await;
+    mock.set_handler(
+        "session.prompt",
+        MockAction::Ok(
+            r#"{"type":"server-response","rpcId":"{rpcId}","result":{"ok":false,"error":{"code":"internal","message":"boom","details":{}}}}"#,
+        ),
+    )
+    .await;
+    let client = WireClient::attach(mock.port()).unwrap();
+    let mut app = App::default();
+    app.client = Some(client);
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Composer;
+    for ch in "hello".chars() {
+        app.composer.insert_char(ch);
+    }
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app, term)
+    });
+    tx.send(AppEvent::Key(key(KeyCode::Enter))).expect("submit");
+    // Let the spawned prompt round-trip and its PromptDone land.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
+        .expect("quit");
+    let (result, mut app, _term) = run_task.await.expect("run task");
+    result.expect("run");
+
+    assert!(
+        app.toast_text()
+            .is_some_and(|text| text.contains("prompt failed") && text.contains("boom")),
+        "error toast: {:?}",
+        app.toast_text()
+    );
+    assert_eq!(
+        app.composer.take(),
+        "",
+        "composer buffer consumed by the submit"
+    );
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn answer_failure_keeps_takeover_and_retry_succeeds() {
+    let mock = MockGateway::start().await;
+    // First attempt: the host does not accept the answer.
+    mock.set_handler(
+        "respond",
+        MockAction::Ok(r#"{"accepted":false,"reason":"not-pending"}"#),
+    )
+    .await;
+    let client = WireClient::attach(mock.port()).unwrap();
+    let mut app = approval_app(client);
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app, term)
+    });
+    tx.send(AppEvent::Key(key(KeyCode::Char('y')))).expect("y");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
+        .expect("quit");
+    let (result, mut app, mut term) = run_task.await.expect("run task");
+    result.expect("run");
+
+    // Failure: toast, STAY in the takeover, sending re-armed.
+    assert!(
+        matches!(app.mode, Mode::Approval(_)),
+        "failure keeps the takeover"
+    );
+    assert!(
+        app.toast_text()
+            .is_some_and(|text| text.contains("answer failed") && text.contains("not pending")),
+        "failure toast: {:?}",
+        app.toast_text()
+    );
+    assert!(
+        matches!(&app.mode, Mode::Approval(t) if !t.sending),
+        "sending re-armed"
+    );
+
+    // Retry against a healthy handler: the second y succeeds.
+    mock.set_handler("respond", MockAction::Ok(r#"{"accepted":true}"#))
+        .await;
+    app.running = true;
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app, term)
+    });
+    tx.send(AppEvent::Key(key(KeyCode::Char('y'))))
+        .expect("y retry");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
+        .expect("quit");
+    let (result, app, _term) = run_task.await.expect("run task");
+    result.expect("run");
+
+    assert!(matches!(app.mode, Mode::Chat), "retry succeeds → chat");
+    assert_eq!(
+        mock.respond_rpc_ids().await.len(),
+        2,
+        "two respond POSTs total"
+    );
+    mock.stop().await;
 }

@@ -10,9 +10,11 @@
 use crossterm::event::KeyEvent;
 use tokio::sync::mpsc;
 
-use crate::client::DownlinkFrame;
+use crate::client::{ClientError, DownlinkFrame};
+use crate::wire::approvals::ApprovalRequestId;
 use crate::wire::events::MuxFrame;
-use crate::wire::rpc::RpcId;
+use crate::wire::rpc::{RpcId, RpcReceipt};
+use crate::wire::session::SessionPromptValue;
 
 /// One event for the main loop.
 #[derive(Debug)]
@@ -26,8 +28,51 @@ pub enum AppEvent {
         rpc_id: RpcId,
         frame: MuxFrame,
     },
+    /// The spawned answer task finished: correlate back to the open takeover
+    /// via the tag.
+    AnswerDone {
+        tag: AnswerTag,
+        result: Result<RpcReceipt, ClientError>,
+    },
+    /// The spawned `session.prompt` task finished.
+    PromptDone {
+        result: Result<SessionPromptValue, ClientError>,
+    },
     Resize(u16, u16),
     Tick,
+}
+
+/// Correlates a finished answer task back to the takeover that spawned it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AnswerTag {
+    Approval {
+        approval_id: ApprovalRequestId,
+        /// The outcome the user chose — the success toast echoes it
+        /// ("allowed once" / "rejected").
+        outcome: crate::wire::approvals::ApprovalResponseOutcome,
+    },
+    /// The question frame's envelope rpcId (the echo target).
+    Question(RpcId),
+}
+
+/// The app event channel: the run loop owns the `rx` end; spawned
+/// back-channel tasks (answers, prompts) hold `tx` clones.
+pub struct EventChannel {
+    pub tx: mpsc::UnboundedSender<AppEvent>,
+    pub rx: mpsc::UnboundedReceiver<AppEvent>,
+}
+
+impl EventChannel {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        EventChannel { tx, rx }
+    }
+}
+
+impl Default for EventChannel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Whether a mux frame is answerable (its envelope rpcId is the respond echo

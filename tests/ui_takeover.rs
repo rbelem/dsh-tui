@@ -2,6 +2,8 @@
 //! toasts, and the respond echo flow against the mock gateway. Keyless:
 //! injected events + `TestBackend` only.
 
+use std::time::Duration;
+
 mod common;
 use common::{MockAction, MockGateway};
 
@@ -9,9 +11,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::json;
-use tokio::sync::mpsc;
 
-use dsh_tui::app::{App, AppEvent};
+use dsh_tui::app::{App, AppEvent, EventChannel};
 use dsh_tui::client::WireClient;
 use dsh_tui::ui::takeover::Mode;
 use dsh_tui::wire::approvals::ApprovalRequestId;
@@ -54,11 +55,39 @@ fn question_requested(questions: serde_json::Value) -> MuxFrame {
 /// (the quit event breaks it). During a takeover `q` is inert — quit via
 /// Ctrl+C.
 async fn run_with(app: &mut App, term: &mut Terminal<TestBackend>, events: Vec<AppEvent>) {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut channel = EventChannel::new();
+    for event in events {
+        channel.tx.send(event).expect("event channel");
+    }
+    app.run(term, &mut channel)
+        .await
+        .expect("run must not fail");
+}
+
+/// End-to-end answer flow: inject events, let the spawned respond land its
+/// AnswerDone, then quit (Ctrl+C) and return the app + terminal for
+/// assertions.
+async fn run_answer_flow(
+    mut app: App,
+    mut term: Terminal<TestBackend>,
+    events: Vec<AppEvent>,
+    settle: Duration,
+) -> (App, Terminal<TestBackend>) {
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app, term)
+    });
     for event in events {
         tx.send(event).expect("event channel");
     }
-    app.run(term, &mut rx).await.expect("run must not fail");
+    tokio::time::sleep(settle).await;
+    tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
+        .expect("quit");
+    let (result, app, term) = run_task.await.expect("run task");
+    result.expect("run must not fail");
+    (app, term)
 }
 
 // ---------------------------------------------------------------------------
@@ -220,22 +249,22 @@ async fn approval_answer_echoes_rpc_id_and_resolves() {
     app.active_session = Some(SessionId("s1".into()));
     let backend = TestBackend::new(120, 30);
     let mut term = Terminal::new(backend).unwrap();
-    run_with(
-        &mut app,
-        &mut term,
+    // The answer spawns; the settle lets the AnswerDone land before quitting.
+    (app, term) = run_answer_flow(
+        app,
+        term,
         vec![
             AppEvent::Answerable {
                 rpc_id: RpcId("rpc-approval-9".into()),
                 frame: approval_requested("a9", "bash", None),
             },
             AppEvent::Key(key(KeyCode::Char('y'))),
-            AppEvent::Key(ctrl(KeyCode::Char('c'))),
         ],
+        Duration::from_millis(150),
     )
     .await;
 
-    // Optimistic: answered, back to chat, toast set — before any resolved
-    // frame arrives.
+    // Answered via the back-channel: back to chat, toast set.
     assert!(matches!(app.mode, Mode::Chat), "answered → chat");
     assert!(app.pending_approvals.is_empty());
     assert_eq!(app.toast_text(), Some("allowed once"));
@@ -287,18 +316,18 @@ async fn approval_reject_posts_rejected_outcome() {
     let mut app = App::default();
     app.client = Some(WireClient::attach(mock.port()).unwrap());
     let backend = TestBackend::new(120, 30);
-    let mut term = Terminal::new(backend).unwrap();
-    run_with(
-        &mut app,
-        &mut term,
+    let term = Terminal::new(backend).unwrap();
+    let (app, _term) = run_answer_flow(
+        app,
+        term,
         vec![
             AppEvent::Answerable {
                 rpc_id: RpcId("rpc-approval-10".into()),
                 frame: approval_requested("a10", "write_file", None),
             },
             AppEvent::Key(key(KeyCode::Char('n'))),
-            AppEvent::Key(ctrl(KeyCode::Char('c'))),
         ],
+        Duration::from_millis(150),
     )
     .await;
 
@@ -362,10 +391,10 @@ async fn question_submit_posts_all_answers() {
     let mut app = App::default();
     app.client = Some(WireClient::attach(mock.port()).unwrap());
     let backend = TestBackend::new(120, 30);
-    let mut term = Terminal::new(backend).unwrap();
-    run_with(
-        &mut app,
-        &mut term,
+    let term = Terminal::new(backend).unwrap();
+    let (app, _term) = run_answer_flow(
+        app,
+        term,
         vec![
             AppEvent::Answerable {
                 rpc_id: RpcId("rpc-question-9".into()),
@@ -391,8 +420,8 @@ async fn question_submit_posts_all_answers() {
             AppEvent::Key(key(KeyCode::Tab)),
             AppEvent::Key(key(KeyCode::Char('j'))),
             AppEvent::Key(key(KeyCode::Enter)),
-            AppEvent::Key(ctrl(KeyCode::Char('c'))),
         ],
+        Duration::from_millis(150),
     )
     .await;
 

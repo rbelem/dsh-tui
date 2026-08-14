@@ -3,9 +3,7 @@
 //! Pure client (ticket 06 Q8): attach via `DSH_PORT` to a RUNNING gateway —
 //! never boots anything.
 
-use tokio::sync::mpsc;
-
-use dsh_tui::app::{App, AppError, attach, event, run};
+use dsh_tui::app::{App, AppError, EventChannel, attach, event, run};
 use dsh_tui::client::WireClient;
 
 fn main() -> Result<(), AppError> {
@@ -37,8 +35,8 @@ async fn run_app(client: WireClient) -> Result<(), AppError> {
     let mut terminal = run::setup_terminal()?;
     let _guard = run::TerminalGuard;
 
-    let (tx, mut events) = mpsc::unbounded_channel();
-    event::spawn_input_bridge(tx.clone());
-    event::spawn_frame_bridge(client.mux_stream(), tx);
+    let mut events = EventChannel::new();
+    event::spawn_input_bridge(events.tx.clone());
+    event::spawn_frame_bridge(client.mux_stream(), events.tx.clone());
     app.run(&mut terminal, &mut events).await
 }

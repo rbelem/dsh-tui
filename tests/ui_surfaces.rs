@@ -12,9 +12,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::json;
-use tokio::sync::mpsc;
 
-use dsh_tui::app::{Action, App, AppEvent, Focus};
+use dsh_tui::app::{Action, App, AppEvent, EventChannel, Focus};
 use dsh_tui::client::WireClient;
 use dsh_tui::wire::events::MuxFrame;
 use dsh_tui::wire::session::{SessionEvent, SessionId, SessionSummary};
@@ -78,11 +77,13 @@ fn type_text(events: &mut Vec<AppEvent>, text: &str) {
 /// Feed buffered events into a fresh channel and run the loop to completion
 /// (the quit event breaks it).
 async fn run_with(app: &mut App, term: &mut Terminal<TestBackend>, events: Vec<AppEvent>) {
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut channel = EventChannel::new();
     for event in events {
-        tx.send(event).expect("event channel");
+        channel.tx.send(event).expect("event channel");
     }
-    app.run(term, &mut rx).await.expect("run must not fail");
+    app.run(term, &mut channel)
+        .await
+        .expect("run must not fail");
 }
 
 /// Draw the current state (Esc forces an immediate draw) and quit. In the
