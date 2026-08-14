@@ -276,6 +276,16 @@ pub struct App {
     pending_seq: u64,
     /// The app mode: chat, or a full-screen approval/question takeover (Q6).
     pub mode: Mode,
+    /// The detected graphics protocol tier (env-based, resolved once at
+    /// startup by [`App::init_images`]; `None` in `Default` so keyless tests
+    /// stay terminal-agnostic — protocol paths degrade to the placeholder).
+    pub image_protocol: crate::render::image::ImageProtocol,
+    /// The ratatui-image picker built from the detected protocol (font size
+    /// is the assumed 10×20 — no terminal query in v1).
+    pub image_picker: Option<ratatui_image::picker::Picker>,
+    /// Decoded image bytes by attachment id (empty in v1: the
+    /// `session.attachment` fetch is a later lane — render::image docs).
+    pub image_cache: crate::render::image::ImageCache,
     /// One-line transient notice (answer confirmations, remote resolutions),
     /// shown in the status line and inside takeovers. Cleared on the first
     /// tick at least [`TOAST_TTL`] after it was set; a new toast replaces
@@ -321,6 +331,9 @@ impl Default for App {
             pending_questions: HashMap::new(),
             pending_seq: 0,
             mode: Mode::Chat,
+            image_protocol: crate::render::image::ImageProtocol::None,
+            image_picker: None,
+            image_cache: crate::render::image::ImageCache::default(),
             toast: None,
             hint: None,
             needs_draw: false,
@@ -331,6 +344,14 @@ impl Default for App {
 }
 
 impl App {
+    /// Startup image-pipeline resolution: detect the protocol tier from the
+    /// environment (cached once here — see render::image docs) and build the
+    /// picker. Called from `main` only; tests keep the `None` default.
+    pub fn init_images(&mut self) {
+        self.image_protocol = crate::render::image::detect_protocol();
+        self.image_picker = crate::render::image::picker_for(self.image_protocol);
+    }
+
     /// Record an answerable frame (`approval/requested`, `question/requested`)
     /// with its envelope rpcId, and open its takeover. A new approval takes
     /// the takeover immediately (newest wins); a question takes it only when
@@ -1062,9 +1083,18 @@ impl App {
     /// response). Question: `Tab` cycles questions, `Up`/`Down`/`j`/`k`
     /// move the cursor, `Space` toggles (multi-select), `Enter` submits all
     /// answers; `Esc` is a no-op with a hint (no cancel in v1 — the server
-    /// resolves eventually).
+    /// resolves eventually). Image viewer: `n`/`p` cycle, `t` fit/actual,
+    /// `Esc`/`q` close (see ui::image_viewer).
     fn handle_takeover_key(&mut self, key: KeyEvent) -> Action {
         use crossterm::event::KeyCode;
+        // The viewer's close keys end the mode (needs `self.mode`, so this
+        // arm can't bind the viewer like the arms below).
+        if matches!(&self.mode, Mode::Image(_))
+            && matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+        {
+            self.mode = Mode::Chat;
+            return Action::None;
+        }
         match &mut self.mode {
             Mode::Approval(takeover) => {
                 if takeover.sending {
@@ -1113,6 +1143,21 @@ impl App {
                 _ => Action::None,
             },
             Mode::Settings(_) => self.handle_settings_key(key),
+            Mode::Image(viewer) => match key.code {
+                KeyCode::Char('n') => {
+                    viewer.next();
+                    Action::None
+                }
+                KeyCode::Char('p') => {
+                    viewer.prev();
+                    Action::None
+                }
+                KeyCode::Char('t') => {
+                    viewer.toggle_fit();
+                    Action::None
+                }
+                _ => Action::None,
+            },
             Mode::Chat => Action::None,
         }
     }
@@ -1269,12 +1314,14 @@ impl App {
 
     /// Chat bindings: `q` quits; `j`/`Down` +1 row; `k`/`Up` -1 row;
     /// `g`/`Home` top; `G`/`End` bottom (follow on); `Ctrl+d`/`Ctrl+u`
-    /// half page; `Esc` no-op.
+    /// half page; `v` opens the image viewer on the session's images;
+    /// `Esc` no-op.
     fn handle_chat_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') => Some(Action::Quit),
+            KeyCode::Char('v') => Some(self.open_image_viewer()),
             KeyCode::Char('j') | KeyCode::Down => {
                 self.scroll(1);
                 Some(Action::Scroll(1))
@@ -1450,6 +1497,44 @@ impl App {
         Action::SwitchSession(session_id)
     }
 
+    /// `v` in the chat: open the image viewer on the active session's image
+    /// blocks (display order; `n`/`p` cycle with wrap-around). The chat has
+    /// no per-row focus, so the viewer starts at the first image-bearing row
+    /// at/after the viewport top, else the last image in the session. No
+    /// images (or no session): a status hint, no mode change.
+    fn open_image_viewer(&mut self) -> Action {
+        let Some(session_id) = self.active_session.clone() else {
+            self.hint = Some(crate::i18n::tr(self.locale, "hint.no_images").into());
+            return Action::None;
+        };
+        let by_node = session_image_blocks(&self.store, &session_id);
+        let total: usize = by_node.iter().map(|(_, images)| images.len()).sum();
+        if total == 0 {
+            self.hint = Some(crate::i18n::tr(self.locale, "hint.no_images").into());
+            return Action::None;
+        }
+        // Node key → the ordinal of its first image in the flat cycle list.
+        let mut base = 0usize;
+        let mut starts: HashMap<&str, usize> = HashMap::new();
+        for (key, images) in &by_node {
+            starts.insert(key.as_str(), base);
+            base += images.len();
+        }
+        let rows = self.row_cache.lines();
+        let mut start = if rows.is_empty() { 0 } else { total - 1 };
+        for row in rows.iter().skip(self.view.offset.min(rows.len())) {
+            if let Some(first) = starts.get(row.node_key.as_str()) {
+                start = *first;
+                break;
+            }
+        }
+        let images = by_node.into_iter().flat_map(|(_, images)| images).collect();
+        self.mode = Mode::Image(crate::ui::image_viewer::ImageViewer::new(
+            session_id, images, start,
+        ));
+        Action::None
+    }
+
     /// Whether the active session has a turn in flight: the summary's
     /// `running` flag, or the node fold — the last node is an assistant or
     /// tool node that has neither finalized nor been interrupted.
@@ -1494,6 +1579,50 @@ impl App {
                 .saturating_sub(delta.unsigned_abs() as usize);
         }
     }
+}
+
+/// The session's image blocks in display order, grouped by node: user
+/// message content and tool-result content carry images (nested tool results
+/// recurse). Drives the viewer's `n`/`p` cycle list.
+fn session_image_blocks(
+    store: &SessionStore,
+    session_id: &SessionId,
+) -> Vec<(String, Vec<crate::wire::session::ImageAttachmentRef>)> {
+    fn collect(
+        blocks: &[crate::store::event_data::ContentBlock],
+        out: &mut Vec<crate::wire::session::ImageAttachmentRef>,
+    ) {
+        for block in blocks {
+            match block {
+                crate::store::event_data::ContentBlock::Image { attachment } => {
+                    out.push(attachment.clone());
+                }
+                crate::store::event_data::ContentBlock::ToolResult { content, .. } => {
+                    collect(content, out);
+                }
+                _ => {}
+            }
+        }
+    }
+    let Some(state) = store.session(session_id) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for node in &state.nodes {
+        let mut images = Vec::new();
+        match &node.data {
+            NodeData::User { content, .. } => collect(content, &mut images),
+            NodeData::Tool {
+                result: Some(result_node),
+                ..
+            } => collect(&result_node.content, &mut images),
+            _ => {}
+        }
+        if !images.is_empty() {
+            result.push((node.key.clone(), images));
+        }
+    }
+    result
 }
 
 /// Coalesced draw interval (Q3).

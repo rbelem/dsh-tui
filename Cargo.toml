@@ -15,6 +15,15 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 ratatui = "0.30"
+# ratatui-image 11.x is the ratatui 0.30-compatible line (its crossterm dep is
+# dev-only; image-defaults adds jpeg/webp/gif decode next to png — the four
+# media types of the wire's imageMediaTypeSchema). default-features = false
+# drops chafa-dyn (would need system libchafa via pkg-config); the crossterm
+# backend feature comes from our own ratatui dep.
+ratatui-image = { version = "11.0.6", default-features = false, features = ["image-defaults"] }
+# Same 0.25 line ratatui-image pins, so DynamicImage types unify; the four
+# wire media types (png/jpeg/webp/gif).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 pulldown-cmark = "0.13"
 # regex-fancy: syntect 5.3 needs a regex backend (regex-onig would drag in a
 # C build; fancy-regex is pure Rust).

@@ -247,7 +247,10 @@ impl App {
         if !matches!(self.mode, Mode::Chat) {
             term.draw(|frame| {
                 let area = frame.area();
-                let notice = self.current_notice();
+                // Owned: the viewer arm borrows `self.image_cache` mutably,
+                // which an Option<&str> into self.toast/hint would conflict.
+                let notice = self.current_notice().map(str::to_string);
+                let notice = notice.as_deref();
                 match &self.mode {
                     Mode::Approval(takeover) => frame.render_widget(
                         ApprovalView {
@@ -270,6 +273,17 @@ impl App {
                     Mode::Settings(state) => frame.render_widget(
                         crate::ui::settings::SettingsView {
                             state,
+                            notice,
+                            theme: &self.theme,
+                            locale: self.locale,
+                        },
+                        area,
+                    ),
+                    Mode::Image(viewer) => frame.render_widget(
+                        crate::ui::image_viewer::ImageViewerView {
+                            viewer,
+                            images: &mut self.image_cache,
+                            protocol: self.image_protocol,
                             notice,
                             theme: &self.theme,
                             locale: self.locale,
@@ -334,10 +348,22 @@ impl App {
         self.sidebar.clamp(self.sessions.len());
         let session_id = self.active_session.clone();
         if let Some(session_id) = &session_id {
-            self.row_cache
-                .sync(&self.store, session_id, width, &self.theme, self.locale);
-            self.row_cache
-                .render_dirty(&self.store, session_id, width, &self.theme, self.locale);
+            self.row_cache.sync(
+                &self.store,
+                session_id,
+                width,
+                &self.theme,
+                self.locale,
+                &self.image_cache,
+            );
+            self.row_cache.render_dirty(
+                &self.store,
+                session_id,
+                width,
+                &self.theme,
+                self.locale,
+                &self.image_cache,
+            );
             if self.view.follow {
                 let total = self.row_cache.lines().len();
                 self.view.offset = total.saturating_sub(chat_height as usize);
@@ -401,6 +427,7 @@ impl App {
                         session_id,
                         offset,
                         row_cache: &mut self.row_cache,
+                        images: &mut self.image_cache,
                     },
                     chat_area,
                 );

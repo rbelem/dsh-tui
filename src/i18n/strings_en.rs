@@ -26,6 +26,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("focus.sidebar", "sidebar"),
     ("hint.loading_history", "loading history…"),
     ("hint.no_cancel", "can't cancel yet — answer or wait"),
+    ("hint.no_images", "no images in this session"),
     ("hint.not_a_number", "not a number"),
     ("hint.nothing_to_save", "nothing to save"),
     ("hint.queue_empty", "queue is empty"),
@@ -152,4 +153,18 @@ pub const STRINGS: &[(&str, &str)] = &[
         "closed settings — unsaved changes discarded",
     ),
     ("toast.settings_failed", "settings failed: {0}"),
+    ("viewer.action_close", " close"),
+    ("viewer.action_fit", " fit/actual · "),
+    ("viewer.action_next", " next · "),
+    ("viewer.action_prev", " prev · "),
+    ("viewer.meta", "{0}×{1} · {2} · {3}"),
+    (
+        "viewer.no_bytes",
+        "image data not loaded — showing placeholder",
+    ),
+    (
+        "viewer.no_protocol",
+        "no graphics protocol detected — showing placeholder",
+    ),
+    ("viewer.title", " image {0}/{1} · {2} "),
 ];

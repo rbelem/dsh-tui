@@ -11,7 +11,7 @@ use ratatui::backend::TestBackend;
 use serde_json::json;
 
 use dsh_tui::i18n::Locale;
-use dsh_tui::render::{ChatView, RowCache, render_markdown};
+use dsh_tui::render::{ChatView, ImageCache, RowCache, render_markdown};
 use dsh_tui::store::SessionStore;
 use dsh_tui::store::node::{FoldState, NodeData};
 use dsh_tui::theme::Theme;
@@ -224,8 +224,22 @@ fn render_snapshot(
     height: u16,
     offset: usize,
 ) -> String {
-    cache.sync(store, &sid(), width, &Theme::default(), Locale::En);
-    cache.render_dirty(store, &sid(), width, &Theme::default(), Locale::En);
+    cache.sync(
+        store,
+        &sid(),
+        width,
+        &Theme::default(),
+        Locale::En,
+        &ImageCache::default(),
+    );
+    cache.render_dirty(
+        store,
+        &sid(),
+        width,
+        &Theme::default(),
+        Locale::En,
+        &ImageCache::default(),
+    );
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
     terminal
@@ -236,6 +250,7 @@ fn render_snapshot(
                     session_id: &sid(),
                     offset,
                     row_cache: cache,
+                    images: &mut ImageCache::default(),
                 },
                 frame.area(),
             );
@@ -297,11 +312,25 @@ fn streaming_chunk_marks_dirty_and_rerenders() {
     );
     let mut cache = RowCache::new();
     assert!(
-        cache.sync(&store, &sid(), 120, &Theme::default(), Locale::En),
+        cache.sync(
+            &store,
+            &sid(),
+            120,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default()
+        ),
         "fresh sync renders everything"
     );
     assert!(
-        !cache.sync(&store, &sid(), 120, &Theme::default(), Locale::En),
+        !cache.sync(
+            &store,
+            &sid(),
+            120,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default()
+        ),
         "idle sync changes nothing"
     );
     assert!(cache.dirty().is_empty());
@@ -336,7 +365,14 @@ fn streaming_chunk_marks_dirty_and_rerenders() {
         ],
     );
     assert!(
-        cache.sync(&store, &sid(), 120, &Theme::default(), Locale::En),
+        cache.sync(
+            &store,
+            &sid(),
+            120,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default()
+        ),
         "changed node detected"
     );
     assert!(
@@ -413,9 +449,23 @@ fn row_cache_signature_change_detection() {
         ],
     );
     let mut cache = RowCache::new();
-    assert!(cache.sync(&store, &sid(), 120, &Theme::default(), Locale::En));
+    assert!(cache.sync(
+        &store,
+        &sid(),
+        120,
+        &Theme::default(),
+        Locale::En,
+        &ImageCache::default()
+    ));
     assert!(
-        !cache.sync(&store, &sid(), 120, &Theme::default(), Locale::En),
+        !cache.sync(
+            &store,
+            &sid(),
+            120,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default()
+        ),
         "no change → false"
     );
     assert!(cache.dirty().is_empty());
@@ -436,20 +486,48 @@ fn row_cache_signature_change_detection() {
         ))
         .unwrap();
     assert!(
-        cache.sync(&store, &sid(), 120, &Theme::default(), Locale::En),
+        cache.sync(
+            &store,
+            &sid(),
+            120,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default()
+        ),
         "changed node → true"
     );
     assert_eq!(cache.dirty().len(), 1);
     assert!(cache.dirty().contains("1:1"));
 
     // render_dirty consumes the set; the next sync is clean.
-    cache.render_dirty(&store, &sid(), 120, &Theme::default(), Locale::En);
+    cache.render_dirty(
+        &store,
+        &sid(),
+        120,
+        &Theme::default(),
+        Locale::En,
+        &ImageCache::default(),
+    );
     assert!(cache.dirty().is_empty());
-    assert!(!cache.sync(&store, &sid(), 120, &Theme::default(), Locale::En));
+    assert!(!cache.sync(
+        &store,
+        &sid(),
+        120,
+        &Theme::default(),
+        Locale::En,
+        &ImageCache::default()
+    ));
 
     // Fold state is part of the signature: collapsing marks the node dirty.
     store.set_fold(&sid(), "1:1", FoldState::collapsed());
-    assert!(cache.sync(&store, &sid(), 120, &Theme::default(), Locale::En));
+    assert!(cache.sync(
+        &store,
+        &sid(),
+        120,
+        &Theme::default(),
+        Locale::En,
+        &ImageCache::default()
+    ));
     assert!(cache.dirty().contains("1:1"));
 }
 
@@ -482,13 +560,27 @@ fn row_cache_width_change_invalidates_all() {
         ],
     );
     let mut cache = RowCache::new();
-    cache.sync(&store, &sid(), 120, &Theme::default(), Locale::En);
+    cache.sync(
+        &store,
+        &sid(),
+        120,
+        &Theme::default(),
+        Locale::En,
+        &ImageCache::default(),
+    );
     let rows_at_120 = cache.lines().len();
     let first_lines_at_120 = cache.lines()[0].lines.len();
 
     // Narrower width: everything re-renders, the long paragraph wraps.
     assert!(
-        cache.sync(&store, &sid(), 40, &Theme::default(), Locale::En),
+        cache.sync(
+            &store,
+            &sid(),
+            40,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default()
+        ),
         "width change → re-render"
     );
     assert_eq!(cache.lines().len(), rows_at_120, "same node count");
@@ -497,7 +589,14 @@ fn row_cache_width_change_invalidates_all() {
         "narrow width wraps the long paragraph"
     );
     // Idle at the new width.
-    assert!(!cache.sync(&store, &sid(), 40, &Theme::default(), Locale::En));
+    assert!(!cache.sync(
+        &store,
+        &sid(),
+        40,
+        &Theme::default(),
+        Locale::En,
+        &ImageCache::default()
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -569,7 +668,14 @@ fn markdown_cjk_renders_and_wraps_by_width() {
         ))
         .unwrap();
     let mut cache = RowCache::new();
-    cache.sync(&store, &sid(), 8, &Theme::default(), Locale::En);
+    cache.sync(
+        &store,
+        &sid(),
+        8,
+        &Theme::default(),
+        Locale::En,
+        &ImageCache::default(),
+    );
     assert!(
         cache.lines()[0].lines.len() >= 2,
         "CJK text wraps at width 8"

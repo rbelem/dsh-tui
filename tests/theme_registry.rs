@@ -11,7 +11,7 @@ use serde_json::json;
 
 use dsh_tui::app::{Action, App};
 use dsh_tui::i18n::Locale;
-use dsh_tui::render::{ChatView, RowCache};
+use dsh_tui::render::{ChatView, ImageCache, RowCache};
 use dsh_tui::store::SessionStore;
 use dsh_tui::theme::{
     Config, Theme, ThemeError, ThemePopup, ThemeRegistry, bundled, terminal_supports_color,
@@ -68,8 +68,22 @@ fn store_with_code_fence() -> SessionStore {
 fn render_with_theme(theme: &Theme, width: u16, height: u16) -> String {
     let store = store_with_code_fence();
     let mut cache = RowCache::new();
-    cache.sync(&store, &SessionId("s1".into()), width, theme, Locale::En);
-    cache.render_dirty(&store, &SessionId("s1".into()), width, theme, Locale::En);
+    cache.sync(
+        &store,
+        &SessionId("s1".into()),
+        width,
+        theme,
+        Locale::En,
+        &ImageCache::default(),
+    );
+    cache.render_dirty(
+        &store,
+        &SessionId("s1".into()),
+        width,
+        theme,
+        Locale::En,
+        &ImageCache::default(),
+    );
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
     terminal
@@ -80,6 +94,7 @@ fn render_with_theme(theme: &Theme, width: u16, height: u16) -> String {
                     session_id: &SessionId("s1".into()),
                     offset: 0,
                     row_cache: &mut cache,
+                    images: &mut ImageCache::default(),
                 },
                 f.area(),
             );
@@ -223,8 +238,22 @@ fn theme_colors_reach_rendered_cells() {
     let mocha = Theme::from_toml_str(include_str!("../themes/catppuccin-mocha.toml")).unwrap();
     let store = store_with_code_fence();
     let mut cache = RowCache::new();
-    cache.sync(&store, &SessionId("s1".into()), 120, &mocha, Locale::En);
-    cache.render_dirty(&store, &SessionId("s1".into()), 120, &mocha, Locale::En);
+    cache.sync(
+        &store,
+        &SessionId("s1".into()),
+        120,
+        &mocha,
+        Locale::En,
+        &ImageCache::default(),
+    );
+    cache.render_dirty(
+        &store,
+        &SessionId("s1".into()),
+        120,
+        &mocha,
+        Locale::En,
+        &ImageCache::default(),
+    );
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
@@ -235,6 +264,7 @@ fn theme_colors_reach_rendered_cells() {
                     session_id: &SessionId("s1".into()),
                     offset: 0,
                     row_cache: &mut cache,
+                    images: &mut ImageCache::default(),
                 },
                 f.area(),
             );

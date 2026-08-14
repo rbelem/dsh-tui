@@ -6,11 +6,13 @@
 //! (idle nodes cached, dirty nodes re-parsed).
 //!
 //! Markdown surface: CommonMark + tables + strikethrough via pulldown-cmark,
-//! syntect-highlighted code fences, `[image]` placeholders (ratatui-image
-//! lands in a later lane). Semantic styling only — no hardcoded colors:
-//! dim/bold/italic/crossed-out/reversed modifiers; colors come from the theme
-//! registry lane later. Code fences are the one sanctioned color source
-//! (syntect's fixed default theme).
+//! syntect-highlighted code fences, `[image]` placeholder captions that
+//! upgrade to inline images when the [`crate::render::image`] pipeline has
+//! decoded bytes for the attachment ([`render_node_full`] reports the filler
+//! segments; v1 has no fetch path, so captions are what renders). Semantic
+//! styling only — no hardcoded colors: dim/bold/italic/crossed-out/reversed
+//! modifiers; colors come from the theme registry lane later. Code fences
+//! are the one sanctioned color source (syntect's fixed default theme).
 
 use std::sync::OnceLock;
 
@@ -22,6 +24,7 @@ use syntect::parsing::SyntaxSet;
 use unicode_width::UnicodeWidthStr;
 
 use crate::i18n::{Locale, tr, trf};
+use crate::render::image::{ImageCache, ImageRow};
 use crate::store::event_data::ContentBlock;
 use crate::store::node::{AssistantBlock, ChatNode, NodeData, UserNodeKind};
 use crate::theme::Theme;
@@ -31,19 +34,62 @@ const CODE_MODIFIER: Modifier = Modifier::REVERSED;
 /// Maximum width of a tool-arguments preview on the call line.
 const ARGS_PREVIEW_MAX: usize = 100;
 
+/// [`render_node_full`] output: the display lines plus the inline-image
+/// segments. Segment `line_index` values are PRE-wrap indices into `lines`;
+/// the row cache re-bases them after wrapping (filler lines never split, so
+/// the re-base is exact).
+pub struct NodeRender {
+    pub lines: Vec<Line<'static>>,
+    pub images: Vec<ImageRow>,
+}
+
 /// Render one chat node to (unwrapped) display lines. `collapsed` is the
 /// node's fold state (Q11): collapsed tool nodes render a one-line summary.
 /// `theme` supplies the semantic colors (text/muted/error/warning/code);
 /// `locale` localizes the row markers.
+///
+/// Placeholder tier: image blocks always render their `[image: name]`
+/// caption (no image cache consulted). Byte-identical to the pre-image
+/// pipeline output.
 pub fn render_node(
     node: &ChatNode,
     collapsed: bool,
     theme: &Theme,
     locale: Locale,
 ) -> Vec<Line<'static>> {
+    render_node_full(node, collapsed, theme, locale, &ImageCache::default(), 0).lines
+}
+
+/// The inline-image context threaded through the node renderers: the byte
+/// cache plus the wrap width (the inline fit budget).
+struct InlinePlan<'a> {
+    cache: &'a ImageCache,
+    width: u16,
+}
+
+/// [`render_node`] with the image pipeline wired: an image block whose
+/// attachment has decoded bytes in `images` renders its caption followed by
+/// `rows` blank filler lines (the widget draws over them at draw time);
+/// anything else keeps the bare caption placeholder. `width` is the wrap
+/// width (the inline fit budget).
+pub fn render_node_full(
+    node: &ChatNode,
+    collapsed: bool,
+    theme: &Theme,
+    locale: Locale,
+    images: &ImageCache,
+    width: u16,
+) -> NodeRender {
     let notice = |text: String| Line::styled(text, Style::default().fg(theme.muted));
-    match &node.data {
-        NodeData::User { kind, content, .. } => render_user_node(*kind, content, theme, locale),
+    let plan = InlinePlan {
+        cache: images,
+        width,
+    };
+    let mut image_rows = Vec::new();
+    let lines = match &node.data {
+        NodeData::User { kind, content, .. } => {
+            render_user_node(*kind, content, theme, locale, &plan, &mut image_rows)
+        }
         NodeData::Assistant {
             blocks,
             interrupted,
@@ -58,9 +104,15 @@ pub fn render_node(
             }
             lines
         }
-        NodeData::Tool { call, result, .. } => {
-            render_tool_node(call.as_ref(), result.as_deref(), collapsed, theme, locale)
-        }
+        NodeData::Tool { call, result, .. } => render_tool_node(
+            call.as_ref(),
+            result.as_deref(),
+            collapsed,
+            theme,
+            locale,
+            &plan,
+            &mut image_rows,
+        ),
         NodeData::Compaction {
             shadowed_item_count,
             ..
@@ -86,6 +138,10 @@ pub fn render_node(
             )]
         }
         NodeData::Unknown { r#type, .. } => vec![notice(trf(locale, "marker.unknown", &[r#type]))],
+    };
+    NodeRender {
+        lines,
+        images: image_rows,
     }
 }
 
@@ -115,11 +171,13 @@ fn render_user_node(
     content: &[ContentBlock],
     theme: &Theme,
     locale: Locale,
+    plan: &InlinePlan<'_>,
+    image_rows: &mut Vec<ImageRow>,
 ) -> Vec<Line<'static>> {
     // The Steering distinction is a store TODO (v1 renders by source kind);
     // user and context rows render their content identically.
     let _ = kind;
-    render_content_blocks(content, theme, locale)
+    render_content_blocks(content, theme, locale, plan, image_rows)
 }
 
 fn render_assistant_blocks(
@@ -152,6 +210,8 @@ fn render_content_blocks(
     content: &[ContentBlock],
     theme: &Theme,
     locale: Locale,
+    plan: &InlinePlan<'_>,
+    image_rows: &mut Vec<ImageRow>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for block in content {
@@ -171,10 +231,25 @@ fn render_content_blocks(
                     .name
                     .as_deref()
                     .unwrap_or_else(|| tr(locale, "marker.image_default"));
+                // The caption is the placeholder tier AND the inline image's
+                // label — always emitted, byte-identical either way.
                 lines.push(Line::styled(
                     trf(locale, "marker.image", &[name]),
                     Style::default().fg(theme.muted),
                 ));
+                // Inline tier: decoded bytes in the cache → reserve `rows`
+                // blank filler lines below the caption; the draw loop paints
+                // the image widget over them. v1's cache is always empty
+                // (no session.attachment fetch — see render::image docs).
+                if let Some(loaded) = plan.cache.get(&attachment.attachment_id) {
+                    let rows = ImageCache::inline_rows(&loaded.source, plan.width);
+                    image_rows.push(ImageRow {
+                        line_index: lines.len(),
+                        attachment_id: attachment.attachment_id.clone(),
+                        rows,
+                    });
+                    lines.extend((0..rows).map(|_| Line::raw("")));
+                }
             }
             ContentBlock::ToolCall { name, .. } => {
                 lines.push(Line::styled(
@@ -211,6 +286,8 @@ fn render_tool_node(
     collapsed: bool,
     theme: &Theme,
     locale: Locale,
+    plan: &InlinePlan<'_>,
+    image_rows: &mut Vec<ImageRow>,
 ) -> Vec<Line<'static>> {
     let name = call
         .map(|c| c.name.as_str())
@@ -239,7 +316,13 @@ fn render_tool_node(
 
     let mut lines = vec![tool_call_line(name, args_raw, theme, locale)];
     if let Some(result) = result {
-        lines.extend(render_content_blocks(&result.content, theme, locale));
+        lines.extend(render_content_blocks(
+            &result.content,
+            theme,
+            locale,
+            plan,
+            image_rows,
+        ));
         if result.is_error {
             let code = result
                 .error

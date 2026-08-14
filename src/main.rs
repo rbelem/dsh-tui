@@ -25,6 +25,8 @@ fn main() -> Result<(), AppError> {
 async fn run_app(client: WireClient) -> Result<(), AppError> {
     let mut app = App::default();
     app.load_theme_config();
+    // Image protocol tier: env-detected once at startup (render::image docs).
+    app.init_images();
     // Locale resolution (increment 3): config wins, then DSH_TUI_LOCALE,
     // then LANG/LC_ALL (Locale::detect); persisted on Ctrl+L.
     app.locale = dsh_tui::i18n::Locale::detect(app.config.locale.as_deref());

@@ -18,7 +18,8 @@ use std::collections::HashSet;
 use ratatui::text::Line;
 
 use crate::i18n::Locale;
-use crate::render::markdown::render_node;
+use crate::render::image::{ImageCache, ImageRow};
+use crate::render::markdown::render_node_full;
 use crate::store::SessionStore;
 use crate::store::node::{ChatNode, NodeKey};
 use crate::theme::Theme;
@@ -30,8 +31,11 @@ pub struct CachedRow {
     pub node_key: NodeKey,
     pub anchor_seq: i64,
     /// Rendered lines for this node — may be more than one (wrapped/multi-line
-    /// markdown, code fences, tables).
+    /// markdown, code fences, tables). An inline image's filler lines are
+    /// blank here; the widget paints over them at draw time.
     pub lines: Vec<Line<'static>>,
+    /// Inline image segments (indices are post-wrap, into `lines`).
+    pub images: Vec<ImageRow>,
     /// Rendered-relevant state at render time (change detection).
     signature: u64,
 }
@@ -60,6 +64,11 @@ impl RowCache {
     ///
     /// Returns whether anything changed (the app shell uses this to decide
     /// whether to redraw).
+    ///
+    /// `images` is the decoded-image cache: an image block with cached bytes
+    /// gets filler lines + an [`ImageRow`] segment; otherwise the bare
+    /// caption placeholder (an empty cache renders exactly the placeholder
+    /// tier).
     pub fn sync(
         &mut self,
         store: &SessionStore,
@@ -67,6 +76,7 @@ impl RowCache {
         width: u16,
         theme: &Theme,
         locale: Locale,
+        images: &ImageCache,
     ) -> bool {
         let mut changed = false;
         let Some(state) = store.session(session_id) else {
@@ -99,10 +109,13 @@ impl RowCache {
                     reordered.push(row);
                 }
                 None => {
+                    let (lines, row_images) =
+                        render_row(node, collapsed, width, theme, locale, images);
                     reordered.push(CachedRow {
                         node_key: node.key.clone(),
                         anchor_seq: node.anchor_seq,
-                        lines: wrap_lines(render_node(node, collapsed, theme, locale), width),
+                        lines,
+                        images: row_images,
                         signature,
                     });
                     changed = true;
@@ -123,6 +136,7 @@ impl RowCache {
         width: u16,
         theme: &Theme,
         locale: Locale,
+        images: &ImageCache,
     ) {
         for key in self.dirty.drain() {
             let Some(state) = store.session(session_id) else {
@@ -132,9 +146,10 @@ impl RowCache {
                 continue;
             };
             let collapsed = store.fold_state(session_id, &key).collapsed;
-            let lines = wrap_lines(render_node(node, collapsed, theme, locale), width);
+            let (lines, row_images) = render_row(node, collapsed, width, theme, locale, images);
             if let Some(row) = self.rows.iter_mut().find(|row| row.node_key == key) {
                 row.lines = lines;
+                row.images = row_images;
             }
         }
     }
@@ -168,20 +183,57 @@ impl RowCache {
     }
 }
 
+/// Render one node and wrap at `width`, re-basing the image segments'
+/// pre-wrap line indices onto the wrapped line array (filler lines never
+/// split, so each marked input line maps to exactly one output index).
+fn render_row(
+    node: &ChatNode,
+    collapsed: bool,
+    width: u16,
+    theme: &Theme,
+    locale: Locale,
+    images: &ImageCache,
+) -> (Vec<Line<'static>>, Vec<ImageRow>) {
+    let render = render_node_full(node, collapsed, theme, locale, images, width);
+    let marks: Vec<usize> = render.images.iter().map(|seg| seg.line_index).collect();
+    let (lines, rebased) = wrap_lines_marked(render.lines, width, &marks);
+    let images = render
+        .images
+        .into_iter()
+        .zip(rebased)
+        .map(|(mut seg, base)| {
+            seg.line_index = base;
+            seg
+        })
+        .collect();
+    (lines, images)
+}
+
 /// Wrap each line at `width`, unicode-width-aware (ratatui 0.30 removed
 /// `Text::wrap`; the reflow machinery lives inside widget internals, so the
 /// cache hand-rolls the split). A single grapheme wider than the width is
-/// kept whole (the buffer truncates it visually).
-fn wrap_lines(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+/// kept whole (the buffer truncates it visually). `marks` are input line
+/// indices whose OUTPUT start indices are returned (in mark order).
+fn wrap_lines_marked(
+    lines: Vec<Line<'static>>,
+    width: u16,
+    marks: &[usize],
+) -> (Vec<Line<'static>>, Vec<usize>) {
     if width == 0 {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let width = width as usize;
     let mut wrapped = Vec::new();
-    for line in lines {
+    let mut rebased = Vec::with_capacity(marks.len());
+    let mut next_mark = marks.iter().peekable();
+    for (index, line) in lines.into_iter().enumerate() {
+        if next_mark.peek() == Some(&&index) {
+            rebased.push(wrapped.len());
+            next_mark.next();
+        }
         wrapped.extend(wrap_line(line, width));
     }
-    wrapped
+    (wrapped, rebased)
 }
 
 fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {

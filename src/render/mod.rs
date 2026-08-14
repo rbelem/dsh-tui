@@ -18,9 +18,11 @@
 //! (`TestBackend` in tests). The app shell comes in a later surface lane.
 
 pub mod chat_view;
+pub mod image;
 pub mod markdown;
 pub mod row_cache;
 
 pub use chat_view::ChatView;
+pub use image::{ImageCache, ImageProtocol, detect_protocol, picker_for};
 pub use markdown::{render_markdown, render_node};
 pub use row_cache::{CachedRow, RowCache};

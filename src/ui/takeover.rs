@@ -36,6 +36,8 @@ pub enum Mode {
     Question(QuestionTakeover),
     /// The two-pane settings view (Ctrl+, opens, Esc closes).
     Settings(crate::ui::settings::SettingsState),
+    /// The full-screen image viewer (`v` from the chat; Esc/q closes).
+    Image(crate::ui::image_viewer::ImageViewer),
 }
 
 /// The displayed approval: the `approval/requested` frame's fields plus the

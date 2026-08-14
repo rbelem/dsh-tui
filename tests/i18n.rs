@@ -9,7 +9,7 @@ use serde_json::json;
 
 use dsh_tui::app::{App, AppEvent, EventChannel};
 use dsh_tui::i18n::{Locale, tr, trf};
-use dsh_tui::render::{ChatView, RowCache};
+use dsh_tui::render::{ChatView, ImageCache, RowCache};
 use dsh_tui::store::SessionStore;
 use dsh_tui::theme::{Config, Theme};
 use dsh_tui::wire::events::MuxFrame;
@@ -252,6 +252,7 @@ async fn zh_markers_in_chat_content() {
         120,
         &Theme::default(),
         Locale::Zh,
+        &ImageCache::default(),
     );
     cache.render_dirty(
         &store,
@@ -259,6 +260,7 @@ async fn zh_markers_in_chat_content() {
         120,
         &Theme::default(),
         Locale::Zh,
+        &ImageCache::default(),
     );
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -270,6 +272,7 @@ async fn zh_markers_in_chat_content() {
                     session_id: &SessionId("s1".into()),
                     offset: 0,
                     row_cache: &mut cache,
+                    images: &mut ImageCache::default(),
                 },
                 f.area(),
             );
@@ -300,6 +303,7 @@ fn cjk_paragraph_wraps_by_width() {
         120,
         &Theme::default(),
         Locale::Zh,
+        &ImageCache::default(),
     );
     let wide = cache.lines()[0].lines.len();
     cache.sync(
@@ -308,6 +312,7 @@ fn cjk_paragraph_wraps_by_width() {
         40,
         &Theme::default(),
         Locale::Zh,
+        &ImageCache::default(),
     );
     let narrow = cache.lines()[0].lines.len();
     assert!(
