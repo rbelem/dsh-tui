@@ -50,6 +50,7 @@ pub mod questions;
 pub mod rpc;
 pub mod session;
 pub mod settings;
+pub mod skills;
 pub mod workspace;
 
 pub use approvals::*;
@@ -59,6 +60,7 @@ pub use questions::*;
 pub use rpc::*;
 pub use session::*;
 pub use settings::*;
+pub use skills::*;
 // Explicit (not a glob): workspace re-exports `WorkspaceId` from session, and
 // glob-importing the same item twice is fragile even when it resolves to the
 // same definition.

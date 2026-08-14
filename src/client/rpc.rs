@@ -27,6 +27,7 @@ use crate::wire::session::{
 use crate::wire::settings::{
     SettingsDescribeRequest, SettingsDescribeValue, SettingsUpdateRequest, SettingsWriteValue,
 };
+use crate::wire::skills::{SkillListRequest, SkillListValue};
 
 impl WireClient {
     /// `session.list` — the summary rows.
@@ -221,6 +222,13 @@ impl WireClient {
             },
         )
         .await
+    }
+
+    /// `skill.list` — the user-invocable skill catalog for the session's
+    /// project (the `@` menu's source; skills invoke via `session.prompt`).
+    pub async fn skill_list(&self, session_id: SessionId) -> Result<SkillListValue, ClientError> {
+        self.call("skill.list", SkillListRequest { session_id })
+            .await
     }
 
     /// Answer an `approval/requested` frame. `rpc_id` MUST echo the frame's

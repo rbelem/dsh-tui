@@ -18,7 +18,7 @@ use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 
 use crate::app::event::{AnswerTag, AppEvent, EventChannel, QueueActionKind};
-use crate::app::{Action, App, AppError, DRAW_INTERVAL, Focus};
+use crate::app::{Action, App, AppError, AtCatalog, DRAW_INTERVAL, Focus};
 use crate::client::ClientError;
 use crate::render::chat_view::ChatView;
 use crate::theme::Theme;
@@ -35,6 +35,7 @@ use crate::wire::session::{
     PromptContentPart, PromptMode, SessionHistoryValue, SessionId, SessionUpdateQueueValue,
     UpdateQueueAction,
 };
+use crate::wire::skills::SkillListValue;
 
 impl App {
     /// The main loop. Events arrive over one channel; a 16ms interval drives
@@ -108,6 +109,9 @@ impl App {
                                         event_tx.clone(),
                                     )
                                 }
+                                Some(Action::RequestCatalog) => {
+                                    self.request_catalog(event_tx.clone())
+                                }
                                 _ => {}
                             }
                             self.needs_draw = true;
@@ -144,6 +148,11 @@ impl App {
                         }
                         Some(AppEvent::QueueActionDone { kind, result }) => {
                             self.on_queue_action_done(kind, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::CatalogLoaded { result }) => {
+                            self.on_catalog_loaded(result);
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
@@ -345,6 +354,13 @@ impl App {
             .map(|queue| queue.items.as_slice())
             .unwrap_or(&[]);
 
+        // Computed before the draw closure: a `self` method call inside
+        // would borrow all of `self` while the closure holds `row_cache`.
+        let popup_kind = self.composer.popup();
+        let popup_entries = self.popup_entries();
+        let popup_loading = matches!(self.at_catalog, Some(AtCatalog { loading: true, .. }));
+        let popup_selected = self.composer.popup_selected();
+
         term.draw(|frame| {
             if sidebar_width > 0 {
                 frame.render_widget(
@@ -451,20 +467,24 @@ impl App {
                 }
             }
 
-            // The seed popup floats above the composer.
-            if let Some(kind) = self.composer.popup() {
+            // The seed popup floats above the composer, fed by the app's
+            // entry list (commands mirror / cached skills).
+            if let Some(kind) = popup_kind {
                 let popup = SeedPopup {
                     kind,
-                    selected: self.composer.popup_selected(),
+                    entries: &popup_entries,
+                    selected: popup_selected,
+                    loading: popup_loading,
                     theme: &self.theme,
                     locale: self.locale,
                 };
-                let (width, height) = popup.size(right.width);
+                let room = composer_area.y;
+                let (width, height) = popup.size(right.width, room);
                 let area = Rect {
                     x: right.x,
                     y: composer_area.y.saturating_sub(height),
                     width,
-                    height: height.min(composer_area.y),
+                    height: height.min(room),
                 };
                 if area.height > 0 {
                     frame.render_widget(popup, area);
@@ -622,6 +642,51 @@ impl App {
                 .await;
             let _ = event_tx.send(AppEvent::QueueActionDone { kind, result });
         });
+    }
+
+    /// Spawn `skill.list` for the `@` catalog: the loop keeps pumping; the
+    /// result arrives as [`AppEvent::CatalogLoaded`]. Marks the catalog as
+    /// loading so repeated popup opens don't re-fetch. No-op without a
+    /// client or an active session.
+    fn request_catalog(&mut self, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let (Some(client), Some(session_id)) = (self.client.clone(), self.active_session.clone())
+        else {
+            return;
+        };
+        if matches!(self.at_catalog, Some(AtCatalog { loading: true, .. })) {
+            return;
+        }
+        let mut catalog = self.at_catalog.clone().unwrap_or_default();
+        catalog.loading = true;
+        self.at_catalog = Some(catalog);
+        tokio::spawn(async move {
+            let result = client.skill_list(session_id).await;
+            let _ = event_tx.send(AppEvent::CatalogLoaded { result });
+        });
+    }
+
+    /// Apply a finished `skill.list`: cache the entries (a failure stays
+    /// uncached — the next popup open retries) and clear the loading flag.
+    fn on_catalog_loaded(&mut self, result: Result<SkillListValue, ClientError>) {
+        self.at_catalog = Some(AtCatalog {
+            loading: false,
+            ..self.at_catalog.clone().unwrap_or_default()
+        });
+        match result {
+            Ok(value) => {
+                self.at_catalog = Some(AtCatalog {
+                    skills: value.skills,
+                    loading: false,
+                });
+            }
+            Err(error) => {
+                self.set_toast(crate::i18n::trf(
+                    self.locale,
+                    "catalog.failed",
+                    &[&error.to_string()],
+                ));
+            }
+        }
     }
 
     /// Apply a finished queue action: toast the outcome and clear the

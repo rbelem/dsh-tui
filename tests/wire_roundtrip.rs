@@ -1811,6 +1811,43 @@ mod workspace {
 }
 
 // ---------------------------------------------------------------------------
+// Skill domain (skills.schema.ts) — the `@` catalog's `skill.list`
+// ---------------------------------------------------------------------------
+
+mod skill_domain {
+    use super::*;
+
+    #[test]
+    fn skill_list_request_round_trips() {
+        let req: SkillListRequest = round_trip(r#"{"sessionId":"s1"}"#);
+        assert_eq!(
+            req,
+            SkillListRequest {
+                session_id: SessionId("s1".into())
+            }
+        );
+    }
+
+    #[test]
+    fn skill_list_value_round_trips_all_fields() {
+        let fixture = r#"{"skills":[
+            {"name":"commit","description":"write a commit message","whenToUse":null,"modelInvocable":true},
+            {"name":"triage","description":"sort the inbox","whenToUse":"mail piles up","modelInvocable":false}
+        ]}"#;
+        let value: SkillListValue = round_trip(fixture);
+        assert_eq!(value.skills.len(), 2);
+        assert_eq!(value.skills[0].name, "commit");
+        assert!(value.skills[0].model_invocable);
+        assert_eq!(value.skills[0].when_to_use, None);
+        assert_eq!(
+            value.skills[1].when_to_use.as_deref(),
+            Some("mail piles up")
+        );
+        assert!(!value.skills[1].model_invocable);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Approvals + questions response payloads
 // ---------------------------------------------------------------------------
 

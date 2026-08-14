@@ -20,6 +20,7 @@ use crate::wire::session::{
     SessionCancelValue, SessionHistoryValue, SessionId, SessionPromptValue, SessionUpdateQueueValue,
 };
 use crate::wire::settings::{SettingsDescribeValue, SettingsWriteValue};
+use crate::wire::skills::SkillListValue;
 
 /// One event for the main loop.
 #[derive(Debug)]
@@ -57,6 +58,10 @@ pub enum AppEvent {
     QueueActionDone {
         kind: QueueActionKind,
         result: Result<SessionUpdateQueueValue, ClientError>,
+    },
+    /// The `@` catalog fetch (`skill.list`) finished.
+    CatalogLoaded {
+        result: Result<SkillListValue, ClientError>,
     },
     /// The spawned `settings.describe` task finished (opening the settings
     /// view, or the conflict refresh). The app folds it only while the

@@ -208,7 +208,8 @@ async fn popup_enter_accepts_and_esc_closes() {
     let mut app = App::default();
     app.focus = Focus::Composer;
     app.composer.insert_char('/');
-    // Down + Enter inserts the second seeded item.
+    // Down + Enter inserts the second mirrored command (/compact — the
+    // catalog order is /help, /compact, /clear, ...).
     assert_eq!(
         app.handle_key(key(KeyCode::Down)),
         Some(Action::Input),
@@ -219,7 +220,7 @@ async fn popup_enter_accepts_and_esc_closes() {
         Some(Action::Input),
         "popup accept"
     );
-    assert_eq!(app.composer.buffer(), "/clear ");
+    assert_eq!(app.composer.buffer(), "/compact ");
     assert_eq!(app.composer.popup(), None, "accept closes the popup");
 
     // Reopen and dismiss with Esc; the buffer is untouched.

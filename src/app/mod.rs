@@ -112,6 +112,9 @@ pub enum Action {
     QueueRemove,
     QueueSteer,
     QueueEdit(String),
+    /// The `@` popup needs its skill.list catalog (spawned via the
+    /// back-channel; result lands as [`AppEvent::CatalogLoaded`]).
+    RequestCatalog,
     /// Sidebar selection moved.
     Select,
     /// Sidebar Enter switched the active session.
@@ -200,6 +203,14 @@ pub struct QuestionPending {
     pub seq: u64,
 }
 
+/// The cached `@` catalog (`skill.list` result). `loading` guards against
+/// duplicate fetches; a failed fetch never caches, so the next open retries.
+#[derive(Debug, Default, Clone)]
+pub struct AtCatalog {
+    pub skills: Vec<crate::wire::skills::SkillEntry>,
+    pub loading: bool,
+}
+
 /// The application state: store + render cache + viewport + UI surfaces.
 pub struct App {
     pub store: SessionStore,
@@ -238,6 +249,9 @@ pub struct App {
     /// The inline editor for the focused queue item's text (reuses the
     /// composer's buffer/caret primitives).
     pub queue_editor: Option<Composer>,
+    /// The cached `@`-catalog (skill.list result), fetched once on first
+    /// open; a failed fetch is not cached so the next open retries.
+    pub at_catalog: Option<AtCatalog>,
     pub running: bool,
     /// Last non-fatal error, shown in the status line.
     pub last_error: Option<String>,
@@ -288,6 +302,7 @@ impl Default for App {
             queue_scroll: 0,
             queue_action_sending: false,
             queue_editor: None,
+            at_catalog: None,
             running: true,
             last_error: None,
             pending_approvals: HashMap::new(),
@@ -718,6 +733,73 @@ impl App {
         Action::None
     }
 
+    /// The composer-popup key handling: while the popup is open,
+    /// `Up`/`Down` navigate it (clamped to the app's filtered entry list),
+    /// `Enter` inserts the selected entry's text, `Esc` closes it. An `@`
+    /// popup whose catalog is not cached yet returns
+    /// [`Action::RequestCatalog`] so the run loop fetches `skill.list`.
+    fn handle_popup_key(&mut self, key: KeyEvent) -> Action {
+        use crossterm::event::KeyCode;
+        let entries = self.popup_entries();
+        match key.code {
+            KeyCode::Up => {
+                self.composer.popup_move(-1, entries.len());
+                Action::Input
+            }
+            KeyCode::Down => {
+                self.composer.popup_move(1, entries.len());
+                Action::Input
+            }
+            KeyCode::Enter => {
+                let insert = entries
+                    .get(self.composer.popup_selected())
+                    .map(|entry| entry.insert.clone())
+                    .unwrap_or_default();
+                self.composer.popup_accept(&insert);
+                Action::Input
+            }
+            KeyCode::Esc => {
+                self.composer.popup_dismiss();
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    /// The filtered entry list for the open popup: `/` mirrors the core
+    /// commands (substring-filtered by the typed suffix), `@` serves the
+    /// cached skill.list result (empty while loading or failed).
+    pub fn popup_entries(&self) -> Vec<crate::ui::catalog::CatalogEntry> {
+        let Some(kind) = self.composer.popup() else {
+            return Vec::new();
+        };
+        let suffix = &self.composer.buffer()[1..]; // after the trigger char
+        let entries = match kind {
+            crate::ui::composer::PopupKind::Slash => crate::ui::catalog::slash_entries(self.locale),
+            crate::ui::composer::PopupKind::At => self
+                .at_catalog
+                .as_ref()
+                .map(|catalog| crate::ui::catalog::skill_entries(&catalog.skills))
+                .unwrap_or_default(),
+        };
+        crate::ui::catalog::filter_entries(&entries, suffix)
+    }
+
+    /// The `@` catalog needs fetching when the popup is open, the catalog
+    /// is not cached, and no fetch is in flight.
+    fn at_catalog_needs_fetch(&self) -> bool {
+        if !matches!(
+            self.composer.popup(),
+            Some(crate::ui::composer::PopupKind::At)
+        ) {
+            return false;
+        }
+        match &self.at_catalog {
+            None => true,
+            Some(AtCatalog { loading, skills }) => !loading && skills.is_empty(),
+        }
+    }
+
     /// Whether the focused popup item is queue-owned (actionable).
     fn queue_focused_is_queued(&self) -> bool {
         matches!(
@@ -1092,25 +1174,16 @@ impl App {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
 
         if self.composer.popup().is_some() {
-            match key.code {
-                KeyCode::Up => {
-                    self.composer.popup_move(-1);
-                    return Action::Input;
-                }
-                KeyCode::Down => {
-                    self.composer.popup_move(1);
-                    return Action::Input;
-                }
-                KeyCode::Enter => {
-                    self.composer.popup_accept();
-                    return Action::Input;
-                }
-                KeyCode::Esc => {
-                    self.composer.popup_dismiss();
-                    return Action::None;
-                }
-                _ => {}
+            // Esc always dismisses the popup — never hijacked by the
+            // catalog fetch (a user closing the popup must not RPC).
+            if key.code == KeyCode::Esc {
+                self.composer.popup_dismiss();
+                return Action::None;
             }
+            if self.at_catalog_needs_fetch() {
+                return Action::RequestCatalog;
+            }
+            return self.handle_popup_key(key);
         }
 
         match key.code {

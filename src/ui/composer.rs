@@ -22,43 +22,10 @@ use unicode_width::UnicodeWidthStr;
 use crate::i18n::{Locale, tr};
 use crate::ui::style;
 
-/// One seeded popup entry: the text inserted on accept and its i18n key
-/// (translated at render time, like every surface).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SeedItem {
-    pub text: &'static str,
-    pub hint_key: &'static str,
-}
-
-/// Seeded `/` entries (v1 static; the real catalog rides `command.execute`).
-const SLASH_ITEMS: &[SeedItem] = &[
-    SeedItem {
-        text: "/compact",
-        hint_key: "composer.hint_compact",
-    },
-    SeedItem {
-        text: "/clear",
-        hint_key: "composer.hint_clear",
-    },
-    SeedItem {
-        text: "/help",
-        hint_key: "composer.hint_help",
-    },
-];
-
-/// Seeded `@` entries (placeholders; mentions are a later lane).
-const AT_ITEMS: &[SeedItem] = &[
-    SeedItem {
-        text: "@file",
-        hint_key: "composer.hint_file",
-    },
-    SeedItem {
-        text: "@session",
-        hint_key: "composer.hint_session",
-    },
-];
-
-/// Which seed popup the buffer currently triggers.
+/// Which catalog popup the buffer currently triggers. The entry list is
+/// owned by the app (`App::popup_entries`): `/` mirrors the core slash
+/// commands statically (the web's `command.list` has no gateway RPC — see
+/// `src/ui/catalog.rs`), `@` sources `skill.list` through the back-channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupKind {
     Slash,
@@ -66,13 +33,6 @@ pub enum PopupKind {
 }
 
 impl PopupKind {
-    pub fn items(self) -> &'static [SeedItem] {
-        match self {
-            PopupKind::Slash => SLASH_ITEMS,
-            PopupKind::At => AT_ITEMS,
-        }
-    }
-
     /// The popup's i18n key (`popup.commands` / `popup.mentions`).
     pub fn title(self) -> &'static str {
         match self {
@@ -221,20 +181,16 @@ impl Composer {
         self.popup_selected
     }
 
-    /// Move the popup highlight (clamped).
-    pub fn popup_move(&mut self, delta: isize) {
-        let Some(kind) = self.popup() else { return };
-        let last = kind.items().len().saturating_sub(1) as isize;
+    /// Move the popup highlight (clamped to the app's entry count).
+    pub fn popup_move(&mut self, delta: isize, len: usize) {
+        let last = len.saturating_sub(1) as isize;
         self.popup_selected = (self.popup_selected as isize + delta).clamp(0, last) as usize;
     }
 
-    /// Insert the highlighted popup item plus a trailing space (the space
+    /// Insert the highlighted entry's text plus a trailing space (the space
     /// closes the popup: the trigger requires a whitespace-free buffer).
-    pub fn popup_accept(&mut self) {
-        let Some(kind) = self.popup() else { return };
-        let items = kind.items();
-        let item = items[self.popup_selected.min(items.len() - 1)];
-        self.buffer = format!("{} ", item.text);
+    pub fn popup_accept(&mut self, insert: &str) {
+        self.buffer = format!("{insert} ");
         self.caret = self.buffer.len();
         self.popup_selected = 0;
         self.popup_dismissed = false;
@@ -336,29 +292,50 @@ impl Widget for ComposerView<'_> {
     }
 }
 
-/// The seeded `/` or `@` popup: a small floating list rendered above the
-/// composer by the draw loop (caller clears the area first via [`Clear`]).
+/// The `/` or `@` catalog popup: a small floating grouped list rendered
+/// above the composer by the draw loop (caller clears the area first via
+/// [`Clear`]). Entries come from the app (commands mirror / skills RPC);
+/// group headers separate them and a loading line shows while the `@`
+/// catalog is in flight.
 pub struct SeedPopup<'a> {
     pub kind: PopupKind,
+    pub entries: &'a [crate::ui::catalog::CatalogEntry],
     pub selected: usize,
+    pub loading: bool,
     pub theme: &'a crate::theme::Theme,
     pub locale: Locale,
 }
 
 impl SeedPopup<'_> {
-    /// Outer size for the popup (border included) for an available width.
-    pub fn size(&self, available: u16) -> (u16, u16) {
-        let items = self.kind.items();
-        let text = items.iter().map(|item| item.text.len()).max().unwrap_or(0);
-        let hint = items
+    /// Outer size for the popup (border included): rows + group headers +
+    /// border, capped at the room above the composer.
+    pub fn size(&self, available: u16, room: u16) -> (u16, u16) {
+        let text = self
+            .entries
             .iter()
-            .map(|item| item.hint_key.len())
+            .map(|entry| entry.label.len() + entry.hint.len())
             .max()
             .unwrap_or(0);
-        let width = (text + hint + 6) as u16;
-        let height = items.len() as u16 + 2;
+        let rows = self.entries.len()
+            + group_count(self.entries)
+            + usize::from(self.loading && self.entries.is_empty());
+        let width = (text + 8) as u16;
+        let height = (rows as u16 + 2).min(room);
         (width.clamp(16, available.max(16)), height)
     }
+}
+
+/// The number of group-header rows the entries need.
+fn group_count(entries: &[crate::ui::catalog::CatalogEntry]) -> usize {
+    let mut groups = 0;
+    let mut previous: Option<&str> = None;
+    for entry in entries {
+        if previous != Some(entry.group) {
+            groups += 1;
+            previous = Some(entry.group);
+        }
+    }
+    groups
 }
 
 impl Widget for SeedPopup<'_> {
@@ -369,11 +346,29 @@ impl Widget for SeedPopup<'_> {
             .title(tr(self.locale, self.kind.title()));
         let inner = block.inner(area);
         block.render(area, buf);
-        for (i, item) in self.kind.items().iter().enumerate() {
-            if i as u16 >= inner.height {
+        let mut y = inner.y;
+        let mut previous_group: Option<&str> = None;
+        for (i, entry) in self.entries.iter().enumerate() {
+            if y >= inner.bottom() {
                 break;
             }
-            let y = inner.y + i as u16;
+            // A group header line when the group changes.
+            if previous_group != Some(entry.group) {
+                previous_group = Some(entry.group);
+                buf.set_line(
+                    inner.x,
+                    y,
+                    &Line::styled(
+                        format!(" {}", tr(self.locale, entry.group)),
+                        style::header(self.theme),
+                    ),
+                    inner.width,
+                );
+                y += 1;
+                if y >= inner.bottom() {
+                    break;
+                }
+            }
             if i == self.selected {
                 buf.set_style(
                     Rect::new(inner.x, y, inner.width, 1),
@@ -381,10 +376,19 @@ impl Widget for SeedPopup<'_> {
                 );
             }
             let line = Line::from(vec![
-                Span::raw(format!(" {}  ", item.text)),
-                Span::styled(tr(self.locale, item.hint_key), style::hint(self.theme)),
+                Span::raw(format!(" {}", entry.label)),
+                Span::styled(format!("  {}", entry.hint), style::hint(self.theme)),
             ]);
             buf.set_line(inner.x, y, &line, inner.width);
+            y += 1;
+        }
+        if self.loading && self.entries.is_empty() && y < inner.bottom() {
+            buf.set_line(
+                inner.x,
+                y,
+                &Line::styled(tr(self.locale, "catalog.loading"), style::hint(self.theme)),
+                inner.width,
+            );
         }
     }
 }
@@ -471,9 +475,9 @@ mod tests {
     #[test]
     fn popup_accept_inserts_and_closes() {
         let mut composer = composer("/");
-        composer.popup_move(1);
+        composer.popup_move(1, 3);
         assert_eq!(composer.popup_selected(), 1);
-        composer.popup_accept();
+        composer.popup_accept("/clear");
         assert_eq!(composer.buffer(), "/clear ");
         assert_eq!(composer.popup(), None, "trailing space closes the popup");
     }
@@ -481,10 +485,10 @@ mod tests {
     #[test]
     fn popup_move_clamps() {
         let mut composer = composer("@");
-        composer.popup_move(-1);
+        composer.popup_move(-1, 3);
         assert_eq!(composer.popup_selected(), 0);
-        composer.popup_move(99);
-        assert_eq!(composer.popup_selected(), AT_ITEMS.len() - 1);
+        composer.popup_move(99, 3);
+        assert_eq!(composer.popup_selected(), 2);
     }
 
     #[test]
