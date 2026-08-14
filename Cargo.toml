@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Terminal UI client for the deepseek-harness gateway (parity with the web UI)"
 license = "MIT"
+exclude = ["bundle", "scripts"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# v1 placeholder: the prebuilt-binary layout contract (see bundle/README.md —
+# "Prebuild contract"). The release pipeline replaces this file with the real
+# platform binary (linux-x64/arm64, darwin-x64/arm64; Windows builds from
+# source). Until then: build and copy the binary here.
+echo "dsh-tui: no prebuilt binary shipped in this bundle yet — build with \`cargo build --release\` and copy target/release/dsh-tui into bundle/bin/ (see bundle/README.md)" >&2
+exit 1

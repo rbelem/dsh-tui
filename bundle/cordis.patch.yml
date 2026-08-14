@@ -1,0 +1,57 @@
+# The dsh-tui bundle patch: the terminal surface over the dsh-base layer,
+# mirroring the web-app bundle's transport rows plus this bundle's TUI
+# spawner glue.
+#
+# A patch replaces the targeted row's whole `config`, so each row below
+# restates every key it owns.
+#
+# The tui-startup plugin injects `cmdlineArgs` and provides `tuiStartup` as
+# an ordinary Cordis service. Rows configured from flags inject that service,
+# so Loader resolves their expressions only after it exists; the tui-runtime
+# glue then spawns the TUI. `dsh --profile tui --help` provides neither
+# service, so no server binds and nothing spawns.
+
+# ── transport rows (mirrored from the web-app bundle) ──────────────────────
+
+- insert:
+    # The API gateway: the transport-agnostic dispatch face every client
+    # shape shares.
+    - id: api-gateway
+      name: "@deepseek-ai/dsh-host-apiproxy"
+
+    # Ordinary provider for the parsed TUI flags. Its plugin-level injection
+    # waits for cmdlineArgs; no launcher metadata or special row kind is
+    # needed.
+    - id: tui-startup
+      name: "@rbelem/dsh-tui/startup"
+
+    # The loopback-only webserver. `port: 0` asks the OS for a free port,
+    # read back after bind via the webServer service's `get port()`; the TUI
+    # glue passes it to the binary as DSH_PORT.
+    - id: webserver
+      name: "@deepseek-ai/dsh-host-webserver"
+      inject: [tuiStartup]
+      config:
+        host: !!js ctx.tuiStartup.host ?? '127.0.0.1'
+        port: !!js ctx.tuiStartup.port ?? 0
+
+    # Registers the /api prefix and both WS downlink upgrades on the
+    # webserver. The TUI has no browser-trust fence, so no trustedHosts
+    # config is needed (the row's defaults apply).
+    - id: connection
+      name: "@deepseek-ai/dsh-client-connection"
+
+# ── TUI glue owned by this bundle ──────────────────────────────────────────
+
+# Resolves the TUI binary (config `binary`, defaulting to the package's own
+# bin/dsh-tui), waits for the gateway to bind, and spawns the TUI with
+# DSH_PORT. Prints the attach line when `printUrl` is true, after the Loader
+# tree settles so a sibling failure cannot announce a dead app. `spawn: false`
+# (from `--no-spawn`) boots the gateway without the TUI.
+- id: tui-runtime
+  name: "@rbelem/dsh-tui"
+  inject: [tuiStartup, webServer]
+  config:
+    binary: ""
+    printUrl: true
+    spawn: !!js ctx.tuiStartup.spawn ?? true
