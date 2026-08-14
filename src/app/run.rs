@@ -12,7 +12,8 @@ use std::time::Instant;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::text::Line;
+use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 
@@ -20,8 +21,11 @@ use crate::app::event::{AnswerTag, AppEvent, EventChannel};
 use crate::app::{Action, App, AppError, DRAW_INTERVAL, Focus};
 use crate::client::ClientError;
 use crate::render::chat_view::ChatView;
+use crate::theme::Theme;
+use crate::theme::ThemePopup;
 use crate::ui::composer::{ComposerView, SeedPopup};
 use crate::ui::sidebar::{SidebarView, sidebar_width};
+use crate::ui::style;
 use crate::ui::takeover::{ApprovalView, Mode, QuestionView};
 use crate::wire::approvals::ApprovalResponseOutcome;
 use crate::wire::questions::{AskUserQuestionAnswer, QuestionAnswerItem};
@@ -165,12 +169,22 @@ impl App {
                 let area = frame.area();
                 let notice = self.current_notice();
                 match &self.mode {
-                    Mode::Approval(takeover) => {
-                        frame.render_widget(ApprovalView { takeover, notice }, area)
-                    }
-                    Mode::Question(takeover) => {
-                        frame.render_widget(QuestionView { takeover, notice }, area)
-                    }
+                    Mode::Approval(takeover) => frame.render_widget(
+                        ApprovalView {
+                            takeover,
+                            notice,
+                            theme: &self.theme,
+                        },
+                        area,
+                    ),
+                    Mode::Question(takeover) => frame.render_widget(
+                        QuestionView {
+                            takeover,
+                            notice,
+                            theme: &self.theme,
+                        },
+                        area,
+                    ),
                     Mode::Chat => {}
                 }
             })?;
@@ -201,14 +215,16 @@ impl App {
         self.sidebar.clamp(self.sessions.len());
         let session_id = self.active_session.clone();
         if let Some(session_id) = &session_id {
-            self.row_cache.sync(&self.store, session_id, width);
-            self.row_cache.render_dirty(&self.store, session_id, width);
+            self.row_cache
+                .sync(&self.store, session_id, width, &self.theme);
+            self.row_cache
+                .render_dirty(&self.store, session_id, width, &self.theme);
             if self.view.follow {
                 let total = self.row_cache.lines().len();
                 self.view.offset = total.saturating_sub(chat_height as usize);
             }
         }
-        let status = self.status_line();
+        let status = self.status_line(&self.theme);
         let offset = self.view.offset;
 
         term.draw(|frame| {
@@ -219,6 +235,7 @@ impl App {
                         active: self.active_session.as_ref(),
                         selected: self.sidebar.selected,
                         focused: self.focus == Focus::Sidebar,
+                        theme: &self.theme,
                     },
                     sidebar_area,
                 );
@@ -238,6 +255,7 @@ impl App {
                 ComposerView {
                     composer: &self.composer,
                     focused: self.focus == Focus::Composer,
+                    theme: &self.theme,
                 },
                 composer_area,
             );
@@ -256,11 +274,32 @@ impl App {
                 frame.set_cursor_position((inner.x + col, y));
             }
 
+            // The theme picker floats above the composer (mirrors the seed
+            // popup placement; the theme registry list is centered).
+            if self.theme_picker.open {
+                let popup = ThemePopup {
+                    themes: &self.themes.themes,
+                    selected: self.theme_picker.selected,
+                    current: &self.theme,
+                };
+                let (width, height) = popup.size(right.width);
+                let area = Rect {
+                    x: right.x + right.width.saturating_sub(width) / 2,
+                    y: composer_area.y.saturating_sub(height),
+                    width,
+                    height: height.min(composer_area.y),
+                };
+                if area.height > 0 {
+                    frame.render_widget(popup, area);
+                }
+            }
+
             // The seed popup floats above the composer.
             if let Some(kind) = self.composer.popup() {
                 let popup = SeedPopup {
                     kind,
                     selected: self.composer.popup_selected(),
+                    theme: &self.theme,
                 };
                 let (width, height) = popup.size(right.width);
                 let area = Rect {
@@ -465,36 +504,55 @@ impl App {
 
     /// The one-line status: session id · last seq · truncated flag · running
     /// · focused surface · transient hint · toast · error.
-    fn status_line(&self) -> Line<'static> {
-        let mut parts: Vec<String> = Vec::new();
+    fn status_line(&self, theme: &Theme) -> Line<'static> {
+        let mut parts: Vec<Line<'static>> = Vec::new();
+        let body = |text: String| Span::styled(text, Style::default().fg(theme.text));
         match &self.active_session {
-            Some(session_id) => parts.push(format!("session {session_id}")),
-            None => parts.push("no session".into()),
+            Some(session_id) => parts.push(Line::from(body(format!("session {session_id}")))),
+            None => parts.push(Line::from(body("no session".into()))),
         }
         if let Some(state) = self
             .active_session
             .as_ref()
             .and_then(|session_id| self.store.session(session_id))
         {
-            parts.push(format!("seq {}", state.last_seq));
+            parts.push(Line::from(body(format!("seq {}", state.last_seq))));
             if state.truncated {
-                parts.push("truncated".into());
+                parts.push(Line::from(body("truncated".into())));
             }
         }
         if self.session_running() {
-            parts.push("running".into());
+            parts.push(Line::from(body("running".into())));
         }
-        parts.push(format!("focus: {}", self.focus.label()));
+        parts.push(Line::from(body(format!("focus: {}", self.focus.label()))));
         if let Some(hint) = &self.hint {
-            parts.push(hint.clone());
+            parts.push(Line::from(Span::styled(hint.clone(), style::hint(theme))));
         }
         if let Some((toast, _)) = &self.toast {
-            parts.push(toast.clone());
+            parts.push(Line::from(Span::styled(toast.clone(), style::hint(theme))));
         }
         if let Some(error) = &self.last_error {
-            parts.push(format!("error: {error}"));
+            parts.push(Line::from(Span::styled(
+                format!("error: {error}"),
+                Style::default().fg(theme.error),
+            )));
         }
-        Line::raw(parts.join(" · "))
+        Line::from(
+            parts
+                .into_iter()
+                .enumerate()
+                .flat_map(|(i, line)| {
+                    let mut spans = line.spans;
+                    if i > 0 {
+                        let mut joined = vec![Span::raw(" · ")];
+                        joined.append(&mut spans);
+                        joined
+                    } else {
+                        spans
+                    }
+                })
+                .collect::<Vec<_>>(),
+        )
     }
 }
 

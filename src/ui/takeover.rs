@@ -192,12 +192,13 @@ pub struct ApprovalView<'a> {
     pub takeover: &'a ApprovalTakeover,
     /// Transient notice (toast/hint), rendered dim at the bottom.
     pub notice: Option<&'a str>,
+    pub theme: &'a crate::theme::Theme,
 }
 
 impl Widget for ApprovalView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered()
-            .border_style(style::BORDER)
+            .border_style(style::border(self.theme))
             .title(" approval ")
             .padding(ratatui::widgets::Padding::horizontal(1));
         let inner = block.inner(area);
@@ -206,7 +207,7 @@ impl Widget for ApprovalView<'_> {
         let takeover = self.takeover;
         let mut lines: Vec<Line> = vec![
             Line::raw(""),
-            Line::styled(&takeover.tool_name, style::ACTIVE),
+            Line::styled(&takeover.tool_name, style::active(self.theme)),
         ];
         if let Some(reason) = &takeover.reason {
             lines.push(Line::raw(format!("reason: {reason}")));
@@ -216,21 +217,24 @@ impl Widget for ApprovalView<'_> {
         if let Some(call_id) = &takeover.call_id {
             context.push_str(&format!(" · call {call_id}"));
         }
-        lines.push(Line::styled(context, style::HINT));
+        lines.push(Line::styled(context, style::hint(self.theme)));
         if let Some(summary) = &takeover.tool_summary {
-            lines.push(Line::styled(format!("tool call: {summary}"), style::HINT));
+            lines.push(Line::styled(
+                format!("tool call: {summary}"),
+                style::hint(self.theme),
+            ));
         }
         // TODO: allow-always-preset + the full-access risk-ack second
         // keypress (Q13) — needs the permissions projection in the store.
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
-            Span::styled("y", style::ACTIVE),
+            Span::styled("y", style::active(self.theme)),
             Span::raw(" allow once   "),
-            Span::styled("n", style::ACTIVE),
+            Span::styled("n", style::active(self.theme)),
             Span::raw(" reject"),
         ]));
         if let Some(notice) = self.notice {
-            lines.push(Line::styled(notice, style::HINT));
+            lines.push(Line::styled(notice, style::hint(self.theme)));
         }
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -243,6 +247,7 @@ pub struct QuestionView<'a> {
     pub takeover: &'a QuestionTakeover,
     /// Transient notice (toast/hint), rendered dim at the bottom.
     pub notice: Option<&'a str>,
+    pub theme: &'a crate::theme::Theme,
 }
 
 impl Widget for QuestionView<'_> {
@@ -253,7 +258,7 @@ impl Widget for QuestionView<'_> {
             " question "
         };
         let block = Block::bordered()
-            .border_style(style::BORDER)
+            .border_style(style::border(self.theme))
             .title(title)
             .padding(ratatui::widgets::Padding::horizontal(1));
         let inner = block.inner(area);
@@ -266,17 +271,17 @@ impl Widget for QuestionView<'_> {
             let focused = i == takeover.focused;
             if many {
                 let label = format!("question {} of {}", i + 1, takeover.questions.len());
-                lines.push(Line::styled(label, style::HINT));
+                lines.push(Line::styled(label, style::hint(self.theme)));
             }
             if let Some(header) = &question.item.header {
-                lines.push(Line::styled(header, style::ACTIVE));
+                lines.push(Line::styled(header, style::active(self.theme)));
             }
             lines.push(Line::raw(&question.item.question));
             if let Some(detail) = &question.item.detail {
-                lines.push(Line::styled(detail, style::HINT));
+                lines.push(Line::styled(detail, style::hint(self.theme)));
             }
             if question.options.is_empty() {
-                lines.push(Line::styled("(no options)", style::HINT));
+                lines.push(Line::styled("(no options)", style::hint(self.theme)));
             }
             for (row, option) in question.options.iter().enumerate() {
                 let marker = if question.multi {
@@ -292,29 +297,35 @@ impl Widget for QuestionView<'_> {
                 };
                 let mut spans = vec![Span::raw(format!("{marker}{}", option.label))];
                 if let Some(description) = &option.description {
-                    spans.push(Span::styled(format!(" — {description}"), style::HINT));
+                    spans.push(Span::styled(
+                        format!(" — {description}"),
+                        style::hint(self.theme),
+                    ));
                 }
                 lines.push(Line::from(spans));
                 // Reverse the cursor row of the focused question.
                 if focused && row == question.cursor {
                     let y = inner.y + lines.len() as u16 - 1;
                     if y < inner.bottom() {
-                        buf.set_style(Rect::new(inner.x, y, inner.width, 1), style::SELECTION);
+                        buf.set_style(
+                            Rect::new(inner.x, y, inner.width, 1),
+                            style::selection(self.theme),
+                        );
                     }
                 }
             }
             lines.push(Line::raw(""));
         }
         lines.push(Line::from(vec![
-            Span::styled("tab", style::ACTIVE),
+            Span::styled("tab", style::active(self.theme)),
             Span::raw(" question · "),
-            Span::styled("space", style::ACTIVE),
+            Span::styled("space", style::active(self.theme)),
             Span::raw(" toggle · "),
-            Span::styled("enter", style::ACTIVE),
+            Span::styled("enter", style::active(self.theme)),
             Span::raw(" submit"),
         ]));
         if let Some(notice) = self.notice {
-            lines.push(Line::styled(notice, style::HINT));
+            lines.push(Line::styled(notice, style::hint(self.theme)));
         }
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })

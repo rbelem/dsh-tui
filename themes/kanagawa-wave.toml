@@ -1,0 +1,10 @@
+# Kanagawa Wave (https://github.com/rebelot/kanagawa.nvim)
+name = "kanagawa-wave"
+accent = "#7e9cd8"
+muted = "#727169"
+error = "#e82424"
+warning = "#dca561"
+success = "#98bb6c"
+code = "#7e9cd8"
+bg = "#1f1f28"
+text = "#dcd7ba"

@@ -1,0 +1,10 @@
+# Catppuccin Latte (https://catppuccin.com/palette)
+name = "catppuccin-latte"
+accent = "#1e66f5"
+muted = "#acb0be"
+error = "#d20f39"
+warning = "#df8e1d"
+success = "#40a02b"
+code = "#1e66f5"
+bg = "#eff1f5"
+text = "#4c4f69"

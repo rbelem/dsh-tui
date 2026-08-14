@@ -20,6 +20,7 @@ use ratatui::text::Line;
 use crate::render::markdown::render_node;
 use crate::store::SessionStore;
 use crate::store::node::{ChatNode, NodeKey};
+use crate::theme::Theme;
 use crate::wire::session::SessionId;
 
 /// One display-order cached row: the rendered (and wrapped) lines of one node.
@@ -58,7 +59,13 @@ impl RowCache {
     ///
     /// Returns whether anything changed (the app shell uses this to decide
     /// whether to redraw).
-    pub fn sync(&mut self, store: &SessionStore, session_id: &SessionId, width: u16) -> bool {
+    pub fn sync(
+        &mut self,
+        store: &SessionStore,
+        session_id: &SessionId,
+        width: u16,
+        theme: &Theme,
+    ) -> bool {
         let mut changed = false;
         let Some(state) = store.session(session_id) else {
             if !self.rows.is_empty() {
@@ -93,7 +100,7 @@ impl RowCache {
                     reordered.push(CachedRow {
                         node_key: node.key.clone(),
                         anchor_seq: node.anchor_seq,
-                        lines: wrap_lines(render_node(node, collapsed), width),
+                        lines: wrap_lines(render_node(node, collapsed, theme), width),
                         signature,
                     });
                     changed = true;
@@ -107,7 +114,13 @@ impl RowCache {
 
     /// Re-render exactly the dirty nodes (markdown re-parse per chunk, Q5)
     /// and clear the dirty set.
-    pub fn render_dirty(&mut self, store: &SessionStore, session_id: &SessionId, width: u16) {
+    pub fn render_dirty(
+        &mut self,
+        store: &SessionStore,
+        session_id: &SessionId,
+        width: u16,
+        theme: &Theme,
+    ) {
         for key in self.dirty.drain() {
             let Some(state) = store.session(session_id) else {
                 continue;
@@ -116,7 +129,7 @@ impl RowCache {
                 continue;
             };
             let collapsed = store.fold_state(session_id, &key).collapsed;
-            let lines = wrap_lines(render_node(node, collapsed), width);
+            let lines = wrap_lines(render_node(node, collapsed, theme), width);
             if let Some(row) = self.rows.iter_mut().find(|row| row.node_key == key) {
                 row.lines = lines;
             }

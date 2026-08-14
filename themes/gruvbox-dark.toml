@@ -1,0 +1,10 @@
+# Gruvbox Dark (https://github.com/morhetz/gruvbox)
+name = "gruvbox-dark"
+accent = "#83a598"
+muted = "#928374"
+error = "#fb4934"
+warning = "#fabd2f"
+success = "#b8bb26"
+code = "#83a598"
+bg = "#282828"
+text = "#ebdbb2"

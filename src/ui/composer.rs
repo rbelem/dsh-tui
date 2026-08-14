@@ -300,6 +300,7 @@ impl Composer {
 pub struct ComposerView<'a> {
     pub composer: &'a Composer,
     pub focused: bool,
+    pub theme: &'a crate::theme::Theme,
 }
 
 /// Placeholder shown in the empty composer.
@@ -310,9 +311,9 @@ impl Widget for ComposerView<'_> {
         let block = Block::new()
             .borders(Borders::TOP)
             .border_style(if self.focused {
-                style::BORDER_FOCUSED
+                style::border_focused(self.theme)
             } else {
-                style::BORDER
+                style::border(self.theme)
             });
         let inner = block.inner(area);
         block.render(area, buf);
@@ -321,7 +322,7 @@ impl Widget for ComposerView<'_> {
         }
         let (_, _, scroll) = self.composer.caret_layout(inner.width);
         if self.composer.is_empty() {
-            Paragraph::new(Line::styled(PLACEHOLDER, style::HINT)).render(inner, buf);
+            Paragraph::new(Line::styled(PLACEHOLDER, style::hint(self.theme))).render(inner, buf);
         } else {
             Paragraph::new(self.composer.buffer().to_string())
                 .scroll((0, scroll))
@@ -332,12 +333,13 @@ impl Widget for ComposerView<'_> {
 
 /// The seeded `/` or `@` popup: a small floating list rendered above the
 /// composer by the draw loop (caller clears the area first via [`Clear`]).
-pub struct SeedPopup {
+pub struct SeedPopup<'a> {
     pub kind: PopupKind,
     pub selected: usize,
+    pub theme: &'a crate::theme::Theme,
 }
 
-impl SeedPopup {
+impl SeedPopup<'_> {
     /// Outer size for the popup (border included) for an available width.
     pub fn size(&self, available: u16) -> (u16, u16) {
         let items = self.kind.items();
@@ -349,11 +351,11 @@ impl SeedPopup {
     }
 }
 
-impl Widget for SeedPopup {
+impl Widget for SeedPopup<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         Clear.render(area, buf);
         let block = Block::bordered()
-            .border_style(style::BORDER)
+            .border_style(style::border(self.theme))
             .title(self.kind.title());
         let inner = block.inner(area);
         block.render(area, buf);
@@ -363,11 +365,14 @@ impl Widget for SeedPopup {
             }
             let y = inner.y + i as u16;
             if i == self.selected {
-                buf.set_style(Rect::new(inner.x, y, inner.width, 1), style::SELECTION);
+                buf.set_style(
+                    Rect::new(inner.x, y, inner.width, 1),
+                    style::selection(self.theme),
+                );
             }
             let line = Line::from(vec![
                 Span::raw(format!(" {}  ", item.text)),
-                Span::styled(item.hint, style::HINT),
+                Span::styled(item.hint, style::hint(self.theme)),
             ]);
             buf.set_line(inner.x, y, &line, inner.width);
         }

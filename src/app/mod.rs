@@ -31,6 +31,7 @@ use crate::client::{ClientError, WireClient};
 use crate::render::row_cache::RowCache;
 use crate::store::node::NodeData;
 use crate::store::{SessionStore, StoreError};
+use crate::theme::{Config, terminal_supports_color};
 use crate::ui::composer::Composer;
 use crate::ui::sidebar::SidebarState;
 use crate::ui::takeover::{ApprovalTakeover, Mode, QuestionTakeover};
@@ -177,6 +178,15 @@ pub struct App {
     pub sidebar: SidebarState,
     /// The attached gateway client (submit dispatch); `None` in keyless tests.
     pub client: Option<WireClient>,
+    /// The active theme (terminal-following default until a config theme or
+    /// the picker applies one).
+    pub theme: crate::theme::Theme,
+    /// Available themes: bundled + user dir (loaded at startup).
+    pub themes: crate::theme::ThemeRegistry,
+    /// The Ctrl+T theme picker state.
+    pub theme_picker: crate::theme::ThemePicker,
+    /// The persisted config (theme choice).
+    pub config: crate::theme::Config,
     pub running: bool,
     /// Last non-fatal error, shown in the status line.
     pub last_error: Option<String>,
@@ -217,6 +227,10 @@ impl Default for App {
             composer: Composer::new(),
             sidebar: SidebarState::default(),
             client: None,
+            theme: crate::theme::Theme::default(),
+            themes: crate::theme::ThemeRegistry::bundled(),
+            theme_picker: crate::theme::ThemePicker::default(),
+            config: crate::theme::Config::default(),
             running: true,
             last_error: None,
             pending_approvals: HashMap::new(),
@@ -415,9 +429,10 @@ impl App {
     /// Handle one key (Q15 subset). Global keys first (`Ctrl+C` quits —
     /// also during a takeover, the one documented exception), then a
     /// takeover swallows ALL keys (chat/composer/sidebar keys are inert,
-    /// including `q`), then `Tab` cycles focus and the focused surface gets
-    /// the key. Returns the resulting [`Action`]; `Quit` is not applied
-    /// here — the run loop stops.
+    /// including `q`), then `Ctrl+T` toggles the theme picker and an open
+    /// picker swallows keys until Enter/Esc, then `Tab` cycles focus and the
+    /// focused surface gets the key. Returns the resulting [`Action`];
+    /// `Quit` is not applied here — the run loop stops.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -425,6 +440,23 @@ impl App {
         }
         if !matches!(self.mode, Mode::Chat) {
             return Some(self.handle_takeover_key(key));
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+            if self.theme_picker.open {
+                self.theme_picker.open = false;
+            } else {
+                self.theme_picker.selected = self
+                    .themes
+                    .themes
+                    .iter()
+                    .position(|theme| theme.name == self.theme.name)
+                    .unwrap_or(0);
+                self.theme_picker.open = true;
+            }
+            return Some(Action::None);
+        }
+        if self.theme_picker.open {
+            return Some(self.handle_picker_key(key));
         }
         if key.code == KeyCode::Tab {
             let next = self.focus.next();
@@ -435,6 +467,58 @@ impl App {
             Focus::Chat => self.handle_chat_key(key),
             Focus::Composer => Some(self.handle_composer_key(key)),
             Focus::Sidebar => self.handle_sidebar_key(key),
+        }
+    }
+
+    /// Theme picker bindings: `Up`/`Down` (or `j`/`k`) move the selection,
+    /// `Enter` applies live and persists the choice, `Esc` closes without
+    /// applying. Everything else is inert while the picker is open.
+    fn handle_picker_key(&mut self, key: KeyEvent) -> Action {
+        use crossterm::event::KeyCode;
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.theme_picker.selected = self.theme_picker.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if self.theme_picker.selected + 1 < self.themes.themes.len() {
+                    self.theme_picker.selected += 1;
+                }
+            }
+            KeyCode::Enter => self.apply_picked_theme(),
+            KeyCode::Esc => self.theme_picker.open = false,
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// Apply the picked theme live, persist it to the config file, and
+    /// invalidate the row cache so the next draw re-renders with the new
+    /// colors. A failed save only toasts — the applied theme stays.
+    fn apply_picked_theme(&mut self) {
+        let Some(theme) = self.themes.themes.get(self.theme_picker.selected) else {
+            return;
+        };
+        self.theme = theme.clone();
+        self.config.theme = Some(theme.name.clone());
+        if let Err(error) = self.config.save() {
+            self.set_toast(format!("couldn't save config: {error}"));
+        }
+        self.row_cache.invalidate_all();
+        self.theme_picker.open = false;
+    }
+
+    /// Startup theme resolution: load user themes, then apply the persisted
+    /// config theme when the terminal can render palettes (truecolor
+    /// `COLORTERM`); otherwise the terminal-following default (Reset-based
+    /// neutral) stays.
+    pub fn load_theme_config(&mut self) {
+        self.themes.load_user_dir();
+        self.config = Config::load();
+        if let Some(name) = &self.config.theme
+            && let Some(theme) = self.themes.find(name)
+            && terminal_supports_color()
+        {
+            self.theme = theme.clone();
         }
     }
 

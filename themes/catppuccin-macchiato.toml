@@ -1,0 +1,10 @@
+# Catppuccin Macchiato (https://catppuccin.com/palette)
+name = "catppuccin-macchiato"
+accent = "#8aadf4"
+muted = "#494d64"
+error = "#ed8796"
+warning = "#eed49f"
+success = "#a6da95"
+code = "#8aadf4"
+bg = "#24273a"
+text = "#cad3f5"

@@ -1,0 +1,10 @@
+# One Dark (https://github.com/atom/atom/tree/master/packages/one-dark-syntax)
+name = "one-dark"
+accent = "#61afef"
+muted = "#5c6370"
+error = "#e06c75"
+warning = "#e5c07b"
+success = "#98c379"
+code = "#61afef"
+bg = "#282c34"
+text = "#abb2bf"

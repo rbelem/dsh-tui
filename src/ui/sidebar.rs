@@ -65,6 +65,7 @@ pub struct SidebarView<'a> {
     pub active: Option<&'a SessionId>,
     pub selected: usize,
     pub focused: bool,
+    pub theme: &'a crate::theme::Theme,
 }
 
 impl Widget for SidebarView<'_> {
@@ -72,9 +73,9 @@ impl Widget for SidebarView<'_> {
         let block = Block::new()
             .borders(Borders::RIGHT)
             .border_style(if self.focused {
-                style::BORDER_FOCUSED
+                style::border_focused(self.theme)
             } else {
-                style::BORDER
+                style::border(self.theme)
             });
         let inner = block.inner(area);
         block.render(area, buf);
@@ -84,7 +85,7 @@ impl Widget for SidebarView<'_> {
         buf.set_line(
             inner.x,
             inner.y,
-            &Line::styled("Sessions", style::HEADER),
+            &Line::styled("Sessions", style::header(self.theme)),
             inner.width,
         );
 
@@ -97,7 +98,7 @@ impl Widget for SidebarView<'_> {
                 buf.set_line(
                     inner.x,
                     y + 1,
-                    &Line::styled("they'll appear here", style::HINT),
+                    &Line::styled("they'll appear here", style::hint(self.theme)),
                     inner.width,
                 );
             }
@@ -114,14 +115,17 @@ impl Widget for SidebarView<'_> {
             }
             let y = inner.y + row as u16;
             if self.focused && i == self.selected {
-                buf.set_style(Rect::new(inner.x, y, inner.width, 1), style::SELECTION);
+                buf.set_style(
+                    Rect::new(inner.x, y, inner.width, 1),
+                    style::selection(self.theme),
+                );
             }
             let is_active = self.active == Some(&summary.session_id);
             let marker = if is_active { "● " } else { "  " };
-            let mut spans = vec![Span::styled(marker, style::ACTIVE)];
+            let mut spans = vec![Span::styled(marker, style::active(self.theme))];
             spans.push(Span::raw(label(summary)));
             if summary.running {
-                spans.push(Span::styled(" · running", style::HINT));
+                spans.push(Span::styled(" · running", style::hint(self.theme)));
             }
             buf.set_line(inner.x, y, &Line::from(spans), inner.width);
         }

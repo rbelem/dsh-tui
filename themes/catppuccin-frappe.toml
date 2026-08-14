@@ -1,0 +1,10 @@
+# Catppuccin Frappé (https://catppuccin.com/palette)
+name = "catppuccin-frappe"
+accent = "#8caaee"
+muted = "#51576d"
+error = "#e78284"
+warning = "#e5c890"
+success = "#a6d189"
+code = "#8caaee"
+bg = "#303446"
+text = "#c6d0f5"

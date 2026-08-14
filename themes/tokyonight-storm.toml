@@ -1,0 +1,10 @@
+# Tokyo Night Storm (https://github.com/folke/tokyonight.nvim)
+name = "tokyonight-storm"
+accent = "#7aa2f7"
+muted = "#565f89"
+error = "#f7768e"
+warning = "#e0af68"
+success = "#9ece6a"
+code = "#7aa2f7"
+bg = "#24283b"
+text = "#c0caf5"

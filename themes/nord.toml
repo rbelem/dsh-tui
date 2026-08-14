@@ -1,0 +1,10 @@
+# Nord (https://www.nordtheme.com/docs/colors-and-palettes)
+name = "nord"
+accent = "#81a1c1"
+muted = "#4c566a"
+error = "#bf616a"
+warning = "#ebcb8b"
+success = "#a3be8c"
+code = "#81a1c1"
+bg = "#2e3440"
+text = "#d8dee9"
