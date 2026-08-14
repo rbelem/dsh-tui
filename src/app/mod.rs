@@ -21,6 +21,7 @@ pub use attach::attach;
 pub use event::{AppEvent, spawn_frame_bridge, spawn_input_bridge};
 pub use run::{TerminalGuard, setup_terminal, teardown_terminal};
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
 
@@ -32,6 +33,10 @@ use crate::store::node::NodeData;
 use crate::store::{SessionStore, StoreError};
 use crate::ui::composer::Composer;
 use crate::ui::sidebar::SidebarState;
+use crate::ui::takeover::{ApprovalTakeover, Mode, QuestionTakeover};
+use crate::wire::approvals::{ApprovalRequestId, ApprovalResponseOutcome};
+use crate::wire::events::{ApprovalOutcome, AskUserQuestionItem, MuxFrame, QuestionOutcome};
+use crate::wire::rpc::RpcId;
 use crate::wire::session::{SessionId, SessionSummary};
 
 /// App-level failure.
@@ -98,6 +103,11 @@ pub enum Action {
     Select,
     /// Sidebar Enter switched the active session.
     SwitchSession(SessionId),
+    /// Approval takeover answered with this outcome; the run loop posts the
+    /// respond and resolves the takeover.
+    AnswerApproval(ApprovalResponseOutcome),
+    /// Question takeover submitted; the run loop posts the respond.
+    AnswerQuestion,
     /// Consumed but no-op (Esc in the chat, a blocked submit).
     None,
 }
@@ -124,6 +134,34 @@ impl Default for ViewState {
     }
 }
 
+/// One open approval, recorded from its `approval/requested` frame so the
+/// answering ClientResponse can echo the frame's rpcId.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ApprovalPending {
+    /// The envelope rpcId of the `approval/requested` frame — the respond echo
+    /// target.
+    pub rpc_id: RpcId,
+    pub session_id: SessionId,
+    pub approval_id: ApprovalRequestId,
+    pub tool_name: String,
+    pub call_id: Option<String>,
+    pub reason: Option<String>,
+    /// Insertion order; the newest pending approval takes the takeover.
+    pub seq: u64,
+}
+
+/// One open question frame, recorded from its `question/requested` payload.
+/// The map key is the frame's envelope rpcId as a string (the respond echo
+/// target; `question/resolved.questionRpcId` names the same value).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestionPending {
+    pub rpc_id: RpcId,
+    pub session_id: SessionId,
+    pub questions: Vec<AskUserQuestionItem>,
+    /// Insertion order (see [`ApprovalPending::seq`]).
+    pub seq: u64,
+}
+
 /// The application state: store + render cache + viewport + UI surfaces.
 pub struct App {
     pub store: SessionStore,
@@ -142,6 +180,21 @@ pub struct App {
     pub running: bool,
     /// Last non-fatal error, shown in the status line.
     pub last_error: Option<String>,
+    /// Open approvals keyed by approval id (recorded from `approval/requested`,
+    /// removed on `approval/resolved`).
+    pub pending_approvals: HashMap<ApprovalRequestId, ApprovalPending>,
+    /// Open question frames keyed by their envelope rpcId (the respond echo
+    /// target; `question/resolved.questionRpcId` names the same value).
+    pub pending_questions: HashMap<String, QuestionPending>,
+    /// Insertion counter for the pending maps (newest wins the takeover).
+    pending_seq: u64,
+    /// The app mode: chat, or a full-screen approval/question takeover (Q6).
+    pub mode: Mode,
+    /// One-line transient notice (answer confirmations, remote resolutions),
+    /// shown in the status line and inside takeovers. Cleared on the first
+    /// tick at least [`TOAST_TTL`] after it was set; a new toast replaces
+    /// the old one.
+    pub toast: Option<(String, Instant)>,
     /// One-line transient hint in the status line (e.g. a blocked submit).
     pub hint: Option<String>,
     /// Pending draw flag (coalescing).
@@ -166,6 +219,11 @@ impl Default for App {
             client: None,
             running: true,
             last_error: None,
+            pending_approvals: HashMap::new(),
+            pending_questions: HashMap::new(),
+            pending_seq: 0,
+            mode: Mode::Chat,
+            toast: None,
             hint: None,
             needs_draw: false,
             last_draw: None,
@@ -175,13 +233,197 @@ impl Default for App {
 }
 
 impl App {
-    /// Handle one key (Q15 subset). Global keys first (`Ctrl+C` quits, `Tab`
-    /// cycles focus), then dispatch to the focused surface. Returns the
-    /// resulting [`Action`]; `Quit` is not applied here — the run loop stops.
+    /// Record an answerable frame (`approval/requested`, `question/requested`)
+    /// with its envelope rpcId, and open its takeover. A new approval takes
+    /// the takeover immediately (newest wins); a question takes it only when
+    /// no approval is open (approvals win over questions). The resolved
+    /// frames are handled by [`App::record_resolved`].
+    pub fn record_answerable(&mut self, rpc_id: RpcId, frame: &MuxFrame) {
+        self.pending_seq += 1;
+        let seq = self.pending_seq;
+        match frame {
+            MuxFrame::ApprovalRequested {
+                session_id,
+                approval_id,
+                tool_name,
+                call_id,
+                reason,
+            } => {
+                let pending = ApprovalPending {
+                    rpc_id,
+                    session_id: session_id.clone(),
+                    approval_id: approval_id.clone(),
+                    tool_name: tool_name.clone(),
+                    call_id: call_id.clone(),
+                    reason: reason.clone(),
+                    seq,
+                };
+                self.mode = Mode::Approval(self.approval_takeover(&pending));
+                self.pending_approvals.insert(approval_id.clone(), pending);
+            }
+            MuxFrame::QuestionRequested {
+                session_id,
+                questions,
+            } => {
+                let pending = QuestionPending {
+                    rpc_id: rpc_id.clone(),
+                    session_id: session_id.clone(),
+                    questions: questions.clone(),
+                    seq,
+                };
+                if !matches!(self.mode, Mode::Approval(_)) {
+                    self.mode = Mode::Question(QuestionTakeover::new(
+                        session_id.clone(),
+                        rpc_id.clone(),
+                        questions.clone(),
+                    ));
+                }
+                self.pending_questions.insert(rpc_id.to_string(), pending);
+            }
+            _ => {}
+        }
+    }
+
+    /// Drop resolved answerable frames. The resolved frames' OWN envelope
+    /// rpcIds are fresh push ids — correlation is payload-driven:
+    /// `approval/resolved.approvalId` names the requested frame's approval,
+    /// `question/resolved.questionRpcId` echoes the requested frame's rpcId.
+    ///
+    /// A resolution that still has a pending entry is a REMOTE resolution
+    /// (another client answered — no exclusivity, Q10): toast the outcome,
+    /// and if it names the displayed takeover, promote the next pending (or
+    /// return to the chat). A resolution with no pending entry is the echo
+    /// of a local answer — already toasted optimistically, nothing to do.
+    pub fn record_resolved(&mut self, frame: &MuxFrame) {
+        match frame {
+            MuxFrame::ApprovalResolved {
+                approval_id,
+                outcome,
+                ..
+            } => {
+                if self.pending_approvals.remove(approval_id).is_none() {
+                    return;
+                }
+                self.set_toast(remote_approval_text(*outcome));
+                if matches!(&self.mode, Mode::Approval(takeover) if takeover.approval_id == *approval_id)
+                {
+                    self.mode = self.next_takeover().unwrap_or(Mode::Chat);
+                }
+            }
+            MuxFrame::QuestionResolved {
+                question_rpc_id,
+                outcome,
+                ..
+            } => {
+                if self
+                    .pending_questions
+                    .remove(&question_rpc_id.to_string())
+                    .is_none()
+                {
+                    return;
+                }
+                self.set_toast(remote_question_text(*outcome));
+                if matches!(&self.mode, Mode::Question(takeover) if takeover.rpc_id == *question_rpc_id)
+                {
+                    self.mode = self.next_takeover().unwrap_or(Mode::Chat);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Set the transient status toast (see [`App::toast`]).
+    pub fn set_toast(&mut self, text: impl Into<String>) {
+        self.toast = Some((text.into(), Instant::now()));
+    }
+
+    /// The current toast text (tests and the status line).
+    pub fn toast_text(&self) -> Option<&str> {
+        self.toast.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    /// Clear an expired toast (called from the run loop's ticks so the line
+    /// visibly clears without waiting for input).
+    pub fn expire_toast(&mut self) {
+        if self
+            .toast
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= TOAST_TTL)
+        {
+            self.toast = None;
+            self.needs_draw = true;
+        }
+    }
+
+    /// The notice line inside a takeover: a fresh toast, else the hint.
+    pub fn current_notice(&self) -> Option<&str> {
+        self.toast
+            .as_ref()
+            .map(|(text, _)| text.as_str())
+            .or(self.hint.as_deref())
+    }
+
+    /// Build the approval takeover for a pending entry, enriching it with
+    /// the matching tool call's one-line summary from the store.
+    fn approval_takeover(&self, pending: &ApprovalPending) -> ApprovalTakeover {
+        ApprovalTakeover {
+            session_id: pending.session_id.clone(),
+            approval_id: pending.approval_id.clone(),
+            rpc_id: pending.rpc_id.clone(),
+            tool_name: pending.tool_name.clone(),
+            call_id: pending.call_id.clone(),
+            reason: pending.reason.clone(),
+            tool_summary: self.tool_summary(&pending.session_id, pending.call_id.as_deref()),
+        }
+    }
+
+    /// The next takeover after the displayed one resolves: the newest
+    /// pending approval, else the newest pending question.
+    fn next_takeover(&self) -> Option<Mode> {
+        if let Some(pending) = self.pending_approvals.values().max_by_key(|p| p.seq) {
+            return Some(Mode::Approval(self.approval_takeover(pending)));
+        }
+        self.pending_questions
+            .values()
+            .max_by_key(|p| p.seq)
+            .map(|pending| {
+                Mode::Question(QuestionTakeover::new(
+                    pending.session_id.clone(),
+                    pending.rpc_id.clone(),
+                    pending.questions.clone(),
+                ))
+            })
+    }
+
+    /// `name args…` for the tool node whose call id matches, when the store
+    /// has it (the approval frame itself carries no arguments).
+    fn tool_summary(&self, session_id: &SessionId, call_id: Option<&str>) -> Option<String> {
+        let call_id = call_id?;
+        let state = self.store.session(session_id)?;
+        state.nodes.iter().find_map(|node| match &node.data {
+            NodeData::Tool {
+                call: Some(call), ..
+            } if call.call_id == call_id => {
+                let args: String = call.args_raw.chars().take(60).collect();
+                Some(format!("{} {}", call.name, args))
+            }
+            _ => None,
+        })
+    }
+
+    /// Handle one key (Q15 subset). Global keys first (`Ctrl+C` quits —
+    /// also during a takeover, the one documented exception), then a
+    /// takeover swallows ALL keys (chat/composer/sidebar keys are inert,
+    /// including `q`), then `Tab` cycles focus and the focused surface gets
+    /// the key. Returns the resulting [`Action`]; `Quit` is not applied
+    /// here — the run loop stops.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Action::Quit);
+        }
+        if !matches!(self.mode, Mode::Chat) {
+            return Some(self.handle_takeover_key(key));
         }
         if key.code == KeyCode::Tab {
             let next = self.focus.next();
@@ -192,6 +434,56 @@ impl App {
             Focus::Chat => self.handle_chat_key(key),
             Focus::Composer => Some(self.handle_composer_key(key)),
             Focus::Sidebar => self.handle_sidebar_key(key),
+        }
+    }
+
+    /// Takeover bindings (Q6/Q13). Approval: `y` allow once, `n`/`Esc`
+    /// reject (blocking — there is no dismiss, the server waits for a
+    /// response). Question: `Tab` cycles questions, `Up`/`Down`/`j`/`k`
+    /// move the cursor, `Space` toggles (multi-select), `Enter` submits all
+    /// answers; `Esc` is a no-op with a hint (no cancel in v1 — the server
+    /// resolves eventually).
+    fn handle_takeover_key(&mut self, key: KeyEvent) -> Action {
+        use crossterm::event::KeyCode;
+        match &mut self.mode {
+            Mode::Approval(_) => match key.code {
+                KeyCode::Char('y') => Action::AnswerApproval(ApprovalResponseOutcome::AllowedOnce),
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    Action::AnswerApproval(ApprovalResponseOutcome::Rejected)
+                }
+                _ => Action::None,
+            },
+            Mode::Question(takeover) => match key.code {
+                KeyCode::Tab => {
+                    takeover.focus_next();
+                    Action::Input
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let Some(question) = takeover.questions.get_mut(takeover.focused) {
+                        question.move_cursor(-1);
+                    }
+                    Action::Input
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let Some(question) = takeover.questions.get_mut(takeover.focused) {
+                        question.move_cursor(1);
+                    }
+                    Action::Input
+                }
+                KeyCode::Char(' ') => {
+                    if let Some(question) = takeover.questions.get_mut(takeover.focused) {
+                        question.toggle();
+                    }
+                    Action::Input
+                }
+                KeyCode::Enter => Action::AnswerQuestion,
+                KeyCode::Esc => {
+                    self.hint = Some("can't cancel yet — answer or wait".into());
+                    Action::None
+                }
+                _ => Action::None,
+            },
+            Mode::Chat => Action::None,
         }
     }
 
@@ -433,3 +725,25 @@ impl App {
 
 /// Coalesced draw interval (Q3).
 pub(crate) const DRAW_INTERVAL: Duration = Duration::from_millis(16);
+
+/// Toast lifetime: cleared on the first tick at least this long after it
+/// was set.
+pub(crate) const TOAST_TTL: Duration = Duration::from_secs(3);
+
+/// Toast text for a remotely resolved approval (no exclusivity, Q10).
+fn remote_approval_text(outcome: ApprovalOutcome) -> String {
+    match outcome {
+        ApprovalOutcome::AllowedOnce => "approved by another client".into(),
+        ApprovalOutcome::Rejected => "rejected by another client".into(),
+        ApprovalOutcome::Cancelled => "approval cancelled".into(),
+        ApprovalOutcome::Unavailable => "approval unavailable".into(),
+    }
+}
+
+/// Toast text for a remotely resolved question.
+fn remote_question_text(outcome: QuestionOutcome) -> String {
+    match outcome {
+        QuestionOutcome::Answered => "answered by another client".into(),
+        QuestionOutcome::Cancelled => "question cancelled".into(),
+    }
+}

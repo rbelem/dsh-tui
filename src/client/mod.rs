@@ -234,16 +234,19 @@ impl WireClient {
 
     /// Subscribe to the mux downlink (`/api/events.mux`). Spawns a subscriber
     /// task on first call that reconnects with capped backoff while the
-    /// gateway restarts; frames are ServerRequest payloads parsed into
-    /// MuxFrame values. Downlink-only: nothing is ever sent on the socket.
-    /// Drop the receiver to stop the subscriber. Call once per consumer.
-    pub fn mux_stream(&self) -> mpsc::UnboundedReceiver<MuxFrame> {
+    /// gateway restarts; each yielded value is the ServerRequest payload
+    /// parsed into a [`MuxFrame`] paired with the envelope's rpcId — the echo
+    /// target for answerable frames (approval/question requested), a fresh
+    /// push id otherwise ("rpcId echoed, never minted anew", rpc.ts:178).
+    /// Downlink-only: nothing is ever sent on the socket. Drop the receiver
+    /// to stop the subscriber. Call once per consumer.
+    pub fn mux_stream(&self) -> mpsc::UnboundedReceiver<DownlinkFrame<MuxFrame>> {
         spawn_downlink(&self.inner, "/api/events.mux")
     }
 
     /// Subscribe to the host downlink (`/api/events.host`); see
     /// [`WireClient::mux_stream`].
-    pub fn host_stream(&self) -> mpsc::UnboundedReceiver<HostFrame> {
+    pub fn host_stream(&self) -> mpsc::UnboundedReceiver<DownlinkFrame<HostFrame>> {
         spawn_downlink(&self.inner, "/api/events.host")
     }
 
@@ -333,12 +336,22 @@ impl WireClient {
     }
 }
 
+/// A downlink frame paired with its ServerRequest envelope's rpcId.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DownlinkFrame<F> {
+    /// The envelope rpcId: for answerable frames this is the value the
+    /// answering ClientResponse must echo (rpc.ts:178); for pure pushes it
+    /// identifies that one push.
+    pub rpc_id: RpcId,
+    pub frame: F,
+}
+
 /// A frame parsed from a downlink ServerRequest payload slot.
-trait DownlinkFrame: Sized + Send + 'static {
+trait DownlinkPayload: Sized + Send + 'static {
     fn from_server_request(request: ServerRequest) -> Result<Self, String>;
 }
 
-impl DownlinkFrame for MuxFrame {
+impl DownlinkPayload for MuxFrame {
     fn from_server_request(request: ServerRequest) -> Result<Self, String> {
         request
             .into_mux_frame()
@@ -346,7 +359,7 @@ impl DownlinkFrame for MuxFrame {
     }
 }
 
-impl DownlinkFrame for HostFrame {
+impl DownlinkPayload for HostFrame {
     fn from_server_request(request: ServerRequest) -> Result<Self, String> {
         request
             .into_host_frame()
@@ -357,7 +370,10 @@ impl DownlinkFrame for HostFrame {
 /// Spawn one downlink subscriber task (mux or host) and hand back its frame
 /// receiver. Reconnects on socket drop with capped backoff (the gateway may
 /// be restarting); stops when the client is dropped or the receiver is.
-fn spawn_downlink<F: DownlinkFrame>(inner: &Arc<Inner>, path: &str) -> mpsc::UnboundedReceiver<F> {
+fn spawn_downlink<F: DownlinkPayload>(
+    inner: &Arc<Inner>,
+    path: &str,
+) -> mpsc::UnboundedReceiver<DownlinkFrame<F>> {
     let (tx, rx) = mpsc::unbounded_channel();
     let inner = Arc::clone(inner);
     let url = format!("{}{}", inner.ws_base, path);
@@ -372,11 +388,17 @@ fn spawn_downlink<F: DownlinkFrame>(inner: &Arc<Inner>, path: &str) -> mpsc::Unb
                             Some(Ok(Message::Text(text))) => {
                                 let parsed = serde_json::from_str::<ServerRequest>(&text)
                                     .map_err(|e| format!("invalid server-request envelope: {e}"))
-                                    .and_then(F::from_server_request);
+                                    .and_then(|request| {
+                                        // Capture the envelope rpcId BEFORE the
+                                        // payload parse consumes the request.
+                                        let rpc_id = request.rpc_id.clone();
+                                        F::from_server_request(request)
+                                            .map(|frame| DownlinkFrame { rpc_id, frame })
+                                    });
                                 match parsed {
-                                    Ok(frame) => {
+                                    Ok(downlink) => {
                                         // Downlink-only socket: never send back.
-                                        if tx.send(frame).is_err() {
+                                        if tx.send(downlink).is_err() {
                                             return; // consumer gone — stop
                                         }
                                     }

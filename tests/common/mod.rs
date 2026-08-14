@@ -109,6 +109,21 @@ impl MockGateway {
         }
         let _ = self.task.await;
     }
+
+    /// The rpcIds echoed in every captured `/api/respond` body (ClientResponse
+    /// full forms) — lets tests assert the respond echo contract.
+    pub async fn respond_rpc_ids(&self) -> Vec<String> {
+        let requests = self.requests.lock().await.clone();
+        requests
+            .iter()
+            .filter(|request| request.path == "/api/respond")
+            .filter_map(|request| {
+                serde_json::from_str::<serde_json::Value>(&request.body)
+                    .ok()
+                    .and_then(|body| body.get("rpcId")?.as_str().map(str::to_owned))
+            })
+            .collect()
+    }
 }
 
 async fn handle_connection(

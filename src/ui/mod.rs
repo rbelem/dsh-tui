@@ -8,6 +8,8 @@
 pub mod composer;
 pub mod sidebar;
 pub mod style;
+pub mod takeover;
 
 pub use composer::{Composer, ComposerView, PopupKind, SeedItem, SeedPopup};
 pub use sidebar::{SidebarState, SidebarView, sidebar_width};
+pub use takeover::{ApprovalTakeover, ApprovalView, Mode, QuestionTakeover, QuestionView};

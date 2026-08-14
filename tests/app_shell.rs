@@ -16,7 +16,12 @@ use tokio::sync::mpsc;
 use dsh_tui::app::{Action, App, AppEvent, Focus, attach, spawn_frame_bridge};
 use dsh_tui::client::WireClient;
 use dsh_tui::store::SessionStore;
-use dsh_tui::wire::events::MuxFrame;
+use dsh_tui::ui::takeover::{ApprovalTakeover, Mode, QuestionTakeover};
+use dsh_tui::wire::approvals::{ApprovalRequestId, ApprovalResponseOutcome};
+use dsh_tui::wire::events::{
+    ApprovalOutcome, AskUserQuestionItem, MuxFrame, QuestionOption, QuestionOutcome,
+};
+use dsh_tui::wire::rpc::RpcId;
 use dsh_tui::wire::session::{SessionEvent, SessionId};
 
 // ---------------------------------------------------------------------------
@@ -252,6 +257,35 @@ fn keymap_table() {
         app.focus = Focus::Composer;
         app.composer.insert_char('/');
     }
+    fn approval_mode(app: &mut App) {
+        app.mode = Mode::Approval(ApprovalTakeover {
+            session_id: SessionId("s1".into()),
+            approval_id: ApprovalRequestId("a1".into()),
+            rpc_id: RpcId("rpc-1".into()),
+            tool_name: "bash".into(),
+            call_id: None,
+            reason: None,
+            tool_summary: None,
+        });
+    }
+    fn question_mode(app: &mut App) {
+        app.mode = Mode::Question(QuestionTakeover::new(
+            SessionId("s1".into()),
+            RpcId("rpc-1".into()),
+            vec![AskUserQuestionItem {
+                id: "q1".into(),
+                question: "pick one".into(),
+                header: None,
+                detail: None,
+                options: Some(vec![QuestionOption {
+                    label: "a".into(),
+                    description: None,
+                }]),
+                multi_select: None,
+                intent: None,
+            }],
+        ));
+    }
     /// One binding case: setup, the key, the expected action.
     type Case = (fn(&mut App), KeyEvent, Option<Action>);
     let cases: Vec<Case> = vec![
@@ -335,6 +369,40 @@ fn keymap_table() {
             Some(Action::Focus(Focus::Chat)),
         ),
         (sidebar_focus, key(KeyCode::Char('q')), Some(Action::Quit)),
+        // approval takeover: y allow once, n/Esc reject; chat keys inert
+        (
+            approval_mode,
+            key(KeyCode::Char('y')),
+            Some(Action::AnswerApproval(ApprovalResponseOutcome::AllowedOnce)),
+        ),
+        (
+            approval_mode,
+            key(KeyCode::Char('n')),
+            Some(Action::AnswerApproval(ApprovalResponseOutcome::Rejected)),
+        ),
+        (
+            approval_mode,
+            key(KeyCode::Esc),
+            Some(Action::AnswerApproval(ApprovalResponseOutcome::Rejected)),
+        ),
+        (approval_mode, key(KeyCode::Char('q')), Some(Action::None)),
+        (approval_mode, key(KeyCode::Char('j')), Some(Action::None)),
+        (approval_mode, key(KeyCode::Tab), Some(Action::None)),
+        // question takeover: nav/toggle/submit; chat keys inert
+        (question_mode, key(KeyCode::Tab), Some(Action::Input)),
+        (question_mode, key(KeyCode::Down), Some(Action::Input)),
+        (question_mode, key(KeyCode::Char('j')), Some(Action::Input)),
+        (question_mode, key(KeyCode::Char(' ')), Some(Action::Input)),
+        (
+            question_mode,
+            key(KeyCode::Enter),
+            Some(Action::AnswerQuestion),
+        ),
+        (question_mode, key(KeyCode::Esc), Some(Action::None)),
+        (question_mode, key(KeyCode::Char('q')), Some(Action::None)),
+        // Ctrl+C stays the global quit, even during a takeover
+        (approval_mode, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
+        (question_mode, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
     ];
     for (setup, event, expected) in cases {
         let mut app = App::default();
@@ -480,5 +548,126 @@ async fn resize_invalidates_and_rerenders() {
     assert!(
         narrow > wide,
         "rows re-wrap at 60 columns (wide={wide}, narrow={narrow})"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// approval/question pending tracking + respond echo
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn approval_pending_tracking_and_respond_echo() {
+    // The mock only serves /api/respond; answerable events are injected
+    // directly (the frame bridge would produce the same AppEvents).
+    let mock = MockGateway::start().await;
+    mock.set_handler("respond", MockAction::Ok(r#"{"accepted":true}"#))
+        .await;
+    let client = WireClient::attach(mock.port()).unwrap();
+
+    let mut app = App::default();
+    let backend = TestBackend::new(100, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut rx).await;
+        (result, app, term)
+    });
+    tx.send(AppEvent::Answerable {
+        rpc_id: RpcId("rpc-approval-1".into()),
+        frame: MuxFrame::ApprovalRequested {
+            session_id: SessionId("s1".into()),
+            approval_id: ApprovalRequestId("a1".into()),
+            tool_name: "read_file".into(),
+            call_id: Some("call-1".into()),
+            reason: Some("reads /etc".into()),
+        },
+    })
+    .expect("answerable");
+    // The requested frame opened the approval takeover: `q` is inert there,
+    // so quit via the global Ctrl+C.
+    tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
+        .expect("ctrl+c");
+    let (result, mut app, mut term) = run_task.await.expect("run task");
+    result.expect("run");
+
+    // The requested frame recorded the pending approval with the echo target.
+    let pending = app
+        .pending_approvals
+        .get(&ApprovalRequestId("a1".into()))
+        .expect("pending approval recorded");
+    assert_eq!(pending.rpc_id, RpcId("rpc-approval-1".into()));
+    assert_eq!(pending.tool_name, "read_file");
+    assert_eq!(pending.call_id.as_deref(), Some("call-1"));
+    assert_eq!(pending.reason.as_deref(), Some("reads /etc"));
+    let echo_target = pending.rpc_id.clone();
+
+    // Respond flow: the recorded rpc_id is what the answer echoes.
+    let receipt = client
+        .respond_approval(
+            echo_target,
+            SessionId("s1".into()),
+            ApprovalRequestId("a1".into()),
+            ApprovalResponseOutcome::AllowedOnce,
+        )
+        .await
+        .expect("respond");
+    assert!(receipt.accepted);
+    assert_eq!(
+        mock.respond_rpc_ids().await,
+        vec!["rpc-approval-1".to_string()],
+        "respond echoes the requested frame's rpcId, never mints a new one"
+    );
+
+    // The resolved frame (a pure push with its own fresh rpcId) removes the
+    // pending entry; correlation is by payload approvalId.
+    app.running = true;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut rx).await;
+        (result, app, term)
+    });
+    tx.send(AppEvent::Frame(MuxFrame::ApprovalResolved {
+        session_id: SessionId("s1".into()),
+        approval_id: ApprovalRequestId("a1".into()),
+        outcome: ApprovalOutcome::AllowedOnce,
+    }))
+    .expect("resolved");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, app, _term) = run_task.await.expect("run task");
+    result.expect("run");
+    assert!(
+        app.pending_approvals.is_empty(),
+        "resolved removes the pending entry"
+    );
+
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn question_pending_tracking_by_echo_rpc_id() {
+    // question/requested records by rpcId; question/resolved (payload
+    // questionRpcId) removes it.
+    let mut app = App::default();
+    let requested = MuxFrame::QuestionRequested {
+        session_id: SessionId("s1".into()),
+        questions: vec![],
+    };
+    app.record_answerable(RpcId("rpc-question-1".into()), &requested);
+    assert_eq!(
+        app.pending_questions
+            .get("rpc-question-1")
+            .map(|p| &p.rpc_id),
+        Some(&RpcId("rpc-question-1".into()))
+    );
+
+    let resolved = MuxFrame::QuestionResolved {
+        session_id: SessionId("s1".into()),
+        question_rpc_id: RpcId("rpc-question-1".into()),
+        outcome: QuestionOutcome::Answered,
+    };
+    app.record_resolved(&resolved);
+    assert!(
+        app.pending_questions.is_empty(),
+        "question/resolved removes the entry"
     );
 }

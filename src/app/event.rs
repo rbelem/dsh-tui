@@ -10,15 +10,34 @@
 use crossterm::event::KeyEvent;
 use tokio::sync::mpsc;
 
+use crate::client::DownlinkFrame;
 use crate::wire::events::MuxFrame;
+use crate::wire::rpc::RpcId;
 
 /// One event for the main loop.
 #[derive(Debug)]
 pub enum AppEvent {
     Key(KeyEvent),
     Frame(MuxFrame),
+    /// An answerable frame (`approval/requested`, `question/requested`) with
+    /// its envelope rpcId — the echo target for the answering ClientResponse
+    /// ("rpcId echoed, never minted anew", rpc.ts:178).
+    Answerable {
+        rpc_id: RpcId,
+        frame: MuxFrame,
+    },
     Resize(u16, u16),
     Tick,
+}
+
+/// Whether a mux frame is answerable (its envelope rpcId is the respond echo
+/// target). Only approval/question requested frames — `session/event` etc.
+/// are pure pushes.
+pub fn is_answerable(frame: &MuxFrame) -> bool {
+    matches!(
+        frame,
+        MuxFrame::ApprovalRequested { .. } | MuxFrame::QuestionRequested { .. }
+    )
 }
 
 /// Spawn the crossterm input bridge: reads terminal events and forwards
@@ -51,14 +70,24 @@ pub fn spawn_input_bridge(tx: mpsc::UnboundedSender<AppEvent>) {
 }
 
 /// Spawn the mux frame bridge: drains the wire client's mux subscriber into
-/// Frame events. The host stream has no store surface yet (v1 TODO).
+/// events. Answerable frames travel as [`AppEvent::Answerable`] (envelope
+/// rpcId preserved); everything else as [`AppEvent::Frame`]. The host stream
+/// has no store surface yet (v1 TODO).
 pub fn spawn_frame_bridge(
-    mut mux: mpsc::UnboundedReceiver<MuxFrame>,
+    mut mux: mpsc::UnboundedReceiver<DownlinkFrame<MuxFrame>>,
     tx: mpsc::UnboundedSender<AppEvent>,
 ) {
     tokio::spawn(async move {
-        while let Some(frame) = mux.recv().await {
-            if tx.send(AppEvent::Frame(frame)).is_err() {
+        while let Some(downlink) = mux.recv().await {
+            let event = if is_answerable(&downlink.frame) {
+                AppEvent::Answerable {
+                    rpc_id: downlink.rpc_id,
+                    frame: downlink.frame,
+                }
+            } else {
+                AppEvent::Frame(downlink.frame)
+            };
+            if tx.send(event).is_err() {
                 break;
             }
         }

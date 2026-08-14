@@ -5,6 +5,7 @@
 //! (hidden below 60 columns), and a right column stacking the chat (fill),
 //! the composer (one top rule; height tracks the buffer, capped at 8 rows),
 //! and the one-line status. Each seam is a single divider — no boxed panes.
+//! An approval/question takeover (Q6) replaces the whole layout.
 
 use std::time::Instant;
 
@@ -20,6 +21,9 @@ use crate::app::{Action, App, AppError, DRAW_INTERVAL, Focus};
 use crate::render::chat_view::ChatView;
 use crate::ui::composer::{ComposerView, SeedPopup};
 use crate::ui::sidebar::{SidebarView, sidebar_width};
+use crate::ui::takeover::{ApprovalView, Mode, QuestionView};
+use crate::wire::approvals::ApprovalResponseOutcome;
+use crate::wire::questions::{AskUserQuestionAnswer, QuestionAnswerItem};
 use crate::wire::session::{PromptContentPart, PromptMode};
 
 impl App {
@@ -52,18 +56,34 @@ impl App {
                                     break;
                                 }
                                 Some(Action::Submit(text)) => self.dispatch_prompt(text),
+                                Some(Action::AnswerApproval(outcome)) => {
+                                    self.answer_approval(outcome).await;
+                                }
+                                Some(Action::AnswerQuestion) => self.answer_question().await,
                                 _ => {}
                             }
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
                         Some(AppEvent::Frame(frame)) => {
+                            self.record_resolved(&frame);
                             match self.store.ingest(frame) {
                                 Ok(()) => {}
                                 Err(error) => self.last_error = Some(error.to_string()),
                             }
                             self.needs_draw = true;
                             self.draw_if_due(term, false)?;
+                        }
+                        Some(AppEvent::Answerable { rpc_id, frame }) => {
+                            self.record_answerable(rpc_id, &frame);
+                            // The store ignores answerable frames; the
+                            // takeover they open draws immediately.
+                            match self.store.ingest(frame) {
+                                Ok(()) => {}
+                                Err(error) => self.last_error = Some(error.to_string()),
+                            }
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
                         }
                         Some(AppEvent::Resize(_width, height)) => {
                             // Q10: width change → full re-render.
@@ -72,11 +92,17 @@ impl App {
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
-                        Some(AppEvent::Tick) => self.draw_if_due(term, false)?,
+                        Some(AppEvent::Tick) => {
+                            self.expire_toast();
+                            self.draw_if_due(term, false)?;
+                        }
                         None => break,
                     }
                 }
-                _ = tick.tick() => self.draw_if_due(term, false)?,
+                _ = tick.tick() => {
+                    self.expire_toast();
+                    self.draw_if_due(term, false)?;
+                }
             }
         }
         Ok(())
@@ -103,11 +129,34 @@ impl App {
     }
 
     /// Sync the row cache, apply follow, and render the three surfaces:
-    /// sidebar | chat over composer over the status line.
+    /// sidebar | chat over composer over the status line. A takeover (Q6)
+    /// replaces the whole layout.
     fn draw<B>(&mut self, term: &mut Terminal<B>) -> Result<(), B::Error>
     where
         B: Backend,
     {
+        // Full-screen takeover: the chat surfaces stay live underneath
+        // (frames keep folding into the store) but are not drawn.
+        if !matches!(self.mode, Mode::Chat) {
+            term.draw(|frame| {
+                let area = frame.area();
+                let notice = self.current_notice();
+                match &self.mode {
+                    Mode::Approval(takeover) => {
+                        frame.render_widget(ApprovalView { takeover, notice }, area)
+                    }
+                    Mode::Question(takeover) => {
+                        frame.render_widget(QuestionView { takeover, notice }, area)
+                    }
+                    Mode::Chat => {}
+                }
+            })?;
+            self.last_draw = Some(Instant::now());
+            self.needs_draw = false;
+            self.draws += 1;
+            return Ok(());
+        }
+
         let size = term.size()?;
         let full = Rect::new(0, 0, size.width, size.height);
         let sidebar_width = sidebar_width(size.width);
@@ -231,8 +280,71 @@ impl App {
         });
     }
 
+    /// Post the approval answer and resolve the takeover. The respond POST
+    /// is awaited inline (loopback, normally instant — v1; a hung gateway
+    /// stalls the loop until the RPC timeout, so a spawned answer task with
+    /// an event back-channel is a TODO). On success: optimistic resolution
+    /// (pending dropped, next takeover promoted or back to chat, toast). On
+    /// error: toast and STAY in the takeover — the key can be pressed again.
+    async fn answer_approval(&mut self, outcome: ApprovalResponseOutcome) {
+        let Mode::Approval(takeover) = &self.mode else {
+            return;
+        };
+        let (rpc_id, session_id, approval_id) = (
+            takeover.rpc_id.clone(),
+            takeover.session_id.clone(),
+            takeover.approval_id.clone(),
+        );
+        if let Some(client) = &self.client
+            && let Err(error) = client
+                .respond_approval(rpc_id, session_id, approval_id.clone(), outcome)
+                .await
+        {
+            self.set_toast(format!("answer failed: {error}"));
+            return;
+        }
+        self.pending_approvals.remove(&approval_id);
+        self.mode = self.next_takeover().unwrap_or(Mode::Chat);
+        self.set_toast(match outcome {
+            ApprovalResponseOutcome::AllowedOnce => "allowed once",
+            ApprovalResponseOutcome::Rejected => "rejected",
+        });
+    }
+
+    /// Post the question answers (one entry per question; `selected` carries
+    /// the option labels) and resolve the takeover — same inline-await and
+    /// error policy as [`App::answer_approval`].
+    async fn answer_question(&mut self) {
+        let Mode::Question(takeover) = &self.mode else {
+            return;
+        };
+        let answer = AskUserQuestionAnswer {
+            answers: takeover
+                .questions
+                .iter()
+                .map(|question| QuestionAnswerItem {
+                    id: question.item.id.clone(),
+                    selected: question.selected_labels(),
+                    custom: None,
+                })
+                .collect(),
+        };
+        let rpc_id = takeover.rpc_id.clone();
+        if let Some(client) = &self.client
+            && let Err(error) = client
+                .respond_question(rpc_id.clone(), takeover.session_id.clone(), answer)
+                .await
+        {
+            self.set_toast(format!("answer failed: {error}"));
+            return;
+        }
+        self.pending_questions.remove(&rpc_id.to_string());
+        self.mode = self.next_takeover().unwrap_or(Mode::Chat);
+        self.set_toast("answered");
+    }
+
     /// The one-line status: session id · last seq · truncated flag · running
-    /// · focused surface · transient hint · error.
+    /// · focused surface · transient hint · toast · error.
     fn status_line(&self) -> Line<'static> {
         let mut parts: Vec<String> = Vec::new();
         match &self.active_session {
@@ -255,6 +367,9 @@ impl App {
         parts.push(format!("focus: {}", self.focus.label()));
         if let Some(hint) = &self.hint {
             parts.push(hint.clone());
+        }
+        if let Some((toast, _)) = &self.toast {
+            parts.push(toast.clone());
         }
         if let Some(error) = &self.last_error {
             parts.push(format!("error: {error}"));

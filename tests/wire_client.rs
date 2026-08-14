@@ -10,7 +10,7 @@ use std::time::Duration;
 use dsh_tui::client::{ClientError, WireClient};
 use dsh_tui::store::SessionStore;
 use dsh_tui::wire::approvals::{ApprovalRequestId, ApprovalResponseOutcome};
-use dsh_tui::wire::events::HostFrame;
+use dsh_tui::wire::events::{HostFrame, MuxFrame};
 use dsh_tui::wire::rpc::{RpcError, RpcId};
 use dsh_tui::wire::session::{Origin, PromptMode, SessionId};
 
@@ -155,9 +155,9 @@ async fn mux_subscribe_feeds_session_store() {
     let drain_sid = sid.clone();
     let drain = tokio::spawn(async move {
         let mut store = SessionStore::new();
-        while let Some(frame) = frames.recv().await {
+        while let Some(downlink) = frames.recv().await {
             store
-                .ingest(frame)
+                .ingest(downlink.frame)
                 .expect("store must accept scripted frames");
             let done = store.session(&drain_sid).is_some_and(|state| {
                 state.last_seq == 2 && state.projections.contains_key("session.list")
@@ -189,6 +189,38 @@ async fn mux_subscribe_feeds_session_store() {
     assert_eq!(state.nodes[0].key, "m1");
     assert_eq!(state.nodes[1].key, "1:1");
 
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn mux_stream_preserves_envelope_rpc_id() {
+    let mock = MockGateway::start().await;
+    mock.set_ws_frames(
+        "/api/events.mux",
+        vec![
+            // An answerable frame with a scripted rpcId: the pair must carry
+            // it verbatim (the respond echo target, rpc.ts:178).
+            r#"{"type":"server-request","rpcId":"rpc-approval-1","method":"events.mux","payload":{"type":"approval/requested","sessionId":"s1","approvalId":"a1","toolName":"read_file","callId":"call-1","reason":"reads /etc"}}"#.into(),
+            // A pure push with its own rpcId.
+            r#"{"type":"server-request","rpcId":"rpc-push-2","method":"events.mux","payload":{"type":"session/subscribed","sessionId":"s1","lastSeq":1}}"#.into(),
+        ],
+    )
+    .await;
+
+    let client = WireClient::attach(mock.port()).unwrap();
+    let mut frames = client.mux_stream();
+    let first = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+        .await
+        .expect("frame must arrive")
+        .expect("stream must not end");
+    assert_eq!(first.rpc_id, RpcId("rpc-approval-1".into()));
+    assert!(matches!(first.frame, MuxFrame::ApprovalRequested { .. }));
+    let second = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+        .await
+        .expect("frame must arrive")
+        .expect("stream must not end");
+    assert_eq!(second.rpc_id, RpcId("rpc-push-2".into()));
+    assert!(matches!(second.frame, MuxFrame::SessionSubscribed { .. }));
     mock.stop().await;
 }
 
@@ -235,11 +267,16 @@ async fn host_stream_receives_session_added() {
 
     let client = WireClient::attach(mock.port()).unwrap();
     let mut frames = client.host_stream();
-    let frame = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+    let downlink = tokio::time::timeout(Duration::from_secs(5), frames.recv())
         .await
         .expect("host frame must arrive")
         .expect("stream must not end");
-    match frame {
+    assert_eq!(
+        downlink.rpc_id,
+        RpcId("h-1".into()),
+        "envelope rpcId preserved"
+    );
+    match downlink.frame {
         HostFrame::HostSessionAdded {
             session_id, blank, ..
         } => {
