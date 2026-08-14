@@ -21,6 +21,7 @@ use syntect::highlighting::{FontStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use unicode_width::UnicodeWidthStr;
 
+use crate::i18n::{Locale, tr, trf};
 use crate::store::event_data::ContentBlock;
 use crate::store::node::{AssistantBlock, ChatNode, NodeData, UserNodeKind};
 use crate::theme::Theme;
@@ -32,49 +33,59 @@ const ARGS_PREVIEW_MAX: usize = 100;
 
 /// Render one chat node to (unwrapped) display lines. `collapsed` is the
 /// node's fold state (Q11): collapsed tool nodes render a one-line summary.
-/// `theme` supplies the semantic colors (text/muted/error/warning/code).
-pub fn render_node(node: &ChatNode, collapsed: bool, theme: &Theme) -> Vec<Line<'static>> {
+/// `theme` supplies the semantic colors (text/muted/error/warning/code);
+/// `locale` localizes the row markers.
+pub fn render_node(
+    node: &ChatNode,
+    collapsed: bool,
+    theme: &Theme,
+    locale: Locale,
+) -> Vec<Line<'static>> {
     let notice = |text: String| Line::styled(text, Style::default().fg(theme.muted));
     match &node.data {
-        NodeData::User { kind, content, .. } => render_user_node(*kind, content, theme),
+        NodeData::User { kind, content, .. } => render_user_node(*kind, content, theme, locale),
         NodeData::Assistant {
             blocks,
             interrupted,
             ..
         } => {
-            let mut lines = render_assistant_blocks(blocks, theme);
+            let mut lines = render_assistant_blocks(blocks, theme, locale);
             if *interrupted {
                 lines.push(Line::styled(
-                    "[interrupted]",
+                    tr(locale, "marker.interrupted"),
                     Style::default().fg(theme.warning),
                 ));
             }
             lines
         }
         NodeData::Tool { call, result, .. } => {
-            render_tool_node(call.as_ref(), result.as_deref(), collapsed, theme)
+            render_tool_node(call.as_ref(), result.as_deref(), collapsed, theme, locale)
         }
         NodeData::Compaction {
             shadowed_item_count,
             ..
         } => {
             let count = shadowed_item_count.unwrap_or(0);
-            vec![notice(format!("[compacted {count} messages]"))]
+            vec![notice(trf(
+                locale,
+                "marker.compacted",
+                &[&count.to_string()],
+            ))]
         }
         NodeData::TurnError { code, .. } => {
             let code = code.as_deref().unwrap_or("unknown");
             vec![Line::styled(
-                format!("[turn error: {code}]"),
+                trf(locale, "marker.turn_error", &[code]),
                 Style::default().fg(theme.error),
             )]
         }
         NodeData::TurnMaxTokens { .. } => {
             vec![Line::styled(
-                "[max tokens]",
+                tr(locale, "marker.max_tokens"),
                 Style::default().fg(theme.warning),
             )]
         }
-        NodeData::Unknown { r#type, .. } => vec![notice(format!("[unknown: {type}]"))],
+        NodeData::Unknown { r#type, .. } => vec![notice(trf(locale, "marker.unknown", &[r#type]))],
     }
 }
 
@@ -103,14 +114,19 @@ fn render_user_node(
     kind: UserNodeKind,
     content: &[ContentBlock],
     theme: &Theme,
+    locale: Locale,
 ) -> Vec<Line<'static>> {
     // The Steering distinction is a store TODO (v1 renders by source kind);
     // user and context rows render their content identically.
     let _ = kind;
-    render_content_blocks(content, theme)
+    render_content_blocks(content, theme, locale)
 }
 
-fn render_assistant_blocks(blocks: &[AssistantBlock], theme: &Theme) -> Vec<Line<'static>> {
+fn render_assistant_blocks(
+    blocks: &[AssistantBlock],
+    theme: &Theme,
+    locale: Locale,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for block in blocks {
         match block {
@@ -125,14 +141,18 @@ fn render_assistant_blocks(blocks: &[AssistantBlock], theme: &Theme) -> Vec<Line
                 theme,
             )),
             AssistantBlock::ToolCall { name, args_raw, .. } => {
-                lines.push(tool_call_line(name, args_raw, theme));
+                lines.push(tool_call_line(name, args_raw, theme, locale));
             }
         }
     }
     lines
 }
 
-fn render_content_blocks(content: &[ContentBlock], theme: &Theme) -> Vec<Line<'static>> {
+fn render_content_blocks(
+    content: &[ContentBlock],
+    theme: &Theme,
+    locale: Locale,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for block in content {
         match block {
@@ -147,33 +167,36 @@ fn render_content_blocks(content: &[ContentBlock], theme: &Theme) -> Vec<Line<'s
                 theme,
             )),
             ContentBlock::Image { attachment } => {
-                let name = attachment.name.as_deref().unwrap_or("image");
+                let name = attachment
+                    .name
+                    .as_deref()
+                    .unwrap_or_else(|| tr(locale, "marker.image_default"));
                 lines.push(Line::styled(
-                    format!("[image: {name}]"),
+                    trf(locale, "marker.image", &[name]),
                     Style::default().fg(theme.muted),
                 ));
             }
             ContentBlock::ToolCall { name, .. } => {
                 lines.push(Line::styled(
-                    format!("[tool] {name}"),
+                    format!("{} {name}", tr(locale, "marker.tool")),
                     Style::default().fg(theme.text),
                 ));
             }
             ContentBlock::ToolResult { is_error, .. } => {
                 let suffix = if *is_error == Some(true) {
-                    " failed"
+                    tr(locale, "marker.failed_suffix")
                 } else {
                     ""
                 };
                 lines.push(Line::styled(
-                    format!("[tool-result]{suffix}"),
+                    format!("{}{suffix}", tr(locale, "marker.tool_result")),
                     Style::default().fg(theme.muted),
                 ));
             }
             ContentBlock::Raw(value) => {
                 let block_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("?");
                 lines.push(Line::styled(
-                    format!("[block: {block_type}]"),
+                    trf(locale, "marker.block", &[block_type]),
                     Style::default().fg(theme.muted),
                 ));
             }
@@ -187,6 +210,7 @@ fn render_tool_node(
     result: Option<&crate::store::node::ToolResultNode>,
     collapsed: bool,
     theme: &Theme,
+    locale: Locale,
 ) -> Vec<Line<'static>> {
     let name = call
         .map(|c| c.name.as_str())
@@ -197,18 +221,25 @@ fn render_tool_node(
     if collapsed {
         // One-line summary (lifecycle icon + title, Q11).
         let failed = result.is_some_and(|r| r.is_error);
-        let suffix = if failed { " failed" } else { "" };
+        let suffix = if failed {
+            tr(locale, "marker.failed_suffix")
+        } else {
+            ""
+        };
         let style = if failed {
             Style::default().fg(theme.error)
         } else {
             Style::default().fg(theme.text)
         };
-        return vec![Line::styled(format!("[tool] {name}{suffix}"), style)];
+        return vec![Line::styled(
+            format!("{} {name}{suffix}", tr(locale, "marker.tool")),
+            style,
+        )];
     }
 
-    let mut lines = vec![tool_call_line(name, args_raw, theme)];
+    let mut lines = vec![tool_call_line(name, args_raw, theme, locale)];
     if let Some(result) = result {
-        lines.extend(render_content_blocks(&result.content, theme));
+        lines.extend(render_content_blocks(&result.content, theme, locale));
         if result.is_error {
             let code = result
                 .error
@@ -216,7 +247,7 @@ fn render_tool_node(
                 .map(|e| e.code.as_str())
                 .unwrap_or("failed");
             lines.push(Line::styled(
-                format!("[tool-result] failed: {code}"),
+                trf(locale, "marker.tool_result_failed", &[code]),
                 Style::default().fg(theme.error),
             ));
         }
@@ -224,9 +255,9 @@ fn render_tool_node(
     lines
 }
 
-fn tool_call_line(name: &str, args_raw: &str, theme: &Theme) -> Line<'static> {
+fn tool_call_line(name: &str, args_raw: &str, theme: &Theme, locale: Locale) -> Line<'static> {
     let mut spans = vec![Span::styled(
-        format!("[tool] {name}"),
+        format!("{} {name}", tr(locale, "marker.tool")),
         Style::default().fg(theme.text),
     )];
     if !args_raw.is_empty() {

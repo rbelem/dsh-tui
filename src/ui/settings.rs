@@ -23,16 +23,28 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Padding, Paragraph, Widget, Wrap};
 
+use crate::i18n::{Locale, tr, trf};
 use crate::ui::style;
 use crate::wire::settings::{AppliesMode, SettingsNamespaceView};
+use unicode_width::UnicodeWidthStr;
 
-/// The v1 nav sections and their candidate namespace names.
-pub const SECTIONS: &[(&str, &str)] = &[
-    ("General", "general"),
-    ("Models", "models"),
-    ("Plugins", "plugins"),
-    ("Agent presets", "agent-presets"),
-    ("Permission presets", "permission-presets"),
+/// The v1 nav sections: (label, candidate namespace, i18n key). The label
+/// is the en display string; the key translates it (discovered namespaces
+/// have no key and render their raw label).
+pub const SECTIONS: &[(&str, &str, &str)] = &[
+    ("General", "general", "settings.section.general"),
+    ("Models", "models", "settings.section.models"),
+    ("Plugins", "plugins", "settings.section.plugins"),
+    (
+        "Agent presets",
+        "agent-presets",
+        "settings.section.agent_presets",
+    ),
+    (
+        "Permission presets",
+        "permission-presets",
+        "settings.section.permission_presets",
+    ),
 ];
 
 /// Which pane holds the keyboard focus.
@@ -48,6 +60,28 @@ pub enum SettingsFocus {
 pub struct SettingsSection {
     pub label: String,
     pub ns: String,
+    /// The i18n key for the label (`None` for discovered namespaces).
+    pub label_key: Option<&'static str>,
+}
+
+impl SettingsSection {
+    /// The display label for `locale`: translated when a key exists, else
+    /// the raw (host-provided) label.
+    pub fn label_for(&self, locale: Locale) -> String {
+        match self.label_key {
+            Some(key) => tr(locale, key).to_string(),
+            None => self.label.clone(),
+        }
+    }
+}
+
+/// Pad `text` to `width` display cells (CJK-safe: `{:24}` pads by chars,
+/// which misaligns wide labels).
+fn pad_width(text: &str, width: usize) -> String {
+    let text_width = UnicodeWidthStr::width(text);
+    let mut padded = text.to_string();
+    padded.push_str(&" ".repeat(width.saturating_sub(text_width)));
+    padded
 }
 
 /// How a field edits, parsed from its schema property.
@@ -304,9 +338,10 @@ impl SettingsState {
         SettingsState {
             sections: SECTIONS
                 .iter()
-                .map(|(label, ns)| SettingsSection {
+                .map(|(label, ns, key)| SettingsSection {
                     label: (*label).to_string(),
                     ns: (*ns).to_string(),
+                    label_key: Some(*key),
                 })
                 .collect(),
             loading: true,
@@ -323,7 +358,7 @@ impl SettingsState {
             .into_iter()
             .map(|view| (view.ns.clone(), SettingsForm::from_view(view)))
             .collect();
-        let claimed: Vec<&str> = SECTIONS.iter().map(|(_, ns)| *ns).collect();
+        let claimed: Vec<&str> = SECTIONS.iter().map(|(_, ns, _)| *ns).collect();
         let mut extras: Vec<String> = self
             .forms
             .keys()
@@ -335,6 +370,7 @@ impl SettingsState {
             self.sections.push(SettingsSection {
                 label: ns.clone(),
                 ns,
+                label_key: None,
             });
         }
         self.selected = self.selected.min(self.sections.len().saturating_sub(1));
@@ -376,13 +412,14 @@ pub struct SettingsView<'a> {
     /// Transient notice (toast/hint), rendered dim at the bottom.
     pub notice: Option<&'a str>,
     pub theme: &'a crate::theme::Theme,
+    pub locale: Locale,
 }
 
 impl Widget for SettingsView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered()
             .border_style(style::border(self.theme))
-            .title(" settings ")
+            .title(tr(self.locale, "settings.title"))
             .padding(Padding::horizontal(1));
         let inner = block.inner(area);
         block.render(area, buf);
@@ -398,10 +435,11 @@ impl Widget for SettingsView<'_> {
         let mut nav_lines: Vec<Line> = vec![Line::raw("")];
         for (row, section) in self.state.sections.iter().enumerate() {
             let known = self.state.forms.contains_key(&section.ns);
+            let label = section.label_for(self.locale);
             let label = if known {
-                section.label.clone()
+                label
             } else {
-                format!("{} (—)", section.label)
+                format!("{label}{}", tr(self.locale, "settings.unexposed_mark"))
             };
             let style = if row == self.state.selected {
                 style::selection(self.theme)
@@ -418,14 +456,21 @@ impl Widget for SettingsView<'_> {
         let form_focused = self.state.focus == SettingsFocus::Form;
         let mut lines: Vec<Line> = vec![Line::raw("")];
         if self.state.loading {
-            lines.push(Line::styled("loading…", style::hint(self.theme)));
+            lines.push(Line::styled(
+                tr(self.locale, "settings.loading"),
+                style::hint(self.theme),
+            ));
         } else if let Some(form) = self.state.selected_form() {
             let applies = match form.view.applies {
-                AppliesMode::Live => "applies live",
-                AppliesMode::Restart => "applies on restart",
+                AppliesMode::Live => tr(self.locale, "settings.applies_live"),
+                AppliesMode::Restart => tr(self.locale, "settings.applies_restart"),
             };
             lines.push(Line::styled(
-                format!("{} · revision {:.0}", applies, form.view.revision),
+                trf(
+                    self.locale,
+                    "settings.revision",
+                    &[applies, &format!("{:.0}", form.view.revision)],
+                ),
                 style::hint(self.theme),
             ));
             lines.push(Line::raw(""));
@@ -444,7 +489,7 @@ impl Widget for SettingsView<'_> {
                 let changed = form.view.value.get(&field.key) != Some(&field.value);
                 let read_only = matches!(field.kind, FieldKind::Raw);
                 let mut spans = vec![
-                    Span::raw(format!("{marker}{:24}", field.label)),
+                    Span::raw(format!("{marker}{}", pad_width(&field.label, 24))),
                     Span::styled(
                         value,
                         if read_only {
@@ -457,7 +502,10 @@ impl Widget for SettingsView<'_> {
                     ),
                 ];
                 if read_only {
-                    spans.push(Span::styled("  (read-only)", style::hint(self.theme)));
+                    spans.push(Span::styled(
+                        format!("  {}", tr(self.locale, "settings.read_only")),
+                        style::hint(self.theme),
+                    ));
                 }
                 if changed {
                     spans.push(Span::styled("  *", style::warning(self.theme)));
@@ -476,15 +524,15 @@ impl Widget for SettingsView<'_> {
             lines.push(Line::raw(""));
             lines.push(Line::from(vec![
                 Span::styled("enter", style::active(self.theme)),
-                Span::raw(" edit · "),
+                Span::raw(tr(self.locale, "settings.action_edit")),
                 Span::styled("ctrl+s", style::active(self.theme)),
-                Span::raw(" save · "),
+                Span::raw(tr(self.locale, "settings.action_save")),
                 Span::styled("esc", style::active(self.theme)),
-                Span::raw(" close"),
+                Span::raw(tr(self.locale, "settings.action_close")),
             ]));
         } else if let Some(section) = self.state.sections.get(self.state.selected) {
             lines.push(Line::styled(
-                format!("`{}` is not exposed by this gateway", section.ns),
+                trf(self.locale, "settings.not_exposed", &[&section.ns]),
                 style::hint(self.theme),
             ));
         }
@@ -497,8 +545,8 @@ impl Widget for SettingsView<'_> {
 
         // --- footer: pane-switch hint ---
         let hint = match self.state.focus {
-            SettingsFocus::Nav => "tab form · ↑↓ section",
-            SettingsFocus::Form => "tab nav · ↑↓ field",
+            SettingsFocus::Nav => tr(self.locale, "settings.footer_nav"),
+            SettingsFocus::Form => tr(self.locale, "settings.footer_form"),
         };
         Paragraph::new(Line::styled(hint, style::hint(self.theme))).render(footer_area, buf);
     }

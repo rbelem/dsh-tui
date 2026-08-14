@@ -208,6 +208,10 @@ pub struct Config {
     /// The active theme name; `None` = the terminal-following default.
     #[serde(default)]
     pub theme: Option<String>,
+    /// The persisted UI locale (`"en"` / `"zh"`); `None` = the terminal-
+    /// following default (`Locale::detect` resolves env when unset).
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 impl Config {
@@ -260,6 +264,7 @@ pub struct ThemePopup<'a> {
     pub themes: &'a [Theme],
     pub selected: usize,
     pub current: &'a Theme,
+    pub locale: crate::i18n::Locale,
 }
 
 impl ThemePopup<'_> {
@@ -282,7 +287,7 @@ impl Widget for ThemePopup<'_> {
         Clear.render(area, buf);
         let block = Block::bordered()
             .border_style(crate::ui::style::border(self.current))
-            .title("themes");
+            .title(crate::i18n::tr(self.locale, "theme.picker_title"));
         let inner = block.inner(area);
         block.render(area, buf);
         // More themes than rows: scroll so the selection stays visible

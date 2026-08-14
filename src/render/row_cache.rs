@@ -17,6 +17,7 @@ use std::collections::HashSet;
 
 use ratatui::text::Line;
 
+use crate::i18n::Locale;
 use crate::render::markdown::render_node;
 use crate::store::SessionStore;
 use crate::store::node::{ChatNode, NodeKey};
@@ -65,6 +66,7 @@ impl RowCache {
         session_id: &SessionId,
         width: u16,
         theme: &Theme,
+        locale: Locale,
     ) -> bool {
         let mut changed = false;
         let Some(state) = store.session(session_id) else {
@@ -100,7 +102,7 @@ impl RowCache {
                     reordered.push(CachedRow {
                         node_key: node.key.clone(),
                         anchor_seq: node.anchor_seq,
-                        lines: wrap_lines(render_node(node, collapsed, theme), width),
+                        lines: wrap_lines(render_node(node, collapsed, theme, locale), width),
                         signature,
                     });
                     changed = true;
@@ -120,6 +122,7 @@ impl RowCache {
         session_id: &SessionId,
         width: u16,
         theme: &Theme,
+        locale: Locale,
     ) {
         for key in self.dirty.drain() {
             let Some(state) = store.session(session_id) else {
@@ -129,7 +132,7 @@ impl RowCache {
                 continue;
             };
             let collapsed = store.fold_state(session_id, &key).collapsed;
-            let lines = wrap_lines(render_node(node, collapsed, theme), width);
+            let lines = wrap_lines(render_node(node, collapsed, theme, locale), width);
             if let Some(row) = self.rows.iter_mut().find(|row| row.node_key == key) {
                 row.lines = lines;
             }

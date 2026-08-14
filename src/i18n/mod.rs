@@ -13,6 +13,16 @@
 mod strings_en;
 mod strings_zh;
 
+/// Every en key, sorted (table-completeness tests walk both tables).
+pub fn en_keys() -> Vec<&'static str> {
+    strings_en::STRINGS.iter().map(|(key, _)| *key).collect()
+}
+
+/// Every zh key, sorted (table-completeness tests walk both tables).
+pub fn zh_keys() -> Vec<&'static str> {
+    strings_zh::STRINGS.iter().map(|(key, _)| *key).collect()
+}
+
 /// The UI locale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Locale {

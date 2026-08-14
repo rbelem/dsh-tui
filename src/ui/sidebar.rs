@@ -16,6 +16,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Widget};
 
+use crate::i18n::{Locale, tr};
 use crate::ui::style;
 use crate::wire::session::{SessionId, SessionSummary};
 
@@ -67,6 +68,7 @@ pub struct SidebarView<'a> {
     pub selected: usize,
     pub focused: bool,
     pub theme: &'a crate::theme::Theme,
+    pub locale: Locale,
 }
 
 impl Widget for SidebarView<'_> {
@@ -86,20 +88,28 @@ impl Widget for SidebarView<'_> {
         buf.set_line(
             inner.x,
             inner.y,
-            &Line::styled("Sessions", style::header(self.theme)),
+            &Line::styled(tr(self.locale, "sidebar.header"), style::header(self.theme)),
             inner.width,
         );
 
         if self.sessions.is_empty() {
             let y = inner.y + 2;
             if y < inner.bottom() {
-                buf.set_line(inner.x, y, &Line::raw("no sessions yet"), inner.width);
+                buf.set_line(
+                    inner.x,
+                    y,
+                    &Line::raw(tr(self.locale, "sidebar.empty")),
+                    inner.width,
+                );
             }
             if y + 1 < inner.bottom() {
                 buf.set_line(
                     inner.x,
                     y + 1,
-                    &Line::styled("they'll appear here", style::hint(self.theme)),
+                    &Line::styled(
+                        tr(self.locale, "sidebar.empty_hint"),
+                        style::hint(self.theme),
+                    ),
                     inner.width,
                 );
             }
@@ -126,7 +136,10 @@ impl Widget for SidebarView<'_> {
             let mut spans = vec![Span::styled(marker, style::active(self.theme))];
             spans.push(Span::raw(label(summary)));
             if summary.running {
-                spans.push(Span::styled(" · running", style::hint(self.theme)));
+                spans.push(Span::styled(
+                    tr(self.locale, "sidebar.running"),
+                    style::hint(self.theme),
+                ));
             }
             buf.set_line(inner.x, y, &Line::from(spans), inner.width);
         }

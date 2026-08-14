@@ -20,6 +20,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 
+use crate::i18n::{Locale, tr, trf};
 use crate::ui::style;
 use crate::wire::approvals::ApprovalRequestId;
 use crate::wire::events::{AskUserQuestionItem, QuestionIntent, QuestionOption};
@@ -195,13 +196,14 @@ pub struct ApprovalView<'a> {
     /// Transient notice (toast/hint), rendered dim at the bottom.
     pub notice: Option<&'a str>,
     pub theme: &'a crate::theme::Theme,
+    pub locale: Locale,
 }
 
 impl Widget for ApprovalView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered()
             .border_style(style::border(self.theme))
-            .title(" approval ")
+            .title(tr(self.locale, "takeover.approval"))
             .padding(ratatui::widgets::Padding::horizontal(1));
         let inner = block.inner(area);
         block.render(area, buf);
@@ -212,17 +214,21 @@ impl Widget for ApprovalView<'_> {
             Line::styled(&takeover.tool_name, style::active(self.theme)),
         ];
         if let Some(reason) = &takeover.reason {
-            lines.push(Line::raw(format!("reason: {reason}")));
+            lines.push(Line::raw(trf(self.locale, "approval.reason", &[reason])));
         }
         lines.push(Line::raw(""));
-        let mut context = format!("session {}", takeover.session_id);
+        let mut context = trf(
+            self.locale,
+            "approval.context",
+            &[takeover.session_id.as_ref()],
+        );
         if let Some(call_id) = &takeover.call_id {
-            context.push_str(&format!(" · call {call_id}"));
+            context.push_str(&trf(self.locale, "approval.context_call", &[call_id]));
         }
         lines.push(Line::styled(context, style::hint(self.theme)));
         if let Some(summary) = &takeover.tool_summary {
             lines.push(Line::styled(
-                format!("tool call: {summary}"),
+                trf(self.locale, "approval.tool_call", &[summary]),
                 style::hint(self.theme),
             ));
         }
@@ -231,9 +237,9 @@ impl Widget for ApprovalView<'_> {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![
             Span::styled("y", style::active(self.theme)),
-            Span::raw(" allow once   "),
+            Span::raw(tr(self.locale, "takeover.allow_once")),
             Span::styled("n", style::active(self.theme)),
-            Span::raw(" reject"),
+            Span::raw(tr(self.locale, "takeover.reject")),
         ]));
         if let Some(notice) = self.notice {
             lines.push(Line::styled(notice, style::hint(self.theme)));
@@ -250,14 +256,15 @@ pub struct QuestionView<'a> {
     /// Transient notice (toast/hint), rendered dim at the bottom.
     pub notice: Option<&'a str>,
     pub theme: &'a crate::theme::Theme,
+    pub locale: Locale,
 }
 
 impl Widget for QuestionView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let title = if self.takeover.plan_review() {
-            " plan review "
+            tr(self.locale, "takeover.plan_review")
         } else {
-            " question "
+            tr(self.locale, "takeover.question")
         };
         let block = Block::bordered()
             .border_style(style::border(self.theme))
@@ -272,7 +279,11 @@ impl Widget for QuestionView<'_> {
         for (i, question) in takeover.questions.iter().enumerate() {
             let focused = i == takeover.focused;
             if many {
-                let label = format!("question {} of {}", i + 1, takeover.questions.len());
+                let label = trf(
+                    self.locale,
+                    "question.counter",
+                    &[&(i + 1).to_string(), &takeover.questions.len().to_string()],
+                );
                 lines.push(Line::styled(label, style::hint(self.theme)));
             }
             if let Some(header) = &question.item.header {
@@ -283,7 +294,10 @@ impl Widget for QuestionView<'_> {
                 lines.push(Line::styled(detail, style::hint(self.theme)));
             }
             if question.options.is_empty() {
-                lines.push(Line::styled("(no options)", style::hint(self.theme)));
+                lines.push(Line::styled(
+                    tr(self.locale, "question.no_options"),
+                    style::hint(self.theme),
+                ));
             }
             for (row, option) in question.options.iter().enumerate() {
                 let marker = if question.multi {
@@ -320,11 +334,11 @@ impl Widget for QuestionView<'_> {
         }
         lines.push(Line::from(vec![
             Span::styled("tab", style::active(self.theme)),
-            Span::raw(" question · "),
+            Span::raw(tr(self.locale, "question.action_tab")),
             Span::styled("space", style::active(self.theme)),
-            Span::raw(" toggle · "),
+            Span::raw(tr(self.locale, "question.action_toggle")),
             Span::styled("enter", style::active(self.theme)),
-            Span::raw(" submit"),
+            Span::raw(tr(self.locale, "question.action_submit")),
         ]));
         if let Some(notice) = self.notice {
             lines.push(Line::styled(notice, style::hint(self.theme)));

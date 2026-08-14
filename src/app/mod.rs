@@ -43,6 +43,7 @@ use crate::wire::events::{
 };
 use crate::wire::rpc::RpcId;
 use crate::wire::session::{SessionId, SessionSummary};
+use unicode_width::UnicodeWidthStr;
 
 /// App-level failure.
 #[derive(Debug, thiserror::Error)]
@@ -82,11 +83,11 @@ impl Focus {
     }
 
     /// Short label for the status line.
-    pub fn label(self) -> &'static str {
+    pub fn label(self, locale: crate::i18n::Locale) -> &'static str {
         match self {
-            Focus::Chat => "chat",
-            Focus::Composer => "composer",
-            Focus::Sidebar => "sidebar",
+            Focus::Chat => crate::i18n::tr(locale, "focus.chat"),
+            Focus::Composer => crate::i18n::tr(locale, "focus.composer"),
+            Focus::Sidebar => crate::i18n::tr(locale, "focus.sidebar"),
         }
     }
 }
@@ -146,6 +147,25 @@ impl Default for ViewState {
             viewport_height: 24,
         }
     }
+}
+
+/// Truncate `text` to `max` display cells with an ASCII ellipsis
+/// (CJK-safe: `chars().take` cuts by char, which mis-sizes wide text).
+fn truncate_width(text: &str, max: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w + 3 > max {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    format!("{out}...")
 }
 
 /// One open approval, recorded from its `approval/requested` frame so the
@@ -344,7 +364,7 @@ impl App {
                 if self.pending_approvals.remove(approval_id).is_none() {
                     return;
                 }
-                self.set_toast(remote_approval_text(*outcome));
+                self.set_toast(remote_approval_text(*outcome, self.locale));
                 if matches!(&self.mode, Mode::Approval(takeover) if takeover.approval_id == *approval_id)
                 {
                     self.mode = self.next_takeover().unwrap_or(Mode::Chat);
@@ -362,7 +382,7 @@ impl App {
                 {
                     return;
                 }
-                self.set_toast(remote_question_text(*outcome));
+                self.set_toast(remote_question_text(*outcome, self.locale));
                 if matches!(&self.mode, Mode::Question(takeover) if takeover.rpc_id == *question_rpc_id)
                 {
                     self.mode = self.next_takeover().unwrap_or(Mode::Chat);
@@ -445,7 +465,8 @@ impl App {
             NodeData::Tool {
                 call: Some(call), ..
             } if call.call_id == call_id => {
-                let args: String = call.args_raw.chars().take(60).collect();
+                // Width-aware (CJK-safe) preview of the raw arguments.
+                let args: String = truncate_width(&call.args_raw, 60);
                 Some(format!("{} {}", call.name, args))
             }
             _ => None,
@@ -483,6 +504,12 @@ impl App {
             self.hint = None;
             return Some(Action::FetchSettings);
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
+            // Ctrl+L cycles the UI locale (inert in takeovers and the
+            // settings view — both swallow all keys above this point).
+            self.cycle_locale();
+            return Some(Action::None);
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
             if self.theme_picker.open {
                 self.theme_picker.open = false;
@@ -518,6 +545,29 @@ impl App {
         }
     }
 
+    /// Ctrl+L: cycle the UI locale, persist it to the config, and force a
+    /// full re-render (every cached row is localized).
+    pub fn cycle_locale(&mut self) {
+        self.locale = self.locale.next();
+        self.config.locale = Some(match self.locale {
+            crate::i18n::Locale::En => "en".into(),
+            crate::i18n::Locale::Zh => "zh".into(),
+        });
+        if let Err(error) = self.config.save() {
+            self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.config_save_failed",
+                &[&error.to_string()],
+            ));
+        }
+        self.row_cache.invalidate_all();
+        self.set_toast(crate::i18n::trf(
+            self.locale,
+            "toast.locale",
+            &[self.locale.native_name()],
+        ));
+    }
+
     /// Theme picker bindings: `Up`/`Down` (or `j`/`k`) move the selection,
     /// `Enter` applies live and persists the choice, `Esc` closes without
     /// applying. Everything else is inert while the picker is open.
@@ -549,7 +599,11 @@ impl App {
         self.theme = theme.clone();
         self.config.theme = Some(theme.name.clone());
         if let Err(error) = self.config.save() {
-            self.set_toast(format!("couldn't save config: {error}"));
+            self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.config_save_failed",
+                &[&error.to_string()],
+            ));
         }
         self.row_cache.invalidate_all();
         self.theme_picker.open = false;
@@ -580,7 +634,7 @@ impl App {
             return Action::None;
         }
         if self.active_queue().is_empty() {
-            self.hint = Some("queue is empty".into());
+            self.hint = Some(crate::i18n::tr(self.locale, "hint.queue_empty").into());
             return Action::None;
         }
         self.queue_scroll = 0;
@@ -738,7 +792,7 @@ impl App {
                 KeyCode::Enter if takeover.sending => Action::None,
                 KeyCode::Enter => Action::AnswerQuestion,
                 KeyCode::Esc => {
-                    self.hint = Some("can't cancel yet — answer or wait".into());
+                    self.hint = Some(crate::i18n::tr(self.locale, "hint.no_cancel").into());
                     Action::None
                 }
                 _ => Action::None,
@@ -808,7 +862,7 @@ impl App {
                 let dirty = state.dirty();
                 self.mode = Mode::Chat;
                 if dirty {
-                    self.set_toast("closed settings — unsaved changes discarded");
+                    self.set_toast(crate::i18n::tr(self.locale, "toast.settings_discarded"));
                 }
                 Action::None
             }
@@ -818,11 +872,11 @@ impl App {
                 }
                 let dirty = state.selected_form().is_some_and(SettingsForm::dirty);
                 if !dirty {
-                    self.hint = Some("nothing to save".into());
+                    self.hint = Some(crate::i18n::tr(self.locale, "hint.nothing_to_save").into());
                     return Action::None;
                 }
                 state.saving = true;
-                self.hint = Some("saving…".into());
+                self.hint = Some(crate::i18n::tr(self.locale, "hint.saving").into());
                 Action::SaveSettings
             }
             KeyCode::Tab | KeyCode::Right | KeyCode::Left => {
@@ -887,7 +941,10 @@ impl App {
                         };
                         form.editing = Some(LineEditor::new(text));
                     }
-                    FieldKind::Raw => self.hint = Some("read-only field".into()),
+                    FieldKind::Raw => {
+                        self.hint =
+                            Some(crate::i18n::tr(self.locale, "hint.read_only_field").into())
+                    }
                 }
                 Action::Input
             }
@@ -1057,7 +1114,7 @@ impl App {
             return Action::None;
         }
         if self.session_running() {
-            self.hint = Some("turn running — wait for it to finish".into());
+            self.hint = Some(crate::i18n::tr(self.locale, "hint.turn_running").into());
             return Action::None;
         }
         self.hint = None;
@@ -1141,19 +1198,21 @@ pub(crate) const DRAW_INTERVAL: Duration = Duration::from_millis(16);
 pub(crate) const TOAST_TTL: Duration = Duration::from_secs(3);
 
 /// Toast text for a remotely resolved approval (no exclusivity, Q10).
-fn remote_approval_text(outcome: ApprovalOutcome) -> String {
+fn remote_approval_text(outcome: ApprovalOutcome, locale: crate::i18n::Locale) -> String {
     match outcome {
-        ApprovalOutcome::AllowedOnce => "approved by another client".into(),
-        ApprovalOutcome::Rejected => "rejected by another client".into(),
-        ApprovalOutcome::Cancelled => "approval cancelled".into(),
-        ApprovalOutcome::Unavailable => "approval unavailable".into(),
+        ApprovalOutcome::AllowedOnce => crate::i18n::tr(locale, "toast.approved_remote").into(),
+        ApprovalOutcome::Rejected => crate::i18n::tr(locale, "toast.rejected_remote").into(),
+        ApprovalOutcome::Cancelled => crate::i18n::tr(locale, "toast.approval_cancelled").into(),
+        ApprovalOutcome::Unavailable => {
+            crate::i18n::tr(locale, "toast.approval_unavailable").into()
+        }
     }
 }
 
 /// Toast text for a remotely resolved question.
-fn remote_question_text(outcome: QuestionOutcome) -> String {
+fn remote_question_text(outcome: QuestionOutcome, locale: crate::i18n::Locale) -> String {
     match outcome {
-        QuestionOutcome::Answered => "answered by another client".into(),
-        QuestionOutcome::Cancelled => "question cancelled".into(),
+        QuestionOutcome::Answered => crate::i18n::tr(locale, "toast.answered_remote").into(),
+        QuestionOutcome::Cancelled => crate::i18n::tr(locale, "toast.question_cancelled").into(),
     }
 }

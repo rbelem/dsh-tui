@@ -105,8 +105,12 @@ impl App {
                         }
                         Some(AppEvent::CancelDone { result }) => {
                             match result {
-                                Ok(_) => self.set_toast("cancelled"),
-                                Err(error) => self.set_toast(format!("cancel failed: {error}")),
+                                Ok(_) => self.set_toast(crate::i18n::tr(self.locale, "toast.cancelled")),
+                                Err(error) => self.set_toast(crate::i18n::trf(
+                                    self.locale,
+                                    "toast.cancel_failed",
+                                    &[&error.to_string()],
+                                )),
                             }
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
@@ -213,6 +217,7 @@ impl App {
                             takeover,
                             notice,
                             theme: &self.theme,
+                            locale: self.locale,
                         },
                         area,
                     ),
@@ -221,6 +226,7 @@ impl App {
                             takeover,
                             notice,
                             theme: &self.theme,
+                            locale: self.locale,
                         },
                         area,
                     ),
@@ -229,6 +235,7 @@ impl App {
                             state,
                             notice,
                             theme: &self.theme,
+                            locale: self.locale,
                         },
                         area,
                     ),
@@ -241,6 +248,7 @@ impl App {
                         themes: &self.themes.themes,
                         selected: self.theme_picker.selected,
                         current: &self.theme,
+                        locale: self.locale,
                     };
                     let (width, height) = popup.size(area.width);
                     let popup_area = Rect {
@@ -290,9 +298,9 @@ impl App {
         let session_id = self.active_session.clone();
         if let Some(session_id) = &session_id {
             self.row_cache
-                .sync(&self.store, session_id, width, &self.theme);
+                .sync(&self.store, session_id, width, &self.theme, self.locale);
             self.row_cache
-                .render_dirty(&self.store, session_id, width, &self.theme);
+                .render_dirty(&self.store, session_id, width, &self.theme, self.locale);
             if self.view.follow {
                 let total = self.row_cache.lines().len();
                 self.view.offset = total.saturating_sub(chat_height as usize);
@@ -319,6 +327,7 @@ impl App {
                         selected: self.sidebar.selected,
                         focused: self.focus == Focus::Sidebar,
                         theme: &self.theme,
+                        locale: self.locale,
                     },
                     sidebar_area,
                 );
@@ -339,6 +348,7 @@ impl App {
                     QueueStrip {
                         items: queue_items,
                         theme: &self.theme,
+                        locale: self.locale,
                     },
                     queue_area,
                 );
@@ -348,6 +358,7 @@ impl App {
                     composer: &self.composer,
                     focused: self.focus == Focus::Composer,
                     theme: &self.theme,
+                    locale: self.locale,
                 },
                 composer_area,
             );
@@ -359,6 +370,7 @@ impl App {
                     items: queue_items,
                     scroll: self.queue_scroll,
                     theme: &self.theme,
+                    locale: self.locale,
                 };
                 let anchor = if queue_height > 0 {
                     queue_area.y
@@ -397,6 +409,7 @@ impl App {
                     themes: &self.themes.themes,
                     selected: self.theme_picker.selected,
                     current: &self.theme,
+                    locale: self.locale,
                 };
                 let (width, height) = popup.size(right.width);
                 let area = Rect {
@@ -416,6 +429,7 @@ impl App {
                     kind,
                     selected: self.composer.popup_selected(),
                     theme: &self.theme,
+                    locale: self.locale,
                 };
                 let (width, height) = popup.size(right.width);
                 let area = Rect {
@@ -488,13 +502,15 @@ impl App {
             self.pending_approvals.remove(approval_id);
             self.mode = self.next_takeover().unwrap_or(Mode::Chat);
             self.set_toast(match outcome {
-                ApprovalResponseOutcome::AllowedOnce => "allowed once",
-                ApprovalResponseOutcome::Rejected => "rejected",
+                ApprovalResponseOutcome::AllowedOnce => {
+                    crate::i18n::tr(self.locale, "toast.allowed_once")
+                }
+                ApprovalResponseOutcome::Rejected => crate::i18n::tr(self.locale, "toast.rejected"),
             });
             return;
         };
         takeover.sending = true;
-        self.hint = Some("sending…".into());
+        self.hint = Some(crate::i18n::tr(self.locale, "hint.sending").into());
         let rpc_id = takeover.rpc_id.clone();
         let session_id = takeover.session_id.clone();
         let approval_id = takeover.approval_id.clone();
@@ -532,11 +548,11 @@ impl App {
         let Some(client) = self.client.clone() else {
             self.pending_questions.remove(&rpc_id_echo.to_string());
             self.mode = self.next_takeover().unwrap_or(Mode::Chat);
-            self.set_toast("answered");
+            self.set_toast(crate::i18n::tr(self.locale, "toast.answered"));
             return;
         };
         takeover.sending = true;
-        self.hint = Some("sending…".into());
+        self.hint = Some(crate::i18n::tr(self.locale, "hint.sending").into());
         let rpc_id = takeover.rpc_id.clone();
         let session_id = takeover.session_id.clone();
         tokio::spawn(async move {
@@ -570,7 +586,7 @@ impl App {
             return;
         };
         self.history_loading = Some(session_id.clone());
-        self.hint = Some("loading history…".into());
+        self.hint = Some(crate::i18n::tr(self.locale, "hint.loading_history").into());
         tokio::spawn(async move {
             let result = client
                 .session_history(session_id.clone(), None, Some(200))
@@ -658,19 +674,35 @@ impl App {
         state.saving = false;
         match result {
             Ok(view) => {
+                // The `locale` namespace drives the UI locale: its `language`
+                // value, when it parses as a locale, syncs App.locale and the
+                // config (any other value is ignored).
+                if ns == "locale"
+                    && let Some(language) = view.value.get("language").and_then(|v| v.as_str())
+                    && let Some(locale) = crate::i18n::Locale::parse(language)
+                {
+                    self.locale = locale;
+                    self.config.locale = Some(language.to_string());
+                    let _ = self.config.save();
+                    self.row_cache.invalidate_all();
+                }
                 if let Some(form) = state.forms.get_mut(&ns) {
                     form.refresh(view);
                 }
                 self.mode = Mode::Chat;
-                self.set_toast("saved");
+                self.set_toast(crate::i18n::tr(self.locale, "toast.saved"));
             }
             Err(ClientError::Rpc(crate::wire::rpc::RpcError::SettingsConflict { .. })) => {
                 state.loading = true;
-                self.set_toast("conflict — refreshed");
+                self.set_toast(crate::i18n::tr(self.locale, "toast.conflict_refreshed"));
                 self.fetch_settings(event_tx);
             }
             Err(error) => {
-                self.set_toast(format!("save failed: {error}"));
+                self.set_toast(crate::i18n::trf(
+                    self.locale,
+                    "toast.save_failed",
+                    &[&error.to_string()],
+                ));
             }
         }
     }
@@ -700,7 +732,11 @@ impl App {
                     self.last_error = Some(error.to_string());
                 }
             }
-            Err(error) => self.set_toast(format!("history failed: {error}")),
+            Err(error) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.history_failed",
+                &[&error.to_string()],
+            )),
         }
     }
 
@@ -742,8 +778,12 @@ impl App {
             }
             let toast = match &tag {
                 AnswerTag::Approval { outcome, .. } => match outcome {
-                    ApprovalResponseOutcome::AllowedOnce => "allowed once",
-                    ApprovalResponseOutcome::Rejected => "rejected",
+                    ApprovalResponseOutcome::AllowedOnce => {
+                        crate::i18n::tr(self.locale, "toast.allowed_once")
+                    }
+                    ApprovalResponseOutcome::Rejected => {
+                        crate::i18n::tr(self.locale, "toast.rejected")
+                    }
                 },
                 AnswerTag::Question(_) => "answered",
             };
@@ -781,23 +821,41 @@ impl App {
         let mut parts: Vec<Line<'static>> = Vec::new();
         let body = |text: String| Span::styled(text, Style::default().fg(theme.text));
         match &self.active_session {
-            Some(session_id) => parts.push(Line::from(body(format!("session {session_id}")))),
-            None => parts.push(Line::from(body("no session".into()))),
+            Some(session_id) => parts.push(Line::from(body(crate::i18n::trf(
+                self.locale,
+                "status.session",
+                &[session_id.as_ref()],
+            )))),
+            None => parts.push(Line::from(body(
+                crate::i18n::tr(self.locale, "status.no_session").into(),
+            ))),
         }
         if let Some(state) = self
             .active_session
             .as_ref()
             .and_then(|session_id| self.store.session(session_id))
         {
-            parts.push(Line::from(body(format!("seq {}", state.last_seq))));
+            parts.push(Line::from(body(crate::i18n::trf(
+                self.locale,
+                "status.seq",
+                &[&state.last_seq.to_string()],
+            ))));
             if state.truncated {
-                parts.push(Line::from(body("truncated".into())));
+                parts.push(Line::from(body(
+                    crate::i18n::tr(self.locale, "status.truncated").into(),
+                )));
             }
         }
         if self.session_running() {
-            parts.push(Line::from(body("running".into())));
+            parts.push(Line::from(body(
+                crate::i18n::tr(self.locale, "status.running").into(),
+            )));
         }
-        parts.push(Line::from(body(format!("focus: {}", self.focus.label()))));
+        parts.push(Line::from(body(crate::i18n::trf(
+            self.locale,
+            "status.focus",
+            &[self.focus.label(self.locale)],
+        ))));
         if let Some(hint) = &self.hint {
             parts.push(Line::from(Span::styled(hint.clone(), style::hint(theme))));
         }
@@ -806,7 +864,7 @@ impl App {
         }
         if let Some(error) = &self.last_error {
             parts.push(Line::from(Span::styled(
-                format!("error: {error}"),
+                crate::i18n::trf(self.locale, "status.error", &[error]),
                 Style::default().fg(theme.error),
             )));
         }

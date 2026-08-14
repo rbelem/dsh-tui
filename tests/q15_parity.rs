@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 use dsh_tui::app::{App, AppEvent, EventChannel};
 use dsh_tui::client::WireClient;
+use dsh_tui::i18n::Locale;
 use dsh_tui::store::SessionStore;
 use dsh_tui::ui::takeover::{ApprovalTakeover, Mode};
 use dsh_tui::wire::approvals::ApprovalRequestId;
@@ -362,7 +363,7 @@ async fn attach_with_sessions(mock: &MockGateway) -> (WireClient, SessionStore) 
         .await;
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, _sessions) = dsh_tui::app::attach(&client, &mut store)
+    let (opened, _sessions) = dsh_tui::app::attach(&client, &mut store, Locale::En)
         .await
         .expect("attach");
     assert_eq!(opened, Some(SessionId("sA".into())));

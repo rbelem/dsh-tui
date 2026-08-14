@@ -10,9 +10,9 @@ fn main() -> Result<(), AppError> {
     let client = match WireClient::attach_from_env()? {
         Some(client) => client,
         None => {
-            eprintln!(
-                "dsh-tui: no DSH_PORT set — attach to a running gateway (dsh web) or set DSH_PORT=<port>"
-            );
+            let locale =
+                dsh_tui::i18n::Locale::detect(dsh_tui::theme::Config::load().locale.as_deref());
+            eprintln!("{}", dsh_tui::i18n::tr(locale, "main.no_dsh_port"));
             std::process::exit(2);
         }
     };
@@ -24,12 +24,16 @@ fn main() -> Result<(), AppError> {
 
 async fn run_app(client: WireClient) -> Result<(), AppError> {
     let mut app = App::default();
-    let (session_id, sessions) = attach(&client, &mut app.store).await?;
+    app.load_theme_config();
+    // Locale resolution (increment 3): config wins, then DSH_TUI_LOCALE,
+    // then LANG/LC_ALL (Locale::detect); persisted on Ctrl+L.
+    app.locale = dsh_tui::i18n::Locale::detect(app.config.locale.as_deref());
+    let (session_id, sessions) = attach(&client, &mut app.store, app.locale).await?;
     app.active_session = session_id.clone();
     app.sessions = sessions;
     app.client = Some(client.clone());
     if session_id.is_none() {
-        app.last_error = Some("gateway has no sessions — start one from the web UI".into());
+        app.last_error = Some(dsh_tui::i18n::tr(app.locale, "main.no_sessions").into());
     }
 
     let mut terminal = run::setup_terminal()?;

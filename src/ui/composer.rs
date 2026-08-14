@@ -19,28 +19,30 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
+use crate::i18n::{Locale, tr};
 use crate::ui::style;
 
-/// One seeded popup entry: the text inserted on accept and a short hint.
+/// One seeded popup entry: the text inserted on accept and its i18n key
+/// (translated at render time, like every surface).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeedItem {
     pub text: &'static str,
-    pub hint: &'static str,
+    pub hint_key: &'static str,
 }
 
 /// Seeded `/` entries (v1 static; the real catalog rides `command.execute`).
 const SLASH_ITEMS: &[SeedItem] = &[
     SeedItem {
         text: "/compact",
-        hint: "compact the session",
+        hint_key: "composer.hint_compact",
     },
     SeedItem {
         text: "/clear",
-        hint: "clear the chat",
+        hint_key: "composer.hint_clear",
     },
     SeedItem {
         text: "/help",
-        hint: "show help",
+        hint_key: "composer.hint_help",
     },
 ];
 
@@ -48,11 +50,11 @@ const SLASH_ITEMS: &[SeedItem] = &[
 const AT_ITEMS: &[SeedItem] = &[
     SeedItem {
         text: "@file",
-        hint: "mention a file (soon)",
+        hint_key: "composer.hint_file",
     },
     SeedItem {
         text: "@session",
-        hint: "mention a session (soon)",
+        hint_key: "composer.hint_session",
     },
 ];
 
@@ -71,10 +73,11 @@ impl PopupKind {
         }
     }
 
+    /// The popup's i18n key (`popup.commands` / `popup.mentions`).
     pub fn title(self) -> &'static str {
         match self {
-            PopupKind::Slash => "commands",
-            PopupKind::At => "mentions",
+            PopupKind::Slash => "popup.commands",
+            PopupKind::At => "popup.mentions",
         }
     }
 }
@@ -301,10 +304,8 @@ pub struct ComposerView<'a> {
     pub composer: &'a Composer,
     pub focused: bool,
     pub theme: &'a crate::theme::Theme,
+    pub locale: Locale,
 }
-
-/// Placeholder shown in the empty composer.
-const PLACEHOLDER: &str = "type a message — enter to send";
 
 impl Widget for ComposerView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -322,7 +323,11 @@ impl Widget for ComposerView<'_> {
         }
         let (_, _, scroll) = self.composer.caret_layout(inner.width);
         if self.composer.is_empty() {
-            Paragraph::new(Line::styled(PLACEHOLDER, style::hint(self.theme))).render(inner, buf);
+            Paragraph::new(Line::styled(
+                tr(self.locale, "composer.placeholder"),
+                style::hint(self.theme),
+            ))
+            .render(inner, buf);
         } else {
             Paragraph::new(self.composer.buffer().to_string())
                 .scroll((0, scroll))
@@ -337,6 +342,7 @@ pub struct SeedPopup<'a> {
     pub kind: PopupKind,
     pub selected: usize,
     pub theme: &'a crate::theme::Theme,
+    pub locale: Locale,
 }
 
 impl SeedPopup<'_> {
@@ -344,7 +350,11 @@ impl SeedPopup<'_> {
     pub fn size(&self, available: u16) -> (u16, u16) {
         let items = self.kind.items();
         let text = items.iter().map(|item| item.text.len()).max().unwrap_or(0);
-        let hint = items.iter().map(|item| item.hint.len()).max().unwrap_or(0);
+        let hint = items
+            .iter()
+            .map(|item| item.hint_key.len())
+            .max()
+            .unwrap_or(0);
         let width = (text + hint + 6) as u16;
         let height = items.len() as u16 + 2;
         (width.clamp(16, available.max(16)), height)
@@ -356,7 +366,7 @@ impl Widget for SeedPopup<'_> {
         Clear.render(area, buf);
         let block = Block::bordered()
             .border_style(style::border(self.theme))
-            .title(self.kind.title());
+            .title(tr(self.locale, self.kind.title()));
         let inner = block.inner(area);
         block.render(area, buf);
         for (i, item) in self.kind.items().iter().enumerate() {
@@ -372,7 +382,7 @@ impl Widget for SeedPopup<'_> {
             }
             let line = Line::from(vec![
                 Span::raw(format!(" {}  ", item.text)),
-                Span::styled(item.hint, style::hint(self.theme)),
+                Span::styled(tr(self.locale, item.hint_key), style::hint(self.theme)),
             ]);
             buf.set_line(inner.x, y, &line, inner.width);
         }

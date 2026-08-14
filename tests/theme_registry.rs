@@ -10,6 +10,7 @@ use ratatui::style::Color;
 use serde_json::json;
 
 use dsh_tui::app::{Action, App};
+use dsh_tui::i18n::Locale;
 use dsh_tui::render::{ChatView, RowCache};
 use dsh_tui::store::SessionStore;
 use dsh_tui::theme::{
@@ -67,8 +68,8 @@ fn store_with_code_fence() -> SessionStore {
 fn render_with_theme(theme: &Theme, width: u16, height: u16) -> String {
     let store = store_with_code_fence();
     let mut cache = RowCache::new();
-    cache.sync(&store, &SessionId("s1".into()), width, theme);
-    cache.render_dirty(&store, &SessionId("s1".into()), width, theme);
+    cache.sync(&store, &SessionId("s1".into()), width, theme, Locale::En);
+    cache.render_dirty(&store, &SessionId("s1".into()), width, theme, Locale::En);
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
     terminal
@@ -222,8 +223,8 @@ fn theme_colors_reach_rendered_cells() {
     let mocha = Theme::from_toml_str(include_str!("../themes/catppuccin-mocha.toml")).unwrap();
     let store = store_with_code_fence();
     let mut cache = RowCache::new();
-    cache.sync(&store, &SessionId("s1".into()), 120, &mocha);
-    cache.render_dirty(&store, &SessionId("s1".into()), 120, &mocha);
+    cache.sync(&store, &SessionId("s1".into()), 120, &mocha, Locale::En);
+    cache.render_dirty(&store, &SessionId("s1".into()), 120, &mocha, Locale::En);
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
@@ -359,6 +360,7 @@ fn config_write_read_back_and_apply() {
             // Write → read back.
             let config = Config {
                 theme: Some("catppuccin-mocha".into()),
+                locale: None,
             };
             config.save().expect("save");
             let path = Config::path().expect("config path");
@@ -478,6 +480,7 @@ fn picker_renders_a_listing() {
         themes: &app.themes.themes,
         selected: 2,
         current: &app.theme,
+        locale: Locale::En,
     };
     let (width, height) = popup.size(120);
     assert!(width >= 16);
@@ -499,6 +502,7 @@ fn picker_renders_a_listing() {
         themes: &app.themes.themes,
         selected: last,
         current: &app.theme,
+        locale: Locale::En,
     };
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();

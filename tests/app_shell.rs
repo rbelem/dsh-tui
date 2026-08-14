@@ -14,6 +14,7 @@ use serde_json::json;
 
 use dsh_tui::app::{Action, App, AppEvent, EventChannel, Focus, attach, spawn_frame_bridge};
 use dsh_tui::client::WireClient;
+use dsh_tui::i18n::Locale;
 use dsh_tui::store::SessionStore;
 use dsh_tui::ui::takeover::{ApprovalTakeover, Mode, QuestionTakeover};
 use dsh_tui::wire::approvals::{ApprovalRequestId, ApprovalResponseOutcome};
@@ -183,7 +184,9 @@ async fn attach_history_draw_end_to_end() {
 
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, sessions) = attach(&client, &mut store).await.expect("attach");
+    let (opened, sessions) = attach(&client, &mut store, Locale::En)
+        .await
+        .expect("attach");
     assert_eq!(opened, Some(SessionId("s1".into())));
     assert_eq!(sessions.len(), 2, "attach hands the sidebar the full list");
 
@@ -534,7 +537,9 @@ async fn no_session_attach_renders_empty_chat() {
     .await;
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, sessions) = attach(&client, &mut store).await.expect("attach");
+    let (opened, sessions) = attach(&client, &mut store, Locale::En)
+        .await
+        .expect("attach");
     assert_eq!(opened, None, "no sessions on the gateway");
     assert!(sessions.is_empty());
 

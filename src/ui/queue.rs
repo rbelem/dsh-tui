@@ -12,6 +12,7 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Widget};
 
+use crate::i18n::{Locale, tr, trf};
 use crate::theme::Theme;
 use crate::ui::style;
 use crate::wire::events::{MessageRole, QueueItem, QueuePlacement};
@@ -21,7 +22,7 @@ pub const QUEUE_POPUP_MAX_ROWS: usize = 8;
 
 /// One-line content preview of a queue item: its text blocks joined,
 /// whitespace collapsed. Non-text-only items show a placeholder.
-pub fn item_preview(item: &QueueItem) -> String {
+pub fn item_preview(item: &QueueItem, locale: Locale) -> String {
     let text = item
         .message
         .content
@@ -31,26 +32,26 @@ pub fn item_preview(item: &QueueItem) -> String {
         .join(" ");
     let preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if preview.is_empty() {
-        "(no text)".into()
+        tr(locale, "queue.no_text").into()
     } else {
         preview
     }
 }
 
 /// Short placement tag for the popup rows.
-fn placement_tag(placement: QueuePlacement) -> &'static str {
+fn placement_tag(placement: QueuePlacement, locale: Locale) -> &'static str {
     match placement {
-        QueuePlacement::Queued => "queued",
-        QueuePlacement::Steering => "steering",
-        QueuePlacement::Context => "context",
+        QueuePlacement::Queued => tr(locale, "queue.tag_queued"),
+        QueuePlacement::Steering => tr(locale, "queue.tag_steering"),
+        QueuePlacement::Context => tr(locale, "queue.tag_context"),
     }
 }
 
-fn role_label(role: MessageRole) -> &'static str {
+fn role_label(role: MessageRole, locale: Locale) -> &'static str {
     match role {
-        MessageRole::System => "system",
-        MessageRole::User => "user",
-        MessageRole::Assistant => "assistant",
+        MessageRole::System => tr(locale, "queue.role_system"),
+        MessageRole::User => tr(locale, "queue.role_user"),
+        MessageRole::Assistant => tr(locale, "queue.role_assistant"),
     }
 }
 
@@ -61,6 +62,7 @@ fn role_label(role: MessageRole) -> &'static str {
 pub struct QueueStrip<'a> {
     pub items: &'a [QueueItem],
     pub theme: &'a Theme,
+    pub locale: Locale,
 }
 
 impl Widget for QueueStrip<'_> {
@@ -79,23 +81,23 @@ impl Widget for QueueStrip<'_> {
             .filter(|item| item.placement == QueuePlacement::Context)
             .count();
         let mut spans = vec![Span::styled(
-            format!("{} queued", self.items.len()),
+            trf(self.locale, "queue.strip", &[&self.items.len().to_string()]),
             style::hint(self.theme),
         )];
         if steering > 0 {
             spans.push(Span::styled(
-                format!(" · {steering} steering"),
+                trf(self.locale, "queue.steering", &[&steering.to_string()]),
                 style::warning(self.theme),
             ));
         }
         if context > 0 {
             spans.push(Span::styled(
-                format!(" · {context} context"),
+                trf(self.locale, "queue.context", &[&context.to_string()]),
                 style::hint(self.theme),
             ));
         }
         spans.push(Span::styled(
-            format!(" · {}", item_preview(&self.items[0])),
+            format!(" · {}", item_preview(&self.items[0], self.locale)),
             style::hint(self.theme),
         ));
         buf.set_line(area.x, area.y, &Line::from(spans), area.width);
@@ -108,6 +110,7 @@ pub struct QueuePopup<'a> {
     pub items: &'a [QueueItem],
     pub scroll: usize,
     pub theme: &'a Theme,
+    pub locale: Locale,
 }
 
 impl QueuePopup<'_> {
@@ -127,7 +130,7 @@ impl Widget for QueuePopup<'_> {
         Clear.render(area, buf);
         let block = Block::bordered()
             .border_style(style::border(self.theme))
-            .title(" queue ");
+            .title(tr(self.locale, "queue.title"));
         let inner = block.inner(area);
         block.render(area, buf);
         for (row, item) in self.items.iter().skip(self.scroll).enumerate() {
@@ -140,12 +143,15 @@ impl Widget for QueuePopup<'_> {
                 QueuePlacement::Context => style::hint(self.theme),
             };
             let line = Line::from(vec![
-                Span::styled(format!("[{}]", placement_tag(item.placement)), tag_style),
                 Span::styled(
-                    format!(" {}", role_label(item.message.role)),
+                    format!("[{}]", placement_tag(item.placement, self.locale)),
+                    tag_style,
+                ),
+                Span::styled(
+                    format!(" {}", role_label(item.message.role, self.locale)),
                     style::hint(self.theme),
                 ),
-                Span::raw(format!(" · {}", item_preview(item))),
+                Span::raw(format!(" · {}", item_preview(item, self.locale))),
             ]);
             buf.set_line(inner.x, inner.y + row as u16, &line, inner.width);
         }
@@ -186,14 +192,14 @@ mod tests {
     #[test]
     fn preview_collapses_whitespace() {
         let item = item(QueuePlacement::Queued, "fix  the\ntests   please");
-        assert_eq!(item_preview(&item), "fix the tests please");
+        assert_eq!(item_preview(&item, Locale::En), "fix the tests please");
     }
 
     #[test]
     fn preview_placeholder_for_non_text() {
         let mut item = item(QueuePlacement::Queued, "");
         item.message.content = vec![];
-        assert_eq!(item_preview(&item), "(no text)");
+        assert_eq!(item_preview(&item, Locale::En), "(no text)");
     }
 
     #[test]
@@ -206,6 +212,7 @@ mod tests {
             items: &items,
             scroll: 0,
             theme: &theme,
+            locale: Locale::En,
         };
         let (width, height) = popup.size(100, 20);
         assert_eq!(height, QUEUE_POPUP_MAX_ROWS as u16 + 2, "row cap");

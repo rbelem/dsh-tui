@@ -18,6 +18,7 @@ const HISTORY_PAGE: usize = 200;
 pub async fn attach(
     client: &WireClient,
     store: &mut SessionStore,
+    locale: crate::i18n::Locale,
 ) -> Result<(Option<SessionId>, Vec<SessionSummary>), AppError> {
     let summaries = client.session_list().await?;
     // Most recently updated non-blank session; fall back to any session.
@@ -45,9 +46,12 @@ pub async fn attach(
     store.ingest_history(&summary.session_id, entries)?;
 
     eprintln!(
-        "dsh-tui: attached to 127.0.0.1:{}, session {}",
-        client.port(),
-        summary.session_id
+        "{}",
+        crate::i18n::trf(
+            locale,
+            "main.attached",
+            &[&client.port().to_string(), summary.session_id.as_ref()],
+        )
     );
     let opened = summary.session_id.clone();
     Ok((Some(opened), summaries))
