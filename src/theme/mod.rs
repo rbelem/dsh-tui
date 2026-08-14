@@ -285,11 +285,16 @@ impl Widget for ThemePopup<'_> {
             .title("themes");
         let inner = block.inner(area);
         block.render(area, buf);
-        for (i, theme) in self.themes.iter().enumerate() {
-            if i as u16 >= inner.height {
+        // More themes than rows: scroll so the selection stays visible
+        // (it sits at the bottom edge while scrolling, like the sidebar).
+        let visible = inner.height as usize;
+        let start = self.selected.saturating_sub(visible.saturating_sub(1));
+        for (i, theme) in self.themes.iter().enumerate().skip(start) {
+            let row = i - start;
+            if row as u16 >= inner.height {
                 break;
             }
-            let y = inner.y + i as u16;
+            let y = inner.y + row as u16;
             if i == self.selected {
                 buf.set_style(
                     Rect::new(inner.x, y, inner.width, 1),

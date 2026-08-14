@@ -491,4 +491,25 @@ fn picker_renders_a_listing() {
         view.contains("catppuccin-latte"),
         "theme rows listed: {view}"
     );
+
+    // With the selection past the visible window the list scrolls so the
+    // selected row stays on screen (15 bundled themes, 10 visible rows).
+    let last = app.themes.themes.len() - 1;
+    let popup = ThemePopup {
+        themes: &app.themes.themes,
+        selected: last,
+        current: &app.theme,
+    };
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| f.render_widget(popup, f.area())).unwrap();
+    let view = format!("{}", terminal.backend());
+    assert!(
+        view.contains(&app.themes.themes[last].name),
+        "selected tail theme stays visible: {view}"
+    );
+    assert!(
+        !view.contains("catppuccin-latte"),
+        "scrolled off the top: {view}"
+    );
 }
