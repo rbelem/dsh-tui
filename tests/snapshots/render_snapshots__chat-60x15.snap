@@ -1,0 +1,19 @@
+---
+source: tests/render_snapshots.rs
+expression: "render_snapshot(&store, &mut cache, 60, 15, 0)"
+---
+"Check this out:                                             "
+"│ fn main() {                                               "
+"│     println!("hi");                                       "
+"│ }                                                         "
+"│                                                           "
+"| a | b |                                                   "
+"|───|───|                                                   "
+"| 1 | 2 |                                                   "
+"stale fresh                                                 "
+"[tool] read_file {"path":"/etc"}                            "
+"the /etc directory                                          "
+"Hello world                                                 "
+"thinking                                                    "
+"[compacted 1 messages]                                      "
+"summarized content                                          "

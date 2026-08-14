@@ -4,6 +4,7 @@
 //! binary around them.
 
 pub mod client;
+pub mod render;
 pub mod store;
 pub mod wire;
 
