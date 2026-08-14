@@ -13,6 +13,7 @@ use serde_json::json;
 use dsh_tui::render::{ChatView, RowCache, render_markdown};
 use dsh_tui::store::SessionStore;
 use dsh_tui::store::node::{FoldState, NodeData};
+use dsh_tui::theme::Theme;
 use dsh_tui::wire::events::MuxFrame;
 use dsh_tui::wire::session::{SessionEvent, SessionId};
 
@@ -222,8 +223,8 @@ fn render_snapshot(
     height: u16,
     offset: usize,
 ) -> String {
-    cache.sync(store, &sid(), width);
-    cache.render_dirty(store, &sid(), width);
+    cache.sync(store, &sid(), width, &Theme::default());
+    cache.render_dirty(store, &sid(), width, &Theme::default());
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
     terminal
@@ -295,11 +296,11 @@ fn streaming_chunk_marks_dirty_and_rerenders() {
     );
     let mut cache = RowCache::new();
     assert!(
-        cache.sync(&store, &sid(), 120),
+        cache.sync(&store, &sid(), 120, &Theme::default()),
         "fresh sync renders everything"
     );
     assert!(
-        !cache.sync(&store, &sid(), 120),
+        !cache.sync(&store, &sid(), 120, &Theme::default()),
         "idle sync changes nothing"
     );
     assert!(cache.dirty().is_empty());
@@ -333,7 +334,10 @@ fn streaming_chunk_marks_dirty_and_rerenders() {
             ),
         ],
     );
-    assert!(cache.sync(&store, &sid(), 120), "changed node detected");
+    assert!(
+        cache.sync(&store, &sid(), 120, &Theme::default()),
+        "changed node detected"
+    );
     assert!(
         cache.dirty().contains("1:1"),
         "streaming chunk marks the node dirty"
@@ -408,8 +412,11 @@ fn row_cache_signature_change_detection() {
         ],
     );
     let mut cache = RowCache::new();
-    assert!(cache.sync(&store, &sid(), 120));
-    assert!(!cache.sync(&store, &sid(), 120), "no change → false");
+    assert!(cache.sync(&store, &sid(), 120, &Theme::default()));
+    assert!(
+        !cache.sync(&store, &sid(), 120, &Theme::default()),
+        "no change → false"
+    );
     assert!(cache.dirty().is_empty());
 
     // A new chunk changes the accumulated text → signature flips.
@@ -427,18 +434,21 @@ fn row_cache_signature_change_detection() {
             ),
         ))
         .unwrap();
-    assert!(cache.sync(&store, &sid(), 120), "changed node → true");
+    assert!(
+        cache.sync(&store, &sid(), 120, &Theme::default()),
+        "changed node → true"
+    );
     assert_eq!(cache.dirty().len(), 1);
     assert!(cache.dirty().contains("1:1"));
 
     // render_dirty consumes the set; the next sync is clean.
-    cache.render_dirty(&store, &sid(), 120);
+    cache.render_dirty(&store, &sid(), 120, &Theme::default());
     assert!(cache.dirty().is_empty());
-    assert!(!cache.sync(&store, &sid(), 120));
+    assert!(!cache.sync(&store, &sid(), 120, &Theme::default()));
 
     // Fold state is part of the signature: collapsing marks the node dirty.
     store.set_fold(&sid(), "1:1", FoldState::collapsed());
-    assert!(cache.sync(&store, &sid(), 120));
+    assert!(cache.sync(&store, &sid(), 120, &Theme::default()));
     assert!(cache.dirty().contains("1:1"));
 }
 
@@ -471,19 +481,22 @@ fn row_cache_width_change_invalidates_all() {
         ],
     );
     let mut cache = RowCache::new();
-    cache.sync(&store, &sid(), 120);
+    cache.sync(&store, &sid(), 120, &Theme::default());
     let rows_at_120 = cache.lines().len();
     let first_lines_at_120 = cache.lines()[0].lines.len();
 
     // Narrower width: everything re-renders, the long paragraph wraps.
-    assert!(cache.sync(&store, &sid(), 40), "width change → re-render");
+    assert!(
+        cache.sync(&store, &sid(), 40, &Theme::default()),
+        "width change → re-render"
+    );
     assert_eq!(cache.lines().len(), rows_at_120, "same node count");
     assert!(
         cache.lines()[0].lines.len() > first_lines_at_120,
         "narrow width wraps the long paragraph"
     );
     // Idle at the new width.
-    assert!(!cache.sync(&store, &sid(), 40));
+    assert!(!cache.sync(&store, &sid(), 40, &Theme::default()));
 }
 
 // ---------------------------------------------------------------------------
@@ -495,6 +508,7 @@ fn markdown_code_fence_highlights_with_syntect() {
     let lines = render_markdown(
         "before\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\nafter",
         Default::default(),
+        &Theme::default(),
     );
     let fence_lines: Vec<String> = lines.iter().map(ToString::to_string).collect();
     assert!(
@@ -507,7 +521,11 @@ fn markdown_code_fence_highlights_with_syntect() {
 
 #[test]
 fn markdown_table_renders_joined_rows() {
-    let lines = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |", Default::default());
+    let lines = render_markdown(
+        "| a | b |\n|---|---|\n| 1 | 2 |",
+        Default::default(),
+        &Theme::default(),
+    );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
     assert!(rendered.contains(&"| a | b |".to_string()), "{rendered:?}");
     assert!(rendered.contains(&"| 1 | 2 |".to_string()), "{rendered:?}");
@@ -522,7 +540,7 @@ fn markdown_table_renders_joined_rows() {
 #[test]
 fn markdown_strikethrough_sets_modifier() {
     use ratatui::style::Modifier;
-    let lines = render_markdown("~~gone~~ here", Default::default());
+    let lines = render_markdown("~~gone~~ here", Default::default(), &Theme::default());
     assert_eq!(lines.len(), 1);
     let crossed = lines[0]
         .spans
@@ -540,7 +558,7 @@ fn markdown_strikethrough_sets_modifier() {
 fn markdown_cjk_renders_and_wraps_by_width() {
     // CJK text renders without panic and wraps at narrow widths.
     let text = "日本語のテキストが続きますここで折り返されるはずです";
-    let lines = render_markdown(text, Default::default());
+    let lines = render_markdown(text, Default::default(), &Theme::default());
     assert_eq!(lines.len(), 1);
     let mut store = SessionStore::new();
     store
@@ -550,7 +568,7 @@ fn markdown_cjk_renders_and_wraps_by_width() {
         ))
         .unwrap();
     let mut cache = RowCache::new();
-    cache.sync(&store, &sid(), 8);
+    cache.sync(&store, &sid(), 8, &Theme::default());
     assert!(
         cache.lines()[0].lines.len() >= 2,
         "CJK text wraps at width 8"
