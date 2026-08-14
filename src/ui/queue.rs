@@ -14,6 +14,7 @@ use ratatui::widgets::{Block, Clear, Widget};
 
 use crate::i18n::{Locale, tr, trf};
 use crate::theme::Theme;
+use crate::ui::composer::Composer;
 use crate::ui::style;
 use crate::wire::events::{MessageRole, QueueItem, QueuePlacement};
 
@@ -105,12 +106,15 @@ impl Widget for QueueStrip<'_> {
 }
 
 /// The queue popup: placement tag + role + preview per item, docked above
-/// the strip. Scroll state lives on the app; this renders the window.
+/// the strip. Scroll state lives on the app; this renders the window. When
+/// the inline editor is open it replaces the focused row and an action line
+/// hints the item actions.
 pub struct QueuePopup<'a> {
     pub items: &'a [QueueItem],
     pub scroll: usize,
     pub theme: &'a Theme,
     pub locale: Locale,
+    pub editor: Option<&'a Composer>,
 }
 
 impl QueuePopup<'_> {
@@ -137,6 +141,18 @@ impl Widget for QueuePopup<'_> {
             if row as u16 >= inner.height {
                 break;
             }
+            // The inline editor replaces the focused row while open.
+            if row == 0
+                && let Some(editor) = self.editor
+            {
+                let line = Line::from(vec![
+                    Span::styled("› ", style::active(self.theme)),
+                    Span::styled(editor.buffer().to_string(), style::active(self.theme)),
+                    Span::styled("|", style::hint(self.theme)),
+                ]);
+                buf.set_line(inner.x, inner.y + row as u16, &line, inner.width);
+                continue;
+            }
             let tag_style = match item.placement {
                 QueuePlacement::Queued => style::active(self.theme),
                 QueuePlacement::Steering => style::warning(self.theme),
@@ -154,6 +170,32 @@ impl Widget for QueuePopup<'_> {
                 Span::raw(format!(" · {}", item_preview(item, self.locale))),
             ]);
             buf.set_line(inner.x, inner.y + row as u16, &line, inner.width);
+        }
+        // The action line on the last inner row: item actions (only
+        // meaningful for queue-owned items; the app guards placements).
+        let action_line = Line::from(vec![
+            Span::styled(
+                tr(self.locale, "queue.action_remove"),
+                style::hint(self.theme),
+            ),
+            Span::raw(" · "),
+            Span::styled(
+                tr(self.locale, "queue.action_steer"),
+                style::hint(self.theme),
+            ),
+            Span::raw(" · "),
+            Span::styled(
+                tr(self.locale, "queue.action_edit"),
+                style::hint(self.theme),
+            ),
+        ]);
+        if inner.height >= 2 {
+            buf.set_line(
+                inner.x,
+                inner.y + inner.height - 1,
+                &action_line,
+                inner.width,
+            );
         }
     }
 }
@@ -213,6 +255,7 @@ mod tests {
             scroll: 0,
             theme: &theme,
             locale: Locale::En,
+            editor: None,
         };
         let (width, height) = popup.size(100, 20);
         assert_eq!(height, QUEUE_POPUP_MAX_ROWS as u16 + 2, "row cap");

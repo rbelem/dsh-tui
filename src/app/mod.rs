@@ -108,6 +108,10 @@ pub enum Action {
     /// The active session's running turn should be cancelled (Q15: Ctrl+C
     /// with a turn in flight); the run loop spawns `session.cancel`.
     CancelTurn,
+    /// Queue-popup actions on the focused item (spawned `session.updateQueue`).
+    QueueRemove,
+    QueueSteer,
+    QueueEdit(String),
     /// Sidebar selection moved.
     Select,
     /// Sidebar Enter switched the active session.
@@ -229,6 +233,11 @@ pub struct App {
     /// session's queue items.
     pub queue_popup_open: bool,
     pub queue_scroll: usize,
+    /// A `session.updateQueue` action is in flight (further actions inert).
+    pub queue_action_sending: bool,
+    /// The inline editor for the focused queue item's text (reuses the
+    /// composer's buffer/caret primitives).
+    pub queue_editor: Option<Composer>,
     pub running: bool,
     /// Last non-fatal error, shown in the status line.
     pub last_error: Option<String>,
@@ -277,6 +286,8 @@ impl Default for App {
             history_loading: None,
             queue_popup_open: false,
             queue_scroll: 0,
+            queue_action_sending: false,
+            queue_editor: None,
             running: true,
             last_error: None,
             pending_approvals: HashMap::new(),
@@ -643,9 +654,43 @@ impl App {
     }
 
     /// Queue popup bindings: `Up`/`Down` (or `j`/`k`) scroll, `Esc` closes
-    /// (`Alt+q` toggles — handled before this). Everything else is inert.
+    /// (`Alt+q` toggles — handled before this). While the inline editor is
+    /// open, nav keys are inert and typing edits the focused item's text
+    /// (`Enter` commits, `Esc` cancels). On a `queued` item: `x` removes,
+    /// `s` steers, `e` edits — all spawned via the back-channel; steering/
+    /// context items are host-owned and inert. Further actions are inert
+    /// while one is in flight (mirror the takeover's sending guard).
     fn handle_queue_popup_key(&mut self, key: KeyEvent) -> Action {
         use crossterm::event::KeyCode;
+        // Inline editor mode: typing edits, Enter commits, Esc cancels.
+        if self.queue_editor.is_some() {
+            match key.code {
+                KeyCode::Char(c) => {
+                    if let Some(editor) = &mut self.queue_editor {
+                        editor.insert_char(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(editor) = &mut self.queue_editor {
+                        editor.backspace();
+                    }
+                }
+                KeyCode::Enter => {
+                    let text = self
+                        .queue_editor
+                        .take()
+                        .map(|mut e| e.take())
+                        .unwrap_or_default();
+                    if text.trim().is_empty() {
+                        return Action::None; // empty edit: cancel (composer parity)
+                    }
+                    return Action::QueueEdit(text);
+                }
+                KeyCode::Esc => self.queue_editor = None,
+                _ => {}
+            }
+            return Action::None;
+        }
         let len = self.active_queue().len();
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
@@ -655,10 +700,55 @@ impl App {
                 let max = len.saturating_sub(crate::ui::queue::QUEUE_POPUP_MAX_ROWS.min(len));
                 self.queue_scroll = (self.queue_scroll + 1).min(max);
             }
-            KeyCode::Esc => self.queue_popup_open = false,
+            KeyCode::Char('x') if self.queue_focused_is_queued() && !self.queue_action_sending => {
+                return Action::QueueRemove;
+            }
+            KeyCode::Char('s') if self.queue_focused_is_queued() && !self.queue_action_sending => {
+                return Action::QueueSteer;
+            }
+            KeyCode::Char('e') if self.queue_focused_is_queued() && !self.queue_action_sending => {
+                self.open_queue_editor();
+            }
+            KeyCode::Esc => {
+                self.queue_popup_open = false;
+                self.queue_editor = None;
+            }
             _ => {}
         }
         Action::None
+    }
+
+    /// Whether the focused popup item is queue-owned (actionable).
+    fn queue_focused_is_queued(&self) -> bool {
+        matches!(
+            self.focused_queue_item().map(|item| item.placement),
+            Some(crate::wire::events::QueuePlacement::Queued)
+        )
+    }
+
+    /// The popup's focused item (the scroll-top row).
+    pub fn focused_queue_item(&self) -> Option<&crate::wire::events::QueueItem> {
+        self.active_queue().get(self.queue_scroll)
+    }
+
+    /// Open the inline editor seeded with the focused item's text content.
+    fn open_queue_editor(&mut self) {
+        let text = self
+            .focused_queue_item()
+            .map(|item| {
+                item.message
+                    .content
+                    .iter()
+                    .filter_map(|block| block.text())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        let mut editor = Composer::new();
+        for c in text.chars() {
+            editor.insert_char(c);
+        }
+        self.queue_editor = Some(editor);
     }
 
     /// The active session's queue snapshot items (empty when no session, no

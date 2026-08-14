@@ -17,7 +17,7 @@ use crate::wire::approvals::ApprovalRequestId;
 use crate::wire::events::{HostFrame, MuxFrame};
 use crate::wire::rpc::{RpcId, RpcReceipt};
 use crate::wire::session::{
-    SessionCancelValue, SessionHistoryValue, SessionId, SessionPromptValue,
+    SessionCancelValue, SessionHistoryValue, SessionId, SessionPromptValue, SessionUpdateQueueValue,
 };
 use crate::wire::settings::{SettingsDescribeValue, SettingsWriteValue};
 
@@ -53,6 +53,11 @@ pub enum AppEvent {
         session_id: SessionId,
         result: Result<SessionHistoryValue, ClientError>,
     },
+    /// A spawned `session.updateQueue` action finished.
+    QueueActionDone {
+        kind: QueueActionKind,
+        result: Result<SessionUpdateQueueValue, ClientError>,
+    },
     /// The spawned `settings.describe` task finished (opening the settings
     /// view, or the conflict refresh). The app folds it only while the
     /// settings view is open.
@@ -70,6 +75,14 @@ pub enum AppEvent {
     HostFrame(HostFrame),
     Resize(u16, u16),
     Tick,
+}
+
+/// Which queue action a finished task applied (the success toast echoes it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueActionKind {
+    Remove,
+    Steer,
+    Edit,
 }
 
 /// Correlates a finished answer task back to the takeover that spawned it.

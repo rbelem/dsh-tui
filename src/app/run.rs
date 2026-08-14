@@ -17,7 +17,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 
-use crate::app::event::{AnswerTag, AppEvent, EventChannel};
+use crate::app::event::{AnswerTag, AppEvent, EventChannel, QueueActionKind};
 use crate::app::{Action, App, AppError, DRAW_INTERVAL, Focus};
 use crate::client::ClientError;
 use crate::render::chat_view::ChatView;
@@ -31,7 +31,10 @@ use crate::ui::takeover::{ApprovalView, Mode, QuestionView};
 use crate::wire::approvals::ApprovalResponseOutcome;
 use crate::wire::questions::{AskUserQuestionAnswer, QuestionAnswerItem};
 use crate::wire::rpc::{RpcReceipt, RpcReceiptReason};
-use crate::wire::session::{PromptContentPart, PromptMode, SessionHistoryValue, SessionId};
+use crate::wire::session::{
+    PromptContentPart, PromptMode, SessionHistoryValue, SessionId, SessionUpdateQueueValue,
+    UpdateQueueAction,
+};
 
 impl App {
     /// The main loop. Events arrive over one channel; a 16ms interval drives
@@ -86,6 +89,25 @@ impl App {
                                 Some(Action::SwitchSession(session_id)) => {
                                     self.fetch_history(session_id, event_tx.clone())
                                 }
+                                Some(Action::QueueRemove) => {
+                                    self.queue_action(UpdateQueueAction::Remove, event_tx.clone())
+                                }
+                                Some(Action::QueueSteer) => {
+                                    self.queue_action(UpdateQueueAction::Steer, event_tx.clone())
+                                }
+                                Some(Action::QueueEdit(text)) => {
+                                    let content = vec![crate::wire::session::ContentBlock {
+                                        r#type: "text".into(),
+                                        extra: serde_json::Map::from_iter([(
+                                            "text".to_string(),
+                                            serde_json::Value::String(text),
+                                        )]),
+                                    }];
+                                    self.queue_action(
+                                        UpdateQueueAction::Edit { content },
+                                        event_tx.clone(),
+                                    )
+                                }
                                 _ => {}
                             }
                             self.needs_draw = true;
@@ -117,6 +139,11 @@ impl App {
                         }
                         Some(AppEvent::HistoryLoaded { session_id, result }) => {
                             self.on_history_loaded(session_id, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::QueueActionDone { kind, result }) => {
+                            self.on_queue_action_done(kind, result);
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
@@ -371,6 +398,7 @@ impl App {
                     scroll: self.queue_scroll,
                     theme: &self.theme,
                     locale: self.locale,
+                    editor: self.queue_editor.as_ref(),
                 };
                 let anchor = if queue_height > 0 {
                     queue_area.y
@@ -561,6 +589,65 @@ impl App {
                 .await;
             let _ = event_tx.send(AppEvent::AnswerDone { tag, result });
         });
+    }
+
+    /// Spawn `session.updateQueue` for the focused queue item: the loop
+    /// keeps pumping; the result arrives as [`AppEvent::QueueActionDone`].
+    /// No-op without a client, an active session, or a focused item.
+    fn queue_action(
+        &mut self,
+        action: UpdateQueueAction,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let kind = match &action {
+            UpdateQueueAction::Remove => QueueActionKind::Remove,
+            UpdateQueueAction::Steer => QueueActionKind::Steer,
+            UpdateQueueAction::Edit { .. } => QueueActionKind::Edit,
+        };
+        let (Some(client), Some(session_id)) = (self.client.clone(), self.active_session.clone())
+        else {
+            return;
+        };
+        let Some(item_id) = self.focused_queue_item().map(|item| item.id.clone()) else {
+            return;
+        };
+        if self.queue_action_sending {
+            return;
+        }
+        self.queue_action_sending = true;
+        self.queue_editor = None; // a commit closes the editor
+        tokio::spawn(async move {
+            let result = client
+                .session_update_queue(session_id, item_id, action)
+                .await;
+            let _ = event_tx.send(AppEvent::QueueActionDone { kind, result });
+        });
+    }
+
+    /// Apply a finished queue action: toast the outcome and clear the
+    /// in-flight guard (the next `session/queue` frame reflects the change;
+    /// there is no optimistic mutation).
+    fn on_queue_action_done(
+        &mut self,
+        kind: QueueActionKind,
+        result: Result<SessionUpdateQueueValue, ClientError>,
+    ) {
+        self.queue_action_sending = false;
+        match result {
+            Ok(_) => {
+                let key = match kind {
+                    QueueActionKind::Remove => "queue.removed",
+                    QueueActionKind::Steer => "queue.steered",
+                    QueueActionKind::Edit => "queue.edited",
+                };
+                self.set_toast(crate::i18n::tr(self.locale, key));
+            }
+            Err(error) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "queue.action_failed",
+                &[&error.to_string()],
+            )),
+        }
     }
 
     /// Spawn `session.cancel` for the active session (Q15): the loop keeps
