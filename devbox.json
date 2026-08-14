@@ -1,0 +1,11 @@
+{
+  "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/main/.schema/devbox.schema.json",
+  "packages": [
+    "rustup@latest"
+  ],
+  "shell": {
+    "init_hook": [
+      "export PATH=\"$HOME/.cargo/bin:$PATH\""
+    ]
+  }
+}
