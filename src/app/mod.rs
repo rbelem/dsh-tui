@@ -194,6 +194,8 @@ pub struct App {
     /// The active theme (terminal-following default until a config theme or
     /// the picker applies one).
     pub theme: crate::theme::Theme,
+    /// The UI locale (config/env-resolved at startup; Ctrl+L cycles).
+    pub locale: crate::i18n::Locale,
     /// Available themes: bundled + user dir (loaded at startup).
     pub themes: crate::theme::ThemeRegistry,
     /// The Ctrl+T theme picker state.
@@ -248,6 +250,7 @@ impl Default for App {
             sidebar: SidebarState::default(),
             client: None,
             theme: crate::theme::Theme::default(),
+            locale: crate::i18n::Locale::default(),
             themes: crate::theme::ThemeRegistry::bundled(),
             theme_picker: crate::theme::ThemePicker::default(),
             config: crate::theme::Config::default(),
