@@ -136,6 +136,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("toast.approval_cancelled", "approval cancelled"),
     ("toast.approval_unavailable", "approval unavailable"),
     ("toast.approved_remote", "approved by another client"),
+    ("toast.attachment_failed", "attachment failed: {0}"),
     ("toast.cancel_failed", "cancel failed: {0}"),
     ("toast.cancelled", "cancelled"),
     ("toast.config_save_failed", "couldn't save config: {0}"),

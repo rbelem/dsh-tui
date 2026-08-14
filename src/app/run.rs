@@ -130,6 +130,11 @@ impl App {
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
+                        Some(AppEvent::AttachmentDone { attachment_id, result }) => {
+                            self.on_attachment_done(attachment_id, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
                         Some(AppEvent::CancelDone { result }) => {
                             match result {
                                 Ok(_) => self.set_toast(crate::i18n::tr(self.locale, "toast.cancelled")),
@@ -146,6 +151,7 @@ impl App {
                             self.on_history_loaded(session_id, result);
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
+                            self.drain_attachment_needs(event_tx.clone());
                         }
                         Some(AppEvent::QueueActionDone { kind, result }) => {
                             self.on_queue_action_done(kind, result);
@@ -165,6 +171,7 @@ impl App {
                             }
                             self.needs_draw = true;
                             self.draw_if_due(term, false)?;
+                            self.drain_attachment_needs(event_tx.clone());
                         }
                         Some(AppEvent::SettingsDescribeDone { result }) => {
                             self.on_settings_described(result);
@@ -180,6 +187,7 @@ impl App {
                             self.handle_host_frame(frame);
                             self.needs_draw = true;
                             self.draw_if_due(term, false)?;
+                            self.drain_attachment_needs(event_tx.clone());
                         }
                         Some(AppEvent::Answerable { rpc_id, frame }) => {
                             self.record_answerable(rpc_id, &frame);
@@ -191,6 +199,7 @@ impl App {
                             }
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
+                            self.drain_attachment_needs(event_tx.clone());
                         }
                         Some(AppEvent::Resize(_width, height)) => {
                             // Q10: width change → full re-render.
@@ -588,6 +597,37 @@ impl App {
                 .await;
             let _ = event_tx.send(AppEvent::PromptDone { result });
         });
+    }
+
+    /// Drain the attachment needs: for each caption-only attachment not
+    /// cached and not in flight, mark it pending and spawn the
+    /// `session.attachment` fetch. The result arrives as
+    /// [`AppEvent::AttachmentDone`] and populates [`ImageCache`]. Called
+    /// after store-changing events only — a failed fetch must not
+    /// self-trigger (the caption-only row stays until the next store
+    /// change re-encounters it, and each encounter retries once).
+    fn drain_attachment_needs(&mut self, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let (Some(client), Some(session_id)) = (self.client.clone(), self.active_session.clone())
+        else {
+            return;
+        };
+        for attachment_id in self.attachment_needs() {
+            if !self.pending_attachments.insert(attachment_id.clone()) {
+                continue;
+            }
+            let client = client.clone();
+            let session_id = session_id.clone();
+            let event_tx = event_tx.clone();
+            tokio::spawn(async move {
+                let result = client
+                    .session_attachment(session_id, attachment_id.clone())
+                    .await;
+                let _ = event_tx.send(AppEvent::AttachmentDone {
+                    attachment_id,
+                    result,
+                });
+            });
+        }
     }
 
     /// Spawn the approval answer POST. The loop keeps pumping while it is in

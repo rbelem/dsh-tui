@@ -127,6 +127,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("toast.approval_cancelled", "审批已取消"),
     ("toast.approval_unavailable", "审批不可用"),
     ("toast.approved_remote", "已被其他客户端批准"),
+    ("toast.attachment_failed", "附件加载失败：{0}"),
     ("toast.cancel_failed", "取消失败：{0}"),
     ("toast.cancelled", "已取消"),
     ("toast.config_save_failed", "配置保存失败：{0}"),

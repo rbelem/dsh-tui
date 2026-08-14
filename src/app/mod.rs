@@ -23,7 +23,7 @@ pub use event::{
 };
 pub use run::{TerminalGuard, setup_terminal, teardown_terminal};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::time::{Duration, Instant};
 
@@ -42,7 +42,7 @@ use crate::wire::events::{
     ApprovalOutcome, AskUserQuestionItem, HostFrame, MuxFrame, QuestionOutcome,
 };
 use crate::wire::rpc::RpcId;
-use crate::wire::session::{SessionId, SessionSummary};
+use crate::wire::session::{AttachmentId, SessionId, SessionSummary};
 use unicode_width::UnicodeWidthStr;
 
 /// App-level failure.
@@ -286,6 +286,9 @@ pub struct App {
     /// Decoded image bytes by attachment id (empty in v1: the
     /// `session.attachment` fetch is a later lane — render::image docs).
     pub image_cache: crate::render::image::ImageCache,
+    /// Attachment ids with a `session.attachment` fetch in flight (de-dup:
+    /// a cached or pending key is never re-requested).
+    pub pending_attachments: HashSet<AttachmentId>,
     /// One-line transient notice (answer confirmations, remote resolutions),
     /// shown in the status line and inside takeovers. Cleared on the first
     /// tick at least [`TOAST_TTL`] after it was set; a new toast replaces
@@ -325,6 +328,7 @@ impl Default for App {
             queue_editor: None,
             at_catalog: None,
             launcher: None,
+            pending_attachments: HashSet::new(),
             running: true,
             last_error: None,
             pending_approvals: HashMap::new(),
@@ -1502,6 +1506,90 @@ impl App {
     /// no per-row focus, so the viewer starts at the first image-bearing row
     /// at/after the viewport top, else the last image in the session. No
     /// images (or no session): a status hint, no mode change.
+    /// The `session.attachment` fetch finished: on success decode the
+    /// base64 payload into [`ImageCache`] (the inline placeholder upgrades
+    /// to a real image on the next draw — the row cache must be
+    /// invalidated so the caption+filler rows re-render); on failure toast
+    /// and stay uncached (the next render encounter retries). The pending
+    /// guard is cleared either way.
+    fn on_attachment_done(
+        &mut self,
+        attachment_id: AttachmentId,
+        result: Result<crate::wire::session::SessionAttachmentValue, ClientError>,
+    ) {
+        self.pending_attachments.remove(&attachment_id);
+        let bytes = match result {
+            Ok(value) => {
+                use base64::Engine;
+                match base64::engine::general_purpose::STANDARD.decode(&value.data) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        self.set_toast(crate::i18n::trf(
+                            self.locale,
+                            "toast.attachment_failed",
+                            &[&error.to_string()],
+                        ));
+                        return;
+                    }
+                }
+            }
+            Err(error) => {
+                self.set_toast(crate::i18n::trf(
+                    self.locale,
+                    "toast.attachment_failed",
+                    &[&error.to_string()],
+                ));
+                return;
+            }
+        };
+        let Some(picker) = &self.image_picker else {
+            // No graphics tier (keyless/tests, TERM unset): captions are the
+            // tier; the bytes are dropped rather than cached.
+            return;
+        };
+        match self.image_cache.insert(picker, attachment_id, &bytes) {
+            Ok(()) => {
+                // The inline filler rows now exist: every cached row that
+                // touches this attachment must re-render.
+                self.row_cache.invalidate_all();
+            }
+            Err(error) => {
+                self.set_toast(crate::i18n::trf(
+                    self.locale,
+                    "toast.attachment_failed",
+                    &[&error.to_string()],
+                ));
+            }
+        }
+    }
+
+    /// The attachment ids the render would show as caption-only placeholders
+    /// right now: every image block in the active session's store whose
+    /// cache key has no bytes and whose fetch is not already in flight.
+    /// Empty without a graphics tier (nothing would render anyway) or
+    /// without an active session.
+    pub fn attachment_needs(&self) -> Vec<AttachmentId> {
+        if self.image_picker.is_none() {
+            return Vec::new();
+        }
+        let Some(session_id) = &self.active_session else {
+            return Vec::new();
+        };
+        let mut needed = Vec::new();
+        for (_, images) in session_image_blocks(&self.store, session_id) {
+            for attachment in images {
+                if self.image_cache.get(&attachment.attachment_id).is_some() {
+                    continue; // cached: the inline tier already renders
+                }
+                if self.pending_attachments.contains(&attachment.attachment_id) {
+                    continue; // in flight: the done-event will populate it
+                }
+                needed.push(attachment.attachment_id);
+            }
+        }
+        needed
+    }
+
     fn open_image_viewer(&mut self) -> Action {
         let Some(session_id) = self.active_session.clone() else {
             self.hint = Some(crate::i18n::tr(self.locale, "hint.no_images").into());
