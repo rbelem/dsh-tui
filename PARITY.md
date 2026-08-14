@@ -27,3 +27,21 @@ Out-of-scope (per wayfinder map): serving the UI over HTTP to remote browsers
   deepseek-harness monorepo (reference, read-only).
 - The TUI is a second surface over the same gateway; session state is the single
   source of truth — switching surfaces mid-conversation must resume seamlessly.
+
+## e2e coverage (level-3 harness, `tests/e2e.rs`)
+
+The real binary runs in a PTY against the in-process mock gateway (keyless,
+`DSH_PORT`-attached, locale/XDG isolated). Scenario → row mapping:
+
+| Scenario (tests/e2e.rs) | PARITY row(s) |
+|---|---|
+| `attach_resumes_most_recent_session` | session list/resume rows — resume the most recent non-blank session with its history |
+| `prompt_submit_streams_response` | composer / prompt row — typed submit posts `session.prompt` (mode queue); streamed assistant text renders |
+| `approval_takeover_answers_with_echoed_rpc_id` | approvals row — takeover shows the tool + hints; `y` answers with the echoed rpcId; resolved frame toasts and restores chat |
+| `theme_picker_opens_and_closes` | theme row — Ctrl+T popup lists bundled themes; Esc closes (keys reach the composer again) |
+| `ctrl_q_exits_cleanly` | acceptance artifact — clean exit, status 0, no panic text |
+
+Rows without an e2e scenario are covered by the unit/integration suites
+(wire round-trips, store fold, render snapshots at both locales, keymap
+tables, settings/theme/i18n tests) or are explicitly out of scope (images,
+drag-drop, hover-only interactions, onboarding, remote-browser serving).

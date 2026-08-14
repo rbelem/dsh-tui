@@ -13,7 +13,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
 /// What the mock gateway does with one POSTed method.
@@ -137,6 +137,9 @@ pub struct MockGateway {
     /// Per-session `session.history` response templates (keyed by the
     /// request payload's sessionId); falls back to the method handler map.
     history_fixtures: Arc<Mutex<HashMap<String, String>>>,
+    /// Live WS downlink pushers per path (e2e scenarios push frames to an
+    /// already-connected subscriber, e.g. an approval trigger after boot).
+    ws_pushers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
     ws_frames: Arc<Mutex<HashMap<String, Vec<String>>>>,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
@@ -154,6 +157,8 @@ impl MockGateway {
         let task_handlers = Arc::clone(&handlers);
         let history_fixtures = Arc::new(Mutex::new(HashMap::new()));
         let task_history = Arc::clone(&history_fixtures);
+        let ws_pushers = Arc::new(Mutex::new(HashMap::new()));
+        let task_pushers = Arc::clone(&ws_pushers);
         let task_ws_frames = Arc::clone(&ws_frames);
         let task = tokio::spawn(async move {
             loop {
@@ -166,6 +171,7 @@ impl MockGateway {
                             Arc::clone(&task_requests),
                             Arc::clone(&task_handlers),
                             Arc::clone(&task_history),
+                            Arc::clone(&task_pushers),
                             Arc::clone(&task_ws_frames),
                         ));
                     }
@@ -177,6 +183,7 @@ impl MockGateway {
             requests: Arc::clone(&requests),
             handlers: Arc::clone(&handlers),
             history_fixtures,
+            ws_pushers,
             ws_frames: Arc::clone(&ws_frames),
             shutdown: Some(shutdown_tx),
             task,
@@ -205,6 +212,16 @@ impl MockGateway {
 
     pub async fn set_ws_frames(&self, path: &str, frames: Vec<String>) {
         self.ws_frames.lock().await.insert(path.to_string(), frames);
+    }
+
+    /// Push one frame to the live downlink subscriber for `path` (a no-op
+    /// when nobody is connected); returns whether it was delivered.
+    pub async fn push_ws_frame(&self, path: &str, frame: String) -> bool {
+        let pusher = self.ws_pushers.lock().await.get(path).cloned();
+        match pusher {
+            Some(pusher) => pusher.send(frame).is_ok(),
+            None => false,
+        }
     }
 
     pub async fn requests(&self) -> Vec<CapturedRequest> {
@@ -239,6 +256,7 @@ async fn handle_connection(
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
     handlers: Arc<Mutex<HashMap<String, MockAction>>>,
     history_fixtures: Arc<Mutex<HashMap<String, String>>>,
+    ws_pushers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
     ws_frames: Arc<Mutex<HashMap<String, Vec<String>>>>,
 ) {
     // Peek (non-consuming) until the request head is complete. An upgrade
@@ -266,11 +284,30 @@ async fn handle_connection(
             .cloned()
             .unwrap_or_default();
         let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        // Register the pusher BEFORE serving the scripted frames: pushes sent
+        // while the script is still streaming must not be lost.
+        let (pusher_tx, mut pusher_rx) = mpsc::unbounded_channel();
+        ws_pushers.lock().await.insert(path.clone(), pusher_tx);
         for frame in frames {
             socket.send(Message::Text(frame)).await.unwrap();
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-        while let Some(Ok(_)) = socket.next().await {}
+        loop {
+            tokio::select! {
+                pushed = pusher_rx.recv() => {
+                    match pushed {
+                        Some(frame) => {
+                            if socket.send(Message::Text(frame)).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = socket.next() => break, // client dropped (or closed)
+            }
+        }
+        ws_pushers.lock().await.remove(&path);
         return;
     }
 

@@ -7,6 +7,8 @@
 //! - a 16ms `Tick` (the run loop also selects on its own interval; the
 //!   channel variant exists so tests can inject ticks deterministically).
 
+use std::time::Duration;
+
 use crossterm::event::KeyEvent;
 use tokio::sync::mpsc;
 
@@ -121,18 +123,31 @@ pub fn spawn_input_bridge(tx: mpsc::UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
             loop {
-                match crossterm::event::read() {
-                    Ok(crossterm::event::Event::Key(key)) => {
-                        if tx.send(AppEvent::Key(key)).is_err() {
+                // Poll with a timeout instead of blocking forever: the loop
+                // must be able to notice the channel closing so the app can
+                // exit cleanly (an unbounded `read()` would hang the runtime
+                // shutdown after Ctrl+Q).
+                match crossterm::event::poll(Duration::from_millis(100)) {
+                    Ok(true) => match crossterm::event::read() {
+                        Ok(crossterm::event::Event::Key(key)) => {
+                            if tx.send(AppEvent::Key(key)).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(crossterm::event::Event::Resize(width, height)) => {
+                            if tx.send(AppEvent::Resize(width, height)).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    },
+                    Ok(false) => {
+                        // The run loop dropped the receiver (app quitting).
+                        if tx.is_closed() {
                             break;
                         }
                     }
-                    Ok(crossterm::event::Event::Resize(width, height)) => {
-                        if tx.send(AppEvent::Resize(width, height)).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(_) => {}
                     Err(_) => break,
                 }
             }

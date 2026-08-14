@@ -25,3 +25,4 @@ dirs = "6"
 
 [dev-dependencies]
 insta = "1"
+portable-pty = "0.8"

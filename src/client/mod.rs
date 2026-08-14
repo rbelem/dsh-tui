@@ -92,7 +92,12 @@ pub struct WireClient {
 
 impl Drop for WireClient {
     fn drop(&mut self) {
-        self.inner.stop.store(true, Ordering::Relaxed);
+        // Only the LAST clone stops the downlink tasks: transient clones
+        // held by spawned answer/prompt tasks drop when those tasks finish,
+        // and must not tear the subscription down mid-session.
+        if Arc::strong_count(&self.inner) == 1 {
+            self.inner.stop.store(true, Ordering::Relaxed);
+        }
     }
 }
 
