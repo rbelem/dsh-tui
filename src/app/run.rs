@@ -77,6 +77,12 @@ impl App {
                                     self.answer_question(event_tx.clone())
                                 }
                                 Some(Action::CancelTurn) => self.cancel_turn(event_tx.clone()),
+                                Some(Action::FetchSettings) => {
+                                    self.fetch_settings(event_tx.clone())
+                                }
+                                Some(Action::SaveSettings) => {
+                                    self.save_settings(event_tx.clone())
+                                }
                                 Some(Action::SwitchSession(session_id)) => {
                                     self.fetch_history(session_id, event_tx.clone())
                                 }
@@ -118,6 +124,16 @@ impl App {
                             }
                             self.needs_draw = true;
                             self.draw_if_due(term, false)?;
+                        }
+                        Some(AppEvent::SettingsDescribeDone { result }) => {
+                            self.on_settings_described(result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::SettingsSaveDone { ns, result }) => {
+                            self.on_settings_saved(ns, result, event_tx.clone());
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
                         }
                         Some(AppEvent::HostFrame(frame)) => {
                             self.handle_host_frame(frame);
@@ -208,7 +224,34 @@ impl App {
                         },
                         area,
                     ),
+                    Mode::Settings(state) => frame.render_widget(
+                        crate::ui::settings::SettingsView {
+                            state,
+                            notice,
+                            theme: &self.theme,
+                        },
+                        area,
+                    ),
                     Mode::Chat => {}
+                }
+                // The theme picker floats over the settings view too (it's
+                // the one place themes live; chat draws its own copy).
+                if self.theme_picker.open {
+                    let popup = ThemePopup {
+                        themes: &self.themes.themes,
+                        selected: self.theme_picker.selected,
+                        current: &self.theme,
+                    };
+                    let (width, height) = popup.size(area.width);
+                    let popup_area = Rect {
+                        x: area.x + area.width.saturating_sub(width) / 2,
+                        y: area.y + area.height.saturating_sub(height) / 2,
+                        width,
+                        height: height.min(area.height),
+                    };
+                    if popup_area.height > 0 {
+                        frame.render_widget(popup, popup_area);
+                    }
                 }
             })?;
             self.last_draw = Some(Instant::now());
@@ -534,6 +577,102 @@ impl App {
                 .await;
             let _ = event_tx.send(AppEvent::HistoryLoaded { session_id, result });
         });
+    }
+
+    /// Spawn `settings.describe` for the settings view (open, or the
+    /// conflict refresh): the result arrives as
+    /// [`AppEvent::SettingsDescribeDone`]. No-op without a client — the
+    /// view stays on its "not exposed" panes.
+    fn fetch_settings(&mut self, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let Some(client) = self.client.clone() else {
+            if let Mode::Settings(state) = &mut self.mode {
+                state.loading = false;
+            }
+            return;
+        };
+        tokio::spawn(async move {
+            let result = client.settings_describe().await;
+            let _ = event_tx.send(AppEvent::SettingsDescribeDone { result });
+        });
+    }
+
+    /// Fold a describe result into the settings view (only while it is
+    /// open — a late result after Esc is dropped). A failure toasts and
+    /// leaves the view on its empty panes.
+    fn on_settings_described(
+        &mut self,
+        result: Result<crate::wire::settings::SettingsDescribeValue, ClientError>,
+    ) {
+        let Mode::Settings(state) = &mut self.mode else {
+            return;
+        };
+        match result {
+            Ok(value) => state.apply_describe(value),
+            Err(error) => {
+                state.loading = false;
+                self.set_toast(format!("settings failed: {error}"));
+            }
+        }
+    }
+
+    /// Spawn `settings.update` for the selected form: the patch is only the
+    /// changed keys, `expectedRevision` rides the described revision
+    /// (optimistic concurrency — a stale write comes back
+    /// `settings-conflict`). The result arrives as
+    /// [`AppEvent::SettingsSaveDone`]. No-op without a client.
+    fn save_settings(&mut self, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let (Some(client), Mode::Settings(state)) = (self.client.clone(), &self.mode) else {
+            return;
+        };
+        let Some(section) = state.sections.get(state.selected) else {
+            return;
+        };
+        let Some(form) = state.forms.get(&section.ns) else {
+            return;
+        };
+        let ns = section.ns.clone();
+        let revision = form.view.revision;
+        let patch = form.patch();
+        tokio::spawn(async move {
+            let result = client.settings_update(&ns, Some(revision), patch).await;
+            let _ = event_tx.send(AppEvent::SettingsSaveDone { ns, result });
+        });
+    }
+
+    /// Apply a finished save: success refreshes the form from the returned
+    /// view, toasts `saved`, and returns to the chat; a `settings-conflict`
+    /// toasts `conflict — refreshed` and re-describes to the latest
+    /// revision (edits are dropped — the freshest values win); any other
+    /// error toasts and stays in the view with saving re-armed. A late
+    /// result after the view closed is dropped.
+    fn on_settings_saved(
+        &mut self,
+        ns: String,
+        result: Result<crate::wire::settings::SettingsWriteValue, ClientError>,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        self.hint = None; // clear the "saving…" hint
+        let Mode::Settings(state) = &mut self.mode else {
+            return;
+        };
+        state.saving = false;
+        match result {
+            Ok(view) => {
+                if let Some(form) = state.forms.get_mut(&ns) {
+                    form.refresh(view);
+                }
+                self.mode = Mode::Chat;
+                self.set_toast("saved");
+            }
+            Err(ClientError::Rpc(crate::wire::rpc::RpcError::SettingsConflict { .. })) => {
+                state.loading = true;
+                self.set_toast("conflict — refreshed");
+                self.fetch_settings(event_tx);
+            }
+            Err(error) => {
+                self.set_toast(format!("save failed: {error}"));
+            }
+        }
     }
 
     /// Apply a loaded history page for the CURRENT active session only. A

@@ -24,6 +24,9 @@ use crate::wire::session::{
     SessionSelectModelValue, SessionSummary, SessionUpdateQueueRequest, SessionUpdateQueueValue,
     UpdateQueueAction, WorkspaceId,
 };
+use crate::wire::settings::{
+    SettingsDescribeRequest, SettingsDescribeValue, SettingsUpdateRequest, SettingsWriteValue,
+};
 
 impl WireClient {
     /// `session.list` — the summary rows.
@@ -186,6 +189,35 @@ impl WireClient {
                 session_id,
                 item_id,
                 action,
+            },
+        )
+        .await
+    }
+
+    /// `settings.describe` — every exposed namespace (schema + redacted
+    /// value + revision) in one shot; the request payload is empty
+    /// (settings.schema.ts:30). There is no per-namespace describe and no
+    /// list/read method — the settings view builds its nav from this.
+    pub async fn settings_describe(&self) -> Result<SettingsDescribeValue, ClientError> {
+        self.call("settings.describe", SettingsDescribeRequest {})
+            .await
+    }
+
+    /// `settings.update` — patch one namespace. `expected_revision` rides the
+    /// optimistic-concurrency slot (`settings-conflict` on a stale write;
+    /// rpc.schema.ts:63); pass `None` to skip the check.
+    pub async fn settings_update(
+        &self,
+        ns: &str,
+        expected_revision: Option<f64>,
+        patch: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<SettingsWriteValue, ClientError> {
+        self.call(
+            "settings.update",
+            SettingsUpdateRequest {
+                ns: ns.to_string(),
+                patch,
+                expected_revision,
             },
         )
         .await

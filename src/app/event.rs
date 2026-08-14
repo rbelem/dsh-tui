@@ -17,6 +17,7 @@ use crate::wire::rpc::{RpcId, RpcReceipt};
 use crate::wire::session::{
     SessionCancelValue, SessionHistoryValue, SessionId, SessionPromptValue,
 };
+use crate::wire::settings::{SettingsDescribeValue, SettingsWriteValue};
 
 /// One event for the main loop.
 #[derive(Debug)]
@@ -49,6 +50,18 @@ pub enum AppEvent {
     HistoryLoaded {
         session_id: SessionId,
         result: Result<SessionHistoryValue, ClientError>,
+    },
+    /// The spawned `settings.describe` task finished (opening the settings
+    /// view, or the conflict refresh). The app folds it only while the
+    /// settings view is open.
+    SettingsDescribeDone {
+        result: Result<SettingsDescribeValue, ClientError>,
+    },
+    /// The spawned `settings.update` task finished; `ns` correlates the
+    /// result back to the form that spawned it.
+    SettingsSaveDone {
+        ns: String,
+        result: Result<SettingsWriteValue, ClientError>,
     },
     /// A host-stream frame (session list liveness). Host frames are pure
     /// pushes — the downlink rpcId is ignored.

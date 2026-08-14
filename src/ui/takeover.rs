@@ -33,6 +33,8 @@ pub enum Mode {
     Chat,
     Approval(ApprovalTakeover),
     Question(QuestionTakeover),
+    /// The two-pane settings view (Ctrl+, opens, Esc closes).
+    Settings(crate::ui::settings::SettingsState),
 }
 
 /// The displayed approval: the `approval/requested` frame's fields plus the

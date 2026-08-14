@@ -116,6 +116,12 @@ pub enum Action {
     AnswerApproval(ApprovalResponseOutcome),
     /// Question takeover submitted; the run loop posts the respond.
     AnswerQuestion,
+    /// The settings view opened (Ctrl+,); the run loop spawns
+    /// `settings.describe`.
+    FetchSettings,
+    /// The settings form asked to save (Ctrl+S); the run loop spawns
+    /// `settings.update` with the form's patch.
+    SaveSettings,
     /// Consumed but no-op (Esc in the chat, a blocked submit).
     None,
 }
@@ -469,6 +475,11 @@ impl App {
         if !matches!(self.mode, Mode::Chat) {
             return Some(self.handle_takeover_key(key));
         }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(',') {
+            self.mode = Mode::Settings(crate::ui::settings::SettingsState::new());
+            self.hint = None;
+            return Some(Action::FetchSettings);
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
             if self.theme_picker.open {
                 self.theme_picker.open = false;
@@ -729,7 +740,155 @@ impl App {
                 }
                 _ => Action::None,
             },
+            Mode::Settings(_) => self.handle_settings_key(key),
             Mode::Chat => Action::None,
+        }
+    }
+
+    /// Settings view bindings. Global: `Esc` closes (unsaved edits only
+    /// toast a warning — the edits go with the view), `Ctrl+T` keeps the
+    /// theme picker available (themes live there, not in this view),
+    /// `Ctrl+S` saves the selected form's patch. Nav focus: `Up`/`Down`/
+    /// `j`/`k` move the section; `Tab`/`Right` enter the form. Form focus:
+    /// `Up`/`Down` move the field, `Enter`/`Space` edit (booleans toggle,
+    /// enums cycle, strings/numbers open the inline editor — `Enter`
+    /// commits, `Esc` cancels), `Tab`/`Left` return to the nav. Everything
+    /// else is inert in v1.
+    fn handle_settings_key(&mut self, key: KeyEvent) -> Action {
+        use crate::ui::settings::{FieldKind, LineEditor, SettingsFocus, SettingsForm};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        if control && key.code == KeyCode::Char('t') {
+            if self.theme_picker.open {
+                self.theme_picker.open = false;
+            } else {
+                self.theme_picker.selected = self
+                    .themes
+                    .themes
+                    .iter()
+                    .position(|theme| theme.name == self.theme.name)
+                    .unwrap_or(0);
+                self.theme_picker.open = true;
+            }
+            return Action::None;
+        }
+        if self.theme_picker.open {
+            return self.handle_picker_key(key);
+        }
+        let Mode::Settings(state) = &mut self.mode else {
+            return Action::None;
+        };
+        // The inline editor swallows keys until Enter commits or Esc cancels.
+        if let Some(form) = state.selected_form_mut()
+            && form.editing.is_some()
+        {
+            let editor = form.editing.as_mut().expect("checked above");
+            match key.code {
+                KeyCode::Enter => {
+                    if let Err(hint) = form.commit_edit() {
+                        self.hint = Some(hint.into());
+                    }
+                }
+                KeyCode::Esc => form.editing = None,
+                KeyCode::Backspace => editor.backspace(),
+                KeyCode::Left => editor.move_left(),
+                KeyCode::Right => editor.move_right(),
+                KeyCode::Home => editor.caret = 0,
+                KeyCode::End => editor.caret = editor.buffer.len(),
+                KeyCode::Char(c) if !control => editor.insert_char(c),
+                _ => {}
+            }
+            return Action::Input;
+        }
+        match key.code {
+            KeyCode::Esc => {
+                let dirty = state.dirty();
+                self.mode = Mode::Chat;
+                if dirty {
+                    self.set_toast("closed settings — unsaved changes discarded");
+                }
+                Action::None
+            }
+            KeyCode::Char('s') if control => {
+                if state.saving {
+                    return Action::None;
+                }
+                let dirty = state.selected_form().is_some_and(SettingsForm::dirty);
+                if !dirty {
+                    self.hint = Some("nothing to save".into());
+                    return Action::None;
+                }
+                state.saving = true;
+                self.hint = Some("saving…".into());
+                Action::SaveSettings
+            }
+            KeyCode::Tab | KeyCode::Right | KeyCode::Left => {
+                state.focus = match state.focus {
+                    SettingsFocus::Nav => SettingsFocus::Form,
+                    SettingsFocus::Form => SettingsFocus::Nav,
+                };
+                Action::Input
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                match state.focus {
+                    SettingsFocus::Nav => state.move_selection(-1),
+                    SettingsFocus::Form => {
+                        if let Some(form) = state.selected_form_mut() {
+                            form.cursor = form.cursor.saturating_sub(1);
+                        }
+                    }
+                }
+                Action::Input
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                match state.focus {
+                    SettingsFocus::Nav => state.move_selection(1),
+                    SettingsFocus::Form => {
+                        if let Some(form) = state.selected_form_mut() {
+                            let last = form.fields.len().saturating_sub(1);
+                            form.cursor = (form.cursor + 1).min(last);
+                        }
+                    }
+                }
+                Action::Input
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if state.focus == SettingsFocus::Form => {
+                let Some(form) = state.selected_form_mut() else {
+                    return Action::None;
+                };
+                let Some(field) = form.fields.get_mut(form.cursor) else {
+                    return Action::None;
+                };
+                match &field.kind {
+                    FieldKind::Boolean => {
+                        let on = field.value.as_bool().unwrap_or(false);
+                        field.value = serde_json::Value::Bool(!on);
+                    }
+                    FieldKind::Choice(options) => {
+                        let current = field.value.as_str().unwrap_or_default();
+                        let next = options
+                            .iter()
+                            .position(|option| option == current)
+                            .map(|index| (index + 1) % options.len())
+                            .unwrap_or(0);
+                        field.value = serde_json::Value::String(options[next].clone());
+                    }
+                    FieldKind::Text => {
+                        let text = field.value.as_str().unwrap_or_default().to_string();
+                        form.editing = Some(LineEditor::new(text));
+                    }
+                    FieldKind::Number => {
+                        let text = match &field.value {
+                            serde_json::Value::Null => String::new(),
+                            other => other.to_string(),
+                        };
+                        form.editing = Some(LineEditor::new(text));
+                    }
+                    FieldKind::Raw => self.hint = Some("read-only field".into()),
+                }
+                Action::Input
+            }
+            _ => Action::None,
         }
     }
 

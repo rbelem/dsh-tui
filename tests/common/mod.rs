@@ -41,6 +41,95 @@ pub struct CapturedRequest {
     pub body: String,
 }
 
+/// `settings.describe` fixture (the `{rpcId}` placeholder is substituted
+/// like every `MockAction::Ok` template): two nav-mapped namespaces —
+/// "general" (string, number, boolean, and enum fields, revision 1) and
+/// "plugins" (one boolean) — plus "locale", which no v1 nav section maps.
+pub const SETTINGS_DESCRIBE_OK: &str = r#"{
+    "type": "server-response",
+    "rpcId": "{rpcId}",
+    "result": {"ok": true, "value": {
+        "writable": true,
+        "hasDocument": true,
+        "namespaces": [
+            {
+                "ns": "general",
+                "schema": {"type": "object", "properties": {
+                    "language": {"type": "string", "title": "Language"},
+                    "maxTokens": {"type": "number", "title": "Max tokens"},
+                    "verbose": {"type": "boolean", "title": "Verbose logging"},
+                    "logLevel": {"type": "string", "enum": ["quiet", "normal", "debug"], "title": "Log level"},
+                    "metadata": {"type": "object", "title": "Metadata"}
+                }},
+                "value": {"language": "en", "maxTokens": 4096, "verbose": false, "logLevel": "normal", "metadata": {"a": 1}},
+                "applies": "live",
+                "secrets": [],
+                "revision": 1
+            },
+            {
+                "ns": "plugins",
+                "schema": {"type": "object", "properties": {
+                    "webSearch": {"type": "boolean", "title": "Web search"}
+                }},
+                "value": {"webSearch": true},
+                "applies": "restart",
+                "secrets": [],
+                "revision": 3
+            },
+            {
+                "ns": "locale",
+                "schema": {"type": "object", "properties": {
+                    "locale": {"type": "string", "title": "Locale"}
+                }},
+                "value": {"locale": "en"},
+                "applies": "live",
+                "secrets": [],
+                "revision": 1
+            }
+        ]
+    }}
+}"#;
+
+/// A `settings.update` ok response template: the namespace's new redacted
+/// view (revision bumped, `value_json` spliced in verbatim). The literal
+/// `{rpcId}` placeholder is substituted by `MockAction::Ok`.
+pub fn settings_update_ok(ns: &str, revision: u64, value_json: serde_json::Value) -> String {
+    serde_json::json!({
+        "type": "server-response",
+        "rpcId": "{rpcId}",
+        "result": {"ok": true, "value": {
+            "ns": ns,
+            "schema": {"type": "object", "properties": {}},
+            "value": value_json,
+            "applies": "live",
+            "secrets": [],
+            "revision": revision,
+        }},
+    })
+    .to_string()
+}
+
+/// A `settings.update` `settings-conflict` error template
+/// (rpc.schema.ts:63 — details carry ns/expected/actual).
+pub fn settings_conflict(ns: &str, expected: u64, actual: u64) -> String {
+    serde_json::json!({
+        "type": "server-response",
+        "rpcId": "{rpcId}",
+        "result": {"ok": false, "error": {
+            "code": "settings-conflict",
+            "message": "settings changed underneath",
+            "details": {"ns": ns, "expected": expected, "actual": actual},
+        }},
+    })
+    .to_string()
+}
+
+/// Leak a generated template into a `&'static str` for [`MockAction::Ok`]
+/// (test-scoped; the process is the arena).
+pub fn leaked(template: String) -> &'static str {
+    Box::leak(template.into_boxed_str())
+}
+
 pub struct MockGateway {
     port: u16,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
