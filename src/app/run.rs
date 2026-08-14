@@ -24,6 +24,7 @@ use crate::render::chat_view::ChatView;
 use crate::theme::Theme;
 use crate::theme::ThemePopup;
 use crate::ui::composer::{ComposerView, SeedPopup};
+use crate::ui::queue::{QueuePopup, QueueStrip};
 use crate::ui::sidebar::{SidebarView, sidebar_width};
 use crate::ui::style;
 use crate::ui::takeover::{ApprovalView, Mode, QuestionView};
@@ -115,6 +116,11 @@ impl App {
                                 Ok(()) => {}
                                 Err(error) => self.last_error = Some(error.to_string()),
                             }
+                            self.needs_draw = true;
+                            self.draw_if_due(term, false)?;
+                        }
+                        Some(AppEvent::HostFrame(frame)) => {
+                            self.handle_host_frame(frame);
                             self.needs_draw = true;
                             self.draw_if_due(term, false)?;
                         }
@@ -217,9 +223,17 @@ impl App {
         let [sidebar_area, right] =
             Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Fill(1)])
                 .areas(full);
+        // The queue strip docks between the chat and the composer while the
+        // active session has queue items; an emptied queue closes the popup.
+        let queue_empty = self.active_queue().is_empty();
+        if queue_empty {
+            self.queue_popup_open = false;
+        }
+        let queue_height = u16::from(!queue_empty);
         let composer_height = (self.composer.line_count() as u16 + 1).clamp(2, 8);
-        let [chat_area, composer_area, status_area] = Layout::vertical([
+        let [chat_area, queue_area, composer_area, status_area] = Layout::vertical([
             Constraint::Fill(1),
+            Constraint::Length(queue_height),
             Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
@@ -243,6 +257,15 @@ impl App {
         }
         let status = self.status_line(&self.theme);
         let offset = self.view.offset;
+        // Field-level chain (not `self.active_queue()`) so the borrow stays
+        // disjoint from `&mut self.row_cache` inside the closure.
+        let queue_items = self
+            .active_session
+            .as_ref()
+            .and_then(|session_id| self.store.session(session_id))
+            .and_then(|state| state.queue.as_ref())
+            .map(|queue| queue.items.as_slice())
+            .unwrap_or(&[]);
 
         term.draw(|frame| {
             if sidebar_width > 0 {
@@ -268,6 +291,15 @@ impl App {
                     chat_area,
                 );
             }
+            if queue_height > 0 {
+                frame.render_widget(
+                    QueueStrip {
+                        items: queue_items,
+                        theme: &self.theme,
+                    },
+                    queue_area,
+                );
+            }
             frame.render_widget(
                 ComposerView {
                     composer: &self.composer,
@@ -277,6 +309,30 @@ impl App {
                 composer_area,
             );
             frame.render_widget(Paragraph::new(status), status_area);
+
+            // The queue popup docks above the strip (view-only v1).
+            if self.queue_popup_open {
+                let popup = QueuePopup {
+                    items: queue_items,
+                    scroll: self.queue_scroll,
+                    theme: &self.theme,
+                };
+                let anchor = if queue_height > 0 {
+                    queue_area.y
+                } else {
+                    composer_area.y
+                };
+                let (width, height) = popup.size(right.width, anchor);
+                let area = Rect {
+                    x: right.x,
+                    y: anchor.saturating_sub(height),
+                    width,
+                    height,
+                };
+                if area.height > 0 {
+                    frame.render_widget(popup, area);
+                }
+            }
 
             // The real terminal cursor marks the focused composer.
             if self.focus == Focus::Composer {

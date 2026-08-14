@@ -315,10 +315,25 @@ pub struct SessionSelectModelValue {
 }
 
 /// Mirrors contentBlockSchema (sessions.schema.ts:271): a loose object — the
-/// `type` discriminant envelope is strict, the rest stays wide passthrough.
+/// `type` discriminant envelope is strict, the rest stays wide passthrough
+/// (preserved verbatim in `extra`; the queue strip reads text previews from
+/// it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContentBlock {
     pub r#type: String,
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
+}
+
+impl ContentBlock {
+    /// The block's text, when it is a text block carrying one.
+    pub fn text(&self) -> Option<&str> {
+        if self.r#type == "text" {
+            self.extra.get("text").and_then(|v| v.as_str())
+        } else {
+            None
+        }
+    }
 }
 
 /// Mirrors imageMediaTypeSchema (sessions.schema.ts:274-279): raster image

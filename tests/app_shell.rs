@@ -18,7 +18,8 @@ use dsh_tui::store::SessionStore;
 use dsh_tui::ui::takeover::{ApprovalTakeover, Mode, QuestionTakeover};
 use dsh_tui::wire::approvals::{ApprovalRequestId, ApprovalResponseOutcome};
 use dsh_tui::wire::events::{
-    ApprovalOutcome, AskUserQuestionItem, MuxFrame, QuestionOption, QuestionOutcome,
+    ApprovalOutcome, AskUserQuestionItem, MessageRole, MuxFrame, QuestionOption, QuestionOutcome,
+    QueueItem, QueueMessage, QueueMessageSource, QueuePlacement,
 };
 use dsh_tui::wire::rpc::RpcId;
 use dsh_tui::wire::session::{SessionEvent, SessionId, SessionSummary};
@@ -61,6 +62,10 @@ fn ctrl(code: KeyCode) -> KeyEvent {
 
 fn shift(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::SHIFT)
+}
+
+fn alt(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::ALT)
 }
 
 fn mux_subscribed(session: &str, last_seq: i64) -> String {
@@ -259,6 +264,30 @@ fn keymap_table() {
         app.focus = Focus::Composer;
         app.composer.insert_char('/');
     }
+    fn with_queue(app: &mut App) {
+        app.active_session = Some(SessionId("s1".into()));
+        app.store
+            .ingest(MuxFrame::SessionQueue {
+                session_id: SessionId("s1".into()),
+                items: vec![QueueItem {
+                    id: dsh_tui::wire::session::MessageId("m1".into()),
+                    placement: QueuePlacement::Queued,
+                    message: QueueMessage {
+                        id: dsh_tui::wire::session::MessageId("m1".into()),
+                        role: MessageRole::User,
+                        content: vec![],
+                        source: QueueMessageSource {
+                            kind: "user".into(),
+                        },
+                    },
+                }],
+            })
+            .expect("queue frame");
+    }
+    fn queue_popup(app: &mut App) {
+        with_queue(app);
+        app.queue_popup_open = true;
+    }
     fn approval_mode(app: &mut App) {
         app.mode = Mode::Approval(ApprovalTakeover {
             session_id: SessionId("s1".into()),
@@ -437,6 +466,13 @@ fn keymap_table() {
         // Ctrl+C stays the global quit, even during a takeover
         (approval_mode, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
         (question_mode, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
+        // queue popup: Alt+q toggles (empty queue → hint only), arrows
+        // scroll, Esc closes
+        (|_| {}, alt(KeyCode::Char('q')), Some(Action::None)),
+        (with_queue, alt(KeyCode::Char('q')), Some(Action::None)),
+        (queue_popup, key(KeyCode::Down), Some(Action::None)),
+        (queue_popup, key(KeyCode::Char('j')), Some(Action::None)),
+        (queue_popup, key(KeyCode::Esc), Some(Action::None)),
     ];
     for (setup, event, expected) in cases {
         let mut app = App::default();

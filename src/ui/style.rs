@@ -35,3 +35,7 @@ pub fn hint(theme: &Theme) -> Style {
 pub fn header(theme: &Theme) -> Style {
     Style::new().add_modifier(Modifier::BOLD).fg(theme.text)
 }
+/// Cautionary accents (the queue strip's steering count, popup tags).
+pub fn warning(theme: &Theme) -> Style {
+    Style::new().fg(theme.warning)
+}

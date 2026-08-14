@@ -7,8 +7,9 @@
 //! unfocused sidebar shows no selection — there is nothing to operate on).
 //! Running sessions get a dim `· running` suffix.
 //!
-//! Live host-stream updates to the list are a later lane: v1 shows the
-//! snapshot taken by the attach flow's `session.list`.
+//! The list is the attach flow's `session.list` snapshot plus live
+//! host-stream updates (`App::handle_host_frame`). Workspace grouping is a
+//! later lane.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

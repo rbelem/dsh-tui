@@ -18,7 +18,9 @@ pub mod event;
 pub mod run;
 
 pub use attach::attach;
-pub use event::{AnswerTag, AppEvent, EventChannel, spawn_frame_bridge, spawn_input_bridge};
+pub use event::{
+    AnswerTag, AppEvent, EventChannel, spawn_frame_bridge, spawn_host_bridge, spawn_input_bridge,
+};
 pub use run::{TerminalGuard, setup_terminal, teardown_terminal};
 
 use std::collections::HashMap;
@@ -36,7 +38,9 @@ use crate::ui::composer::Composer;
 use crate::ui::sidebar::SidebarState;
 use crate::ui::takeover::{ApprovalTakeover, Mode, QuestionTakeover};
 use crate::wire::approvals::{ApprovalRequestId, ApprovalResponseOutcome};
-use crate::wire::events::{ApprovalOutcome, AskUserQuestionItem, MuxFrame, QuestionOutcome};
+use crate::wire::events::{
+    ApprovalOutcome, AskUserQuestionItem, HostFrame, MuxFrame, QuestionOutcome,
+};
 use crate::wire::rpc::RpcId;
 use crate::wire::session::{SessionId, SessionSummary};
 
@@ -172,8 +176,8 @@ pub struct App {
     pub row_cache: RowCache,
     pub view: ViewState,
     pub active_session: Option<SessionId>,
-    /// Session list snapshot from the attach flow's `session.list` (live
-    /// host-stream updates are a later lane).
+    /// The sidebar's session rows: the attach flow's `session.list` snapshot
+    /// plus live host-stream updates (`host/session-added|removed|status`).
     pub sessions: Vec<SessionSummary>,
     /// Which surface holds the keyboard focus.
     pub focus: Focus,
@@ -193,6 +197,10 @@ pub struct App {
     /// The session whose history page is loading after a switch (Q9); `None`
     /// when idle. The status line shows "loading history…" while set.
     pub history_loading: Option<SessionId>,
+    /// The view-only queue popup (`Alt+q`); scroll offset into the active
+    /// session's queue items.
+    pub queue_popup_open: bool,
+    pub queue_scroll: usize,
     pub running: bool,
     /// Last non-fatal error, shown in the status line.
     pub last_error: Option<String>,
@@ -238,6 +246,8 @@ impl Default for App {
             theme_picker: crate::theme::ThemePicker::default(),
             config: crate::theme::Config::default(),
             history_loading: None,
+            queue_popup_open: false,
+            queue_scroll: 0,
             running: true,
             last_error: None,
             pending_approvals: HashMap::new(),
@@ -476,6 +486,12 @@ impl App {
         if self.theme_picker.open {
             return Some(self.handle_picker_key(key));
         }
+        if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('q') {
+            return Some(self.toggle_queue_popup());
+        }
+        if self.queue_popup_open {
+            return Some(self.handle_queue_popup_key(key));
+        }
         if key.code == KeyCode::Tab {
             let next = self.focus.next();
             self.focus = next;
@@ -537,6 +553,124 @@ impl App {
             && terminal_supports_color()
         {
             self.theme = theme.clone();
+        }
+    }
+
+    /// `Alt+q`: toggle the queue popup. Opening requires a non-empty queue
+    /// on the active session (the strip is gone then anyway); otherwise a
+    /// hint. The popup is view-only v1 (updateQueue actions are a later
+    /// lane).
+    fn toggle_queue_popup(&mut self) -> Action {
+        if self.queue_popup_open {
+            self.queue_popup_open = false;
+            return Action::None;
+        }
+        if self.active_queue().is_empty() {
+            self.hint = Some("queue is empty".into());
+            return Action::None;
+        }
+        self.queue_scroll = 0;
+        self.queue_popup_open = true;
+        Action::None
+    }
+
+    /// Queue popup bindings: `Up`/`Down` (or `j`/`k`) scroll, `Esc` closes
+    /// (`Alt+q` toggles — handled before this). Everything else is inert.
+    fn handle_queue_popup_key(&mut self, key: KeyEvent) -> Action {
+        use crossterm::event::KeyCode;
+        let len = self.active_queue().len();
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.queue_scroll = self.queue_scroll.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let max = len.saturating_sub(crate::ui::queue::QUEUE_POPUP_MAX_ROWS.min(len));
+                self.queue_scroll = (self.queue_scroll + 1).min(max);
+            }
+            KeyCode::Esc => self.queue_popup_open = false,
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// The active session's queue snapshot items (empty when no session, no
+    /// snapshot, or an empty queue).
+    pub fn active_queue(&self) -> &[crate::wire::events::QueueItem] {
+        self.active_session
+            .as_ref()
+            .and_then(|session_id| self.store.session(session_id))
+            .and_then(|state| state.queue.as_ref())
+            .map(|queue| queue.items.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Live sidebar updates from the host stream (Q2). Handled: session
+    /// added (lands at the top — the list stays updatedAt-desc), removed
+    /// (an active removal clears to the empty chat; no auto-switch v1),
+    /// status (the running flag). Ignored with a TODO: workspace-changed/
+    /// removed/order-changed (workspace grouping is a later lane),
+    /// archived-sessions-changed (archived filtering later), remote-event,
+    /// agent-error (no v1 surface).
+    pub fn handle_host_frame(&mut self, frame: HostFrame) {
+        match frame {
+            HostFrame::HostSessionAdded {
+                session_id,
+                blank,
+                parent_session_id,
+                origin,
+                cwd,
+                agent_preset,
+            } => {
+                if self
+                    .sessions
+                    .iter()
+                    .any(|summary| summary.session_id == session_id)
+                {
+                    return;
+                }
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                self.sessions.insert(
+                    0,
+                    SessionSummary {
+                        session_id,
+                        updated_at: now,
+                        running: false,
+                        blank,
+                        parent_session_id,
+                        origin,
+                        cwd,
+                        agent_preset,
+                        projections: None,
+                    },
+                );
+            }
+            HostFrame::HostSessionRemoved { session_id } => {
+                self.sessions
+                    .retain(|summary| summary.session_id != session_id);
+                if self.active_session.as_ref() == Some(&session_id) {
+                    // v1: no auto-switch — the chat goes empty.
+                    self.active_session = None;
+                    self.row_cache.invalidate_all();
+                }
+            }
+            HostFrame::HostSessionStatus {
+                session_id,
+                running,
+            } => {
+                if let Some(summary) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|summary| summary.session_id == session_id)
+                {
+                    summary.running = running;
+                }
+            }
+            // TODO(later lanes): workspace grouping, archived filtering,
+            // remote events, agent errors.
+            _ => {}
         }
     }
 

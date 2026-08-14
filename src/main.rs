@@ -38,5 +38,6 @@ async fn run_app(client: WireClient) -> Result<(), AppError> {
     let mut events = EventChannel::new();
     event::spawn_input_bridge(events.tx.clone());
     event::spawn_frame_bridge(client.mux_stream(), events.tx.clone());
+    event::spawn_host_bridge(client.host_stream(), events.tx.clone());
     app.run(&mut terminal, &mut events).await
 }

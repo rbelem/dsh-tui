@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 
 use crate::client::{ClientError, DownlinkFrame};
 use crate::wire::approvals::ApprovalRequestId;
-use crate::wire::events::MuxFrame;
+use crate::wire::events::{HostFrame, MuxFrame};
 use crate::wire::rpc::{RpcId, RpcReceipt};
 use crate::wire::session::{
     SessionCancelValue, SessionHistoryValue, SessionId, SessionPromptValue,
@@ -50,6 +50,9 @@ pub enum AppEvent {
         session_id: SessionId,
         result: Result<SessionHistoryValue, ClientError>,
     },
+    /// A host-stream frame (session list liveness). Host frames are pure
+    /// pushes — the downlink rpcId is ignored.
+    HostFrame(HostFrame),
     Resize(u16, u16),
     Tick,
 }
@@ -128,8 +131,7 @@ pub fn spawn_input_bridge(tx: mpsc::UnboundedSender<AppEvent>) {
 
 /// Spawn the mux frame bridge: drains the wire client's mux subscriber into
 /// events. Answerable frames travel as [`AppEvent::Answerable`] (envelope
-/// rpcId preserved); everything else as [`AppEvent::Frame`]. The host stream
-/// has no store surface yet (v1 TODO).
+/// rpcId preserved); everything else as [`AppEvent::Frame`].
 pub fn spawn_frame_bridge(
     mut mux: mpsc::UnboundedReceiver<DownlinkFrame<MuxFrame>>,
     tx: mpsc::UnboundedSender<AppEvent>,
@@ -145,6 +147,23 @@ pub fn spawn_frame_bridge(
                 AppEvent::Frame(downlink.frame)
             };
             if tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+/// Spawn the host frame bridge: drains the wire client's host subscriber
+/// into [`AppEvent::HostFrame`]s. Host frames are pure pushes (the downlink
+/// rpcId is ignored); the app handles the session-liveness subset and
+/// ignores the rest (workspace grouping, archived filtering — later lanes).
+pub fn spawn_host_bridge(
+    mut host: mpsc::UnboundedReceiver<DownlinkFrame<HostFrame>>,
+    tx: mpsc::UnboundedSender<AppEvent>,
+) {
+    tokio::spawn(async move {
+        while let Some(downlink) = host.recv().await {
+            if tx.send(AppEvent::HostFrame(downlink.frame)).is_err() {
                 break;
             }
         }

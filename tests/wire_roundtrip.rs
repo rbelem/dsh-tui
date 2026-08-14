@@ -699,8 +699,9 @@ mod mux_frames {
                 assert_eq!(items[0].message.source.kind, "composer");
                 assert_eq!(items[0].message.content.len(), 2);
                 assert_eq!(items[0].message.content[0].r#type, "text");
-                // Extra block keys (`name`, `args`) are dropped by the loose
-                // ContentBlock passthrough; `type` is preserved.
+                // Extra block keys ride the ContentBlock passthrough
+                // verbatim (`text`, `name`, `args`); `type` is the tag.
+                assert_eq!(items[0].message.content[0].text(), Some("hello"));
                 assert_eq!(items[0].message.content[1].r#type, "tool-call");
             }
             other => panic!("expected session/queue, got {other:?}"),
@@ -718,9 +719,17 @@ mod mux_frames {
                         content: vec![
                             ContentBlock {
                                 r#type: "text".into(),
+                                extra: serde_json::Map::from_iter([(
+                                    "text".to_string(),
+                                    serde_json::json!("hello"),
+                                )]),
                             },
                             ContentBlock {
                                 r#type: "tool-call".into(),
+                                extra: serde_json::Map::from_iter([
+                                    ("name".to_string(), serde_json::json!("read_file")),
+                                    ("args".to_string(), serde_json::json!({})),
+                                ]),
                             },
                         ],
                         source: QueueMessageSource {
@@ -736,6 +745,10 @@ mod mux_frames {
                         role: MessageRole::Assistant,
                         content: vec![ContentBlock {
                             r#type: "text".into(),
+                            extra: serde_json::Map::from_iter([(
+                                "text".to_string(),
+                                serde_json::json!("hi"),
+                            )]),
                         }],
                         source: QueueMessageSource {
                             kind: "queue".into(),
@@ -1346,10 +1359,18 @@ mod session_domain {
                 action: UpdateQueueAction::Edit {
                     content: vec![
                         ContentBlock {
-                            r#type: "text".into()
+                            r#type: "text".into(),
+                            extra: serde_json::Map::from_iter([(
+                                "text".to_string(),
+                                serde_json::json!("edited"),
+                            )]),
                         },
                         ContentBlock {
-                            r#type: "tool-call".into()
+                            r#type: "tool-call".into(),
+                            extra: serde_json::Map::from_iter([
+                                ("id".to_string(), serde_json::json!("x")),
+                                ("args".to_string(), serde_json::json!({})),
+                            ]),
                         },
                     ],
                 },

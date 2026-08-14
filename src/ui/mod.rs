@@ -6,10 +6,12 @@
 //! no raw colors — the theme lane maps [`style`] tokens later.
 
 pub mod composer;
+pub mod queue;
 pub mod sidebar;
 pub mod style;
 pub mod takeover;
 
 pub use composer::{Composer, ComposerView, PopupKind, SeedItem, SeedPopup};
+pub use queue::{QueuePopup, QueueStrip};
 pub use sidebar::{SidebarState, SidebarView, sidebar_width};
 pub use takeover::{ApprovalTakeover, ApprovalView, Mode, QuestionTakeover, QuestionView};
