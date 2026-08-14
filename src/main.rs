@@ -26,8 +26,10 @@ fn main() -> Result<(), AppError> {
 
 async fn run_app(client: WireClient) -> Result<(), AppError> {
     let mut app = App::default();
-    let session_id = attach(&client, &mut app.store).await?;
+    let (session_id, sessions) = attach(&client, &mut app.store).await?;
     app.active_session = session_id.clone();
+    app.sessions = sessions;
+    app.client = Some(client.clone());
     if session_id.is_none() {
         app.last_error = Some("gateway has no sessions — start one from the web UI".into());
     }

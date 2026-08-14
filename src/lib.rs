@@ -7,6 +7,7 @@ pub mod app;
 pub mod client;
 pub mod render;
 pub mod store;
+pub mod ui;
 pub mod wire;
 
 pub use wire::*;

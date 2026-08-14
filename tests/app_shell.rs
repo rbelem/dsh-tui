@@ -13,7 +13,7 @@ use ratatui::backend::TestBackend;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use dsh_tui::app::{Action, App, AppEvent, attach, spawn_frame_bridge};
+use dsh_tui::app::{Action, App, AppEvent, Focus, attach, spawn_frame_bridge};
 use dsh_tui::client::WireClient;
 use dsh_tui::store::SessionStore;
 use dsh_tui::wire::events::MuxFrame;
@@ -53,6 +53,10 @@ fn key(code: KeyCode) -> KeyEvent {
 
 fn ctrl(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::CONTROL)
+}
+
+fn shift(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::SHIFT)
 }
 
 fn mux_subscribed(session: &str, last_seq: i64) -> String {
@@ -168,12 +172,14 @@ async fn attach_history_draw_end_to_end() {
 
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let opened = attach(&client, &mut store).await.expect("attach");
+    let (opened, sessions) = attach(&client, &mut store).await.expect("attach");
     assert_eq!(opened, Some(SessionId("s1".into())));
+    assert_eq!(sessions.len(), 2, "attach hands the sidebar the full list");
 
     let mut app = App::default();
     app.store = store;
     app.active_session = opened;
+    app.sessions = sessions;
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     spawn_frame_bridge(client.mux_stream(), tx.clone());
@@ -236,24 +242,103 @@ async fn coalescing_draws_once_per_batch() {
 
 #[test]
 fn keymap_table() {
-    let cases: Vec<(KeyEvent, Option<Action>)> = vec![
-        (key(KeyCode::Char('q')), Some(Action::Quit)),
-        (ctrl(KeyCode::Char('c')), Some(Action::Quit)),
-        (key(KeyCode::Char('j')), Some(Action::Scroll(1))),
-        (key(KeyCode::Down), Some(Action::Scroll(1))),
-        (key(KeyCode::Char('k')), Some(Action::Scroll(-1))),
-        (key(KeyCode::Up), Some(Action::Scroll(-1))),
-        (key(KeyCode::Char('g')), Some(Action::Scroll(i64::MIN))),
-        (key(KeyCode::Home), Some(Action::Scroll(i64::MIN))),
-        (key(KeyCode::Char('G')), Some(Action::Scroll(i64::MAX))),
-        (key(KeyCode::End), Some(Action::Scroll(i64::MAX))),
-        (ctrl(KeyCode::Char('d')), Some(Action::Scroll(12))),
-        (ctrl(KeyCode::Char('u')), Some(Action::Scroll(-12))),
-        (key(KeyCode::Esc), Some(Action::None)),
-        (key(KeyCode::Char('x')), None),
+    fn composer_focus(app: &mut App) {
+        app.focus = Focus::Composer;
+    }
+    fn sidebar_focus(app: &mut App) {
+        app.focus = Focus::Sidebar;
+    }
+    fn slash_popup(app: &mut App) {
+        app.focus = Focus::Composer;
+        app.composer.insert_char('/');
+    }
+    /// One binding case: setup, the key, the expected action.
+    type Case = (fn(&mut App), KeyEvent, Option<Action>);
+    let cases: Vec<Case> = vec![
+        // chat (default focus): scroll keys, quit, Esc no-op
+        (|_| {}, key(KeyCode::Char('q')), Some(Action::Quit)),
+        (|_| {}, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
+        (|_| {}, key(KeyCode::Char('j')), Some(Action::Scroll(1))),
+        (|_| {}, key(KeyCode::Down), Some(Action::Scroll(1))),
+        (|_| {}, key(KeyCode::Char('k')), Some(Action::Scroll(-1))),
+        (|_| {}, key(KeyCode::Up), Some(Action::Scroll(-1))),
+        (
+            |_| {},
+            key(KeyCode::Char('g')),
+            Some(Action::Scroll(i64::MIN)),
+        ),
+        (|_| {}, key(KeyCode::Home), Some(Action::Scroll(i64::MIN))),
+        (
+            |_| {},
+            key(KeyCode::Char('G')),
+            Some(Action::Scroll(i64::MAX)),
+        ),
+        (|_| {}, key(KeyCode::End), Some(Action::Scroll(i64::MAX))),
+        (|_| {}, ctrl(KeyCode::Char('d')), Some(Action::Scroll(12))),
+        (|_| {}, ctrl(KeyCode::Char('u')), Some(Action::Scroll(-12))),
+        (|_| {}, key(KeyCode::Esc), Some(Action::None)),
+        (|_| {}, key(KeyCode::Char('x')), None),
+        // Tab cycles chat → composer → sidebar → chat
+        (
+            |_| {},
+            key(KeyCode::Tab),
+            Some(Action::Focus(Focus::Composer)),
+        ),
+        (
+            composer_focus,
+            key(KeyCode::Tab),
+            Some(Action::Focus(Focus::Sidebar)),
+        ),
+        (
+            sidebar_focus,
+            key(KeyCode::Tab),
+            Some(Action::Focus(Focus::Chat)),
+        ),
+        // Ctrl+C quits from any surface
+        (composer_focus, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
+        (sidebar_focus, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
+        // composer: editing, Enter/Shift+Enter, Esc back to the chat
+        (composer_focus, key(KeyCode::Char('a')), Some(Action::Input)),
+        (composer_focus, key(KeyCode::Char('q')), Some(Action::Input)),
+        (composer_focus, key(KeyCode::Backspace), Some(Action::Input)),
+        (composer_focus, key(KeyCode::Left), Some(Action::Input)),
+        (composer_focus, key(KeyCode::Right), Some(Action::Input)),
+        (composer_focus, key(KeyCode::Home), Some(Action::Input)),
+        (composer_focus, key(KeyCode::End), Some(Action::Input)),
+        (composer_focus, key(KeyCode::Up), Some(Action::Input)),
+        (composer_focus, key(KeyCode::Down), Some(Action::Input)),
+        (composer_focus, key(KeyCode::Enter), Some(Action::None)), // empty buffer
+        (composer_focus, shift(KeyCode::Enter), Some(Action::Input)), // newline
+        (
+            composer_focus,
+            key(KeyCode::Esc),
+            Some(Action::Focus(Focus::Chat)),
+        ),
+        (composer_focus, ctrl(KeyCode::Char('d')), Some(Action::None)),
+        // composer with the seed popup open: arrows navigate, Enter accepts,
+        // Esc closes
+        (slash_popup, key(KeyCode::Up), Some(Action::Input)),
+        (slash_popup, key(KeyCode::Down), Some(Action::Input)),
+        (slash_popup, key(KeyCode::Enter), Some(Action::Input)),
+        (slash_popup, key(KeyCode::Esc), Some(Action::None)),
+        // sidebar: navigate, switch, Esc back to the chat
+        (sidebar_focus, key(KeyCode::Char('j')), Some(Action::Select)),
+        (sidebar_focus, key(KeyCode::Char('k')), Some(Action::Select)),
+        (sidebar_focus, key(KeyCode::Down), Some(Action::Select)),
+        (sidebar_focus, key(KeyCode::Up), Some(Action::Select)),
+        (sidebar_focus, key(KeyCode::Char('g')), Some(Action::Select)),
+        (sidebar_focus, key(KeyCode::Char('G')), Some(Action::Select)),
+        (sidebar_focus, key(KeyCode::Enter), Some(Action::None)), // empty list
+        (
+            sidebar_focus,
+            key(KeyCode::Esc),
+            Some(Action::Focus(Focus::Chat)),
+        ),
+        (sidebar_focus, key(KeyCode::Char('q')), Some(Action::Quit)),
     ];
-    for (event, expected) in cases {
+    for (setup, event, expected) in cases {
         let mut app = App::default();
+        setup(&mut app);
         assert_eq!(app.handle_key(event), expected, "key {event:?}");
     }
 }
@@ -281,7 +366,7 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
         .expect("frame");
     }
     // Let a tick draw the accumulated state: follow clamps to the bottom
-    // (5 rows, chat height 4 → offset 1).
+    // (5 rows; layout: chat 2 + composer 2 + status 1 → offset 3).
     tokio::time::sleep(Duration::from_millis(50)).await;
     tx.send(AppEvent::Key(key(KeyCode::Char('j')))).expect("j");
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -290,8 +375,8 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
     result.expect("run");
 
     assert!(!app.view.follow, "manual scroll disables follow");
-    // Followed bottom was offset 1; j moves one row past it.
-    assert_eq!(app.view.offset, 2);
+    // Followed bottom was offset 3; j moves one row past it.
+    assert_eq!(app.view.offset, 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -310,8 +395,9 @@ async fn no_session_attach_renders_empty_chat() {
     .await;
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let opened = attach(&client, &mut store).await.expect("attach");
+    let (opened, sessions) = attach(&client, &mut store).await.expect("attach");
     assert_eq!(opened, None, "no sessions on the gateway");
+    assert!(sessions.is_empty());
 
     let mut app = App::default();
     app.store = store;

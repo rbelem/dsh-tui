@@ -1,18 +1,26 @@
 //! The main loop and draw (Q3): single-threaded store + draw, coalesced at
 //! ~16ms, plus the raw-mode/alternate-screen lifecycle.
+//!
+//! Layout (the first surface lane): a full-height sidebar on the left
+//! (hidden below 60 columns), and a right column stacking the chat (fill),
+//! the composer (one top rule; height tracks the buffer, capped at 8 rows),
+//! and the one-line status. Each seam is a single divider — no boxed panes.
 
 use std::time::Instant;
 
 use ratatui::Terminal;
 use ratatui::backend::Backend;
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
 
 use crate::app::event::AppEvent;
-use crate::app::{Action, App, AppError, DRAW_INTERVAL};
+use crate::app::{Action, App, AppError, DRAW_INTERVAL, Focus};
 use crate::render::chat_view::ChatView;
+use crate::ui::composer::{ComposerView, SeedPopup};
+use crate::ui::sidebar::{SidebarView, sidebar_width};
+use crate::wire::session::{PromptContentPart, PromptMode};
 
 impl App {
     /// The main loop. Events arrive over one channel; a 16ms interval drives
@@ -38,9 +46,13 @@ impl App {
                 maybe = events.recv() => {
                     match maybe {
                         Some(AppEvent::Key(key)) => {
-                            if self.handle_key(key) == Some(Action::Quit) {
-                                self.running = false;
-                                break;
+                            match self.handle_key(key) {
+                                Some(Action::Quit) => {
+                                    self.running = false;
+                                    break;
+                                }
+                                Some(Action::Submit(text)) => self.dispatch_prompt(text),
+                                _ => {}
                             }
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
@@ -90,17 +102,31 @@ impl App {
         Ok(())
     }
 
-    /// Sync the row cache, apply follow, and render: chat area = full minus
-    /// one status line.
+    /// Sync the row cache, apply follow, and render the three surfaces:
+    /// sidebar | chat over composer over the status line.
     fn draw<B>(&mut self, term: &mut Terminal<B>) -> Result<(), B::Error>
     where
         B: Backend,
     {
         let size = term.size()?;
-        let chat_height = size.height.saturating_sub(1);
-        let width = size.width;
-        self.view.viewport_height = chat_height;
+        let full = Rect::new(0, 0, size.width, size.height);
+        let sidebar_width = sidebar_width(size.width);
+        let [sidebar_area, right] =
+            Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Fill(1)])
+                .areas(full);
+        let composer_height = (self.composer.line_count() as u16 + 1).clamp(2, 8);
+        let [chat_area, composer_area, status_area] = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(composer_height),
+            Constraint::Length(1),
+        ])
+        .areas(right);
 
+        self.view.viewport_height = chat_area.height;
+        let chat_height = chat_area.height;
+        let width = chat_area.width;
+
+        self.sidebar.clamp(self.sessions.len());
         let session_id = self.active_session.clone();
         if let Some(session_id) = &session_id {
             self.row_cache.sync(&self.store, session_id, width);
@@ -114,8 +140,17 @@ impl App {
         let offset = self.view.offset;
 
         term.draw(|frame| {
-            let [chat_area, status_area] =
-                Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+            if sidebar_width > 0 {
+                frame.render_widget(
+                    SidebarView {
+                        sessions: &self.sessions,
+                        active: self.active_session.as_ref(),
+                        selected: self.sidebar.selected,
+                        focused: self.focus == Focus::Sidebar,
+                    },
+                    sidebar_area,
+                );
+            }
             if let Some(session_id) = &session_id {
                 frame.render_widget(
                     ChatView {
@@ -127,7 +162,45 @@ impl App {
                     chat_area,
                 );
             }
+            frame.render_widget(
+                ComposerView {
+                    composer: &self.composer,
+                    focused: self.focus == Focus::Composer,
+                },
+                composer_area,
+            );
             frame.render_widget(Paragraph::new(status), status_area);
+
+            // The real terminal cursor marks the focused composer.
+            if self.focus == Focus::Composer {
+                let inner = Rect {
+                    x: composer_area.x,
+                    y: composer_area.y + 1,
+                    width: composer_area.width,
+                    height: composer_area.height.saturating_sub(1),
+                };
+                let (row, col, _) = self.composer.caret_layout(inner.width);
+                let y = (inner.y + row).min(inner.bottom().saturating_sub(1));
+                frame.set_cursor_position((inner.x + col, y));
+            }
+
+            // The seed popup floats above the composer.
+            if let Some(kind) = self.composer.popup() {
+                let popup = SeedPopup {
+                    kind,
+                    selected: self.composer.popup_selected(),
+                };
+                let (width, height) = popup.size(right.width);
+                let area = Rect {
+                    x: right.x,
+                    y: composer_area.y.saturating_sub(height),
+                    width,
+                    height: height.min(composer_area.y),
+                };
+                if area.height > 0 {
+                    frame.render_widget(popup, area);
+                }
+            }
         })?;
 
         self.last_draw = Some(Instant::now());
@@ -136,7 +209,30 @@ impl App {
         Ok(())
     }
 
-    /// The one-line status: session id · last seq · truncated flag · error.
+    /// Fire-and-forget `session.prompt` for a submitted composer buffer
+    /// (mode `queue`, one text part — web parity). No-op without an attached
+    /// client (keyless tests) or an active session.
+    fn dispatch_prompt(&mut self, text: String) {
+        let (Some(client), Some(session_id)) = (self.client.clone(), self.active_session.clone())
+        else {
+            return;
+        };
+        // TODO: surface prompt errors in the status line (needs an event
+        // back-channel from the spawned task).
+        tokio::spawn(async move {
+            let _ = client
+                .session_prompt(
+                    session_id,
+                    PromptMode::Queue,
+                    vec![PromptContentPart::Text { text }],
+                    None,
+                )
+                .await;
+        });
+    }
+
+    /// The one-line status: session id · last seq · truncated flag · running
+    /// · focused surface · transient hint · error.
     fn status_line(&self) -> Line<'static> {
         let mut parts: Vec<String> = Vec::new();
         match &self.active_session {
@@ -152,6 +248,13 @@ impl App {
             if state.truncated {
                 parts.push("truncated".into());
             }
+        }
+        if self.session_running() {
+            parts.push("running".into());
+        }
+        parts.push(format!("focus: {}", self.focus.label()));
+        if let Some(hint) = &self.hint {
+            parts.push(hint.clone());
         }
         if let Some(error) = &self.last_error {
             parts.push(format!("error: {error}"));

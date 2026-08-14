@@ -4,7 +4,7 @@
 use crate::app::AppError;
 use crate::client::WireClient;
 use crate::store::SessionStore;
-use crate::wire::session::SessionId;
+use crate::wire::session::{SessionId, SessionSummary};
 
 /// History page size for the attach resume.
 const HISTORY_PAGE: usize = 200;
@@ -12,12 +12,13 @@ const HISTORY_PAGE: usize = 200;
 /// Attach to the gateway's sessions: `session.list`, then load the most
 /// recently updated non-blank session's history tail into the store.
 ///
-/// Returns the opened session id, or `None` when the gateway has no sessions
-/// (v1: the app stays on an empty chat and the caller sets a hint).
+/// Returns the opened session id (`None` when the gateway has no sessions —
+/// the app stays on an empty chat and the caller sets a hint) plus the full
+/// summary list for the sidebar.
 pub async fn attach(
     client: &WireClient,
     store: &mut SessionStore,
-) -> Result<Option<SessionId>, AppError> {
+) -> Result<(Option<SessionId>, Vec<SessionSummary>), AppError> {
     let summaries = client.session_list().await?;
     // Most recently updated non-blank session; fall back to any session.
     let chosen = summaries
@@ -30,7 +31,7 @@ pub async fn attach(
                 .max_by(|a, b| a.updated_at.total_cmp(&b.updated_at))
         });
     let Some(summary) = chosen else {
-        return Ok(None);
+        return Ok((None, summaries));
     };
 
     let history = client
@@ -48,5 +49,6 @@ pub async fn attach(
         client.port(),
         summary.session_id
     );
-    Ok(Some(summary.session_id.clone()))
+    let opened = summary.session_id.clone();
+    Ok((Some(opened), summaries))
 }
