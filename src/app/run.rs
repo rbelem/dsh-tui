@@ -30,7 +30,7 @@ use crate::ui::takeover::{ApprovalView, Mode, QuestionView};
 use crate::wire::approvals::ApprovalResponseOutcome;
 use crate::wire::questions::{AskUserQuestionAnswer, QuestionAnswerItem};
 use crate::wire::rpc::{RpcReceipt, RpcReceiptReason};
-use crate::wire::session::{PromptContentPart, PromptMode};
+use crate::wire::session::{PromptContentPart, PromptMode, SessionHistoryValue, SessionId};
 
 impl App {
     /// The main loop. Events arrive over one channel; a 16ms interval drives
@@ -75,6 +75,10 @@ impl App {
                                 Some(Action::AnswerQuestion) => {
                                     self.answer_question(event_tx.clone())
                                 }
+                                Some(Action::CancelTurn) => self.cancel_turn(event_tx.clone()),
+                                Some(Action::SwitchSession(session_id)) => {
+                                    self.fetch_history(session_id, event_tx.clone())
+                                }
                                 _ => {}
                             }
                             self.needs_draw = true;
@@ -89,6 +93,19 @@ impl App {
                             if let Err(error) = result {
                                 self.set_toast(format!("prompt failed: {error}"));
                             }
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::CancelDone { result }) => {
+                            match result {
+                                Ok(_) => self.set_toast("cancelled"),
+                                Err(error) => self.set_toast(format!("cancel failed: {error}")),
+                            }
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::HistoryLoaded { session_id, result }) => {
+                            self.on_history_loaded(session_id, result);
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
@@ -429,6 +446,67 @@ impl App {
                 .await;
             let _ = event_tx.send(AppEvent::AnswerDone { tag, result });
         });
+    }
+
+    /// Spawn `session.cancel` for the active session (Q15): the loop keeps
+    /// pumping; the result arrives as [`AppEvent::CancelDone`]. No-op without
+    /// a client or an active session.
+    fn cancel_turn(&mut self, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let (Some(client), Some(session_id)) = (self.client.clone(), self.active_session.clone())
+        else {
+            return;
+        };
+        tokio::spawn(async move {
+            let result = client.session_cancel(session_id).await;
+            let _ = event_tx.send(AppEvent::CancelDone { result });
+        });
+    }
+
+    /// Spawn `session.history` for the switched-to session (Q9 resume): the
+    /// page lands as [`AppEvent::HistoryLoaded`] and is folded by the
+    /// stale-guarded [`App::on_history_loaded`]. The status line shows a
+    /// "loading history…" hint while in flight. No-op without a client.
+    fn fetch_history(&mut self, session_id: SessionId, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        self.history_loading = Some(session_id.clone());
+        self.hint = Some("loading history…".into());
+        tokio::spawn(async move {
+            let result = client
+                .session_history(session_id.clone(), None, Some(200))
+                .await;
+            let _ = event_tx.send(AppEvent::HistoryLoaded { session_id, result });
+        });
+    }
+
+    /// Apply a loaded history page for the CURRENT active session only. A
+    /// late result for a session the user already switched away from is
+    /// dropped silently (stale guard: no store write, no hint touch) — the
+    /// newest switch's load wins. A failure for the active session toasts.
+    fn on_history_loaded(
+        &mut self,
+        session_id: SessionId,
+        result: Result<SessionHistoryValue, ClientError>,
+    ) {
+        if self.active_session.as_ref() != Some(&session_id) {
+            return; // stale result for a session we already left
+        }
+        self.history_loading = None;
+        self.hint = None;
+        match result {
+            Ok(history) => {
+                let entries = history
+                    .events
+                    .into_iter()
+                    .map(|entry| (entry.event, entry.view))
+                    .collect();
+                if let Err(error) = self.store.ingest_history(&session_id, entries) {
+                    self.last_error = Some(error.to_string());
+                }
+            }
+            Err(error) => self.set_toast(format!("history failed: {error}")),
+        }
     }
 
     /// Apply a finished answer: success resolves the takeover it belongs to

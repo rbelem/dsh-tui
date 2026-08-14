@@ -14,7 +14,9 @@ use crate::client::{ClientError, DownlinkFrame};
 use crate::wire::approvals::ApprovalRequestId;
 use crate::wire::events::MuxFrame;
 use crate::wire::rpc::{RpcId, RpcReceipt};
-use crate::wire::session::SessionPromptValue;
+use crate::wire::session::{
+    SessionCancelValue, SessionHistoryValue, SessionId, SessionPromptValue,
+};
 
 /// One event for the main loop.
 #[derive(Debug)]
@@ -37,6 +39,16 @@ pub enum AppEvent {
     /// The spawned `session.prompt` task finished.
     PromptDone {
         result: Result<SessionPromptValue, ClientError>,
+    },
+    /// The spawned `session.cancel` task finished (Q15).
+    CancelDone {
+        result: Result<SessionCancelValue, ClientError>,
+    },
+    /// A history page for a switched-to session arrived (Q9); the app folds
+    /// it only when the session is still active (stale guard).
+    HistoryLoaded {
+        session_id: SessionId,
+        result: Result<SessionHistoryValue, ClientError>,
     },
     Resize(u16, u16),
     Tick,

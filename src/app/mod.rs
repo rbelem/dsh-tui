@@ -100,6 +100,9 @@ pub enum Action {
     Input,
     /// Composer submitted this text; the run loop dispatches `session.prompt`.
     Submit(String),
+    /// The active session's running turn should be cancelled (Q15: Ctrl+C
+    /// with a turn in flight); the run loop spawns `session.cancel`.
+    CancelTurn,
     /// Sidebar selection moved.
     Select,
     /// Sidebar Enter switched the active session.
@@ -187,6 +190,9 @@ pub struct App {
     pub theme_picker: crate::theme::ThemePicker,
     /// The persisted config (theme choice).
     pub config: crate::theme::Config,
+    /// The session whose history page is loading after a switch (Q9); `None`
+    /// when idle. The status line shows "loading history…" while set.
+    pub history_loading: Option<SessionId>,
     pub running: bool,
     /// Last non-fatal error, shown in the status line.
     pub last_error: Option<String>,
@@ -231,6 +237,7 @@ impl Default for App {
             themes: crate::theme::ThemeRegistry::bundled(),
             theme_picker: crate::theme::ThemePicker::default(),
             config: crate::theme::Config::default(),
+            history_loading: None,
             running: true,
             last_error: None,
             pending_approvals: HashMap::new(),
@@ -426,16 +433,27 @@ impl App {
         })
     }
 
-    /// Handle one key (Q15 subset). Global keys first (`Ctrl+C` quits —
-    /// also during a takeover, the one documented exception), then a
-    /// takeover swallows ALL keys (chat/composer/sidebar keys are inert,
-    /// including `q`), then `Ctrl+T` toggles the theme picker and an open
-    /// picker swallows keys until Enter/Esc, then `Tab` cycles focus and the
-    /// focused surface gets the key. Returns the resulting [`Action`];
+    /// Handle one key (Q15 subset). Global keys first: `Ctrl+C` cancels the
+    /// active session's running turn (spawned by the run loop) or quits when
+    /// idle — in a takeover it stays the quit panic-button (blocking frames
+    /// must not be cancelled silently); `Ctrl+Q` quits in every mode. Then a
+    /// takeover swallows ALL keys, `Ctrl+T` toggles the theme picker, an
+    /// open picker swallows keys until Enter/Esc, `Tab` cycles focus, and
+    /// the focused surface gets the key. Returns the resulting [`Action`];
     /// `Quit` is not applied here — the run loop stops.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            if !matches!(self.mode, Mode::Chat) {
+                return Some(Action::Quit);
+            }
+            return if self.session_running() {
+                Some(Action::CancelTurn)
+            } else {
+                Some(Action::Quit)
+            };
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
             return Some(Action::Quit);
         }
         if !matches!(self.mode, Mode::Chat) {
@@ -752,8 +770,10 @@ impl App {
 
     /// Enter in the sidebar: switch the active session to the selected row —
     /// open its store state, drop the row cache (node keys collide across
-    /// sessions), and reset the viewport. History fetch on switch is a later
-    /// lane (Q9); the chat shows what the mux stream has already delivered.
+    /// sessions), and reset the viewport to the bottom (follow). The run
+    /// loop spawns the history fetch (Q9) via [`Action::SwitchSession`].
+    /// Pending approvals/questions stay global across switches (blocking
+    /// frames are not session-scoped in v1).
     fn switch_to_selected(&mut self) -> Action {
         let Some(summary) = self.sessions.get(self.sidebar.selected) else {
             return Action::None;

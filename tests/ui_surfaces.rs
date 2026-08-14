@@ -91,7 +91,9 @@ async fn run_with(app: &mut App, term: &mut Terminal<TestBackend>, events: Vec<A
 async fn draw_and_quit(app: &mut App, term: &mut Terminal<TestBackend>, events: Vec<AppEvent>) {
     let mut events = events;
     events.push(AppEvent::Key(key(KeyCode::Esc)));
-    events.push(AppEvent::Key(ctrl(KeyCode::Char('c'))));
+    // Ctrl+Q is the always-quit binding (Q15: Ctrl+C now cancels a running
+    // turn instead of quitting).
+    events.push(AppEvent::Key(ctrl(KeyCode::Char('q'))));
     run_with(app, term, events).await;
 }
 

@@ -45,6 +45,9 @@ pub struct MockGateway {
     port: u16,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
     handlers: Arc<Mutex<HashMap<String, MockAction>>>,
+    /// Per-session `session.history` response templates (keyed by the
+    /// request payload's sessionId); falls back to the method handler map.
+    history_fixtures: Arc<Mutex<HashMap<String, String>>>,
     ws_frames: Arc<Mutex<HashMap<String, Vec<String>>>>,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
@@ -60,6 +63,8 @@ impl MockGateway {
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let task_requests = Arc::clone(&requests);
         let task_handlers = Arc::clone(&handlers);
+        let history_fixtures = Arc::new(Mutex::new(HashMap::new()));
+        let task_history = Arc::clone(&history_fixtures);
         let task_ws_frames = Arc::clone(&ws_frames);
         let task = tokio::spawn(async move {
             loop {
@@ -71,6 +76,7 @@ impl MockGateway {
                             stream,
                             Arc::clone(&task_requests),
                             Arc::clone(&task_handlers),
+                            Arc::clone(&task_history),
                             Arc::clone(&task_ws_frames),
                         ));
                     }
@@ -81,6 +87,7 @@ impl MockGateway {
             port,
             requests: Arc::clone(&requests),
             handlers: Arc::clone(&handlers),
+            history_fixtures,
             ws_frames: Arc::clone(&ws_frames),
             shutdown: Some(shutdown_tx),
             task,
@@ -96,6 +103,15 @@ impl MockGateway {
             .lock()
             .await
             .insert(method.to_string(), action);
+    }
+
+    /// Serve this `session.history` response template for `session_id`
+    /// (rpcId substituted like the method handlers).
+    pub async fn set_history(&self, session_id: &str, template: &str) {
+        self.history_fixtures
+            .lock()
+            .await
+            .insert(session_id.to_string(), template.to_string());
     }
 
     pub async fn set_ws_frames(&self, path: &str, frames: Vec<String>) {
@@ -133,6 +149,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
     handlers: Arc<Mutex<HashMap<String, MockAction>>>,
+    history_fixtures: Arc<Mutex<HashMap<String, String>>>,
     ws_frames: Arc<Mutex<HashMap<String, Vec<String>>>>,
 ) {
     // Peek (non-consuming) until the request head is complete. An upgrade
@@ -217,6 +234,30 @@ async fn handle_connection(
         head: head.clone(),
         body: body.clone(),
     });
+
+    // Per-session history fixtures win over the method handler map.
+    if method == "session.history" {
+        let session_id = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("payload")?
+                    .get("sessionId")?
+                    .as_str()
+                    .map(str::to_owned)
+            });
+        if let Some(session_id) = session_id
+            && let Some(template) = history_fixtures.lock().await.get(&session_id).cloned()
+        {
+            let rpc_id = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|value| value.get("rpcId").cloned())
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            respond(&mut stream, 200, &template.replace("{rpcId}", &rpc_id)).await;
+            return;
+        }
+    }
 
     let action = handlers
         .lock()

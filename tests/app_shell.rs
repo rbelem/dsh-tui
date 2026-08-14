@@ -21,7 +21,7 @@ use dsh_tui::wire::events::{
     ApprovalOutcome, AskUserQuestionItem, MuxFrame, QuestionOption, QuestionOutcome,
 };
 use dsh_tui::wire::rpc::RpcId;
-use dsh_tui::wire::session::{SessionEvent, SessionId};
+use dsh_tui::wire::session::{SessionEvent, SessionId, SessionSummary};
 
 // ---------------------------------------------------------------------------
 // fixture helpers
@@ -271,6 +271,20 @@ fn keymap_table() {
             sending: false,
         });
     }
+    fn running_session(app: &mut App) {
+        app.active_session = Some(SessionId("s1".into()));
+        app.sessions = vec![SessionSummary {
+            session_id: SessionId("s1".into()),
+            updated_at: 100.0,
+            running: true,
+            blank: false,
+            parent_session_id: None,
+            origin: None,
+            cwd: None,
+            agent_preset: None,
+            projections: None,
+        }];
+    }
     fn question_mode(app: &mut App) {
         app.mode = Mode::Question(QuestionTakeover::new(
             SessionId("s1".into()),
@@ -294,7 +308,24 @@ fn keymap_table() {
     let cases: Vec<Case> = vec![
         // chat (default focus): scroll keys, quit, Esc no-op
         (|_| {}, key(KeyCode::Char('q')), Some(Action::Quit)),
+        // Ctrl+C: idle quits (Q15); a running turn cancels instead.
         (|_| {}, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
+        (
+            running_session,
+            ctrl(KeyCode::Char('c')),
+            Some(Action::CancelTurn),
+        ),
+        // Ctrl+Q quits in every mode.
+        (|_| {}, ctrl(KeyCode::Char('q')), Some(Action::Quit)),
+        (
+            running_session,
+            ctrl(KeyCode::Char('q')),
+            Some(Action::Quit),
+        ),
+        (composer_focus, ctrl(KeyCode::Char('q')), Some(Action::Quit)),
+        (approval_mode, ctrl(KeyCode::Char('q')), Some(Action::Quit)),
+        // Takeover Ctrl+C stays the quit panic-button.
+        (approval_mode, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
         (|_| {}, key(KeyCode::Char('j')), Some(Action::Scroll(1))),
         (|_| {}, key(KeyCode::Down), Some(Action::Scroll(1))),
         (|_| {}, key(KeyCode::Char('k')), Some(Action::Scroll(-1))),
