@@ -211,6 +211,15 @@ pub struct AtCatalog {
     pub loading: bool,
 }
 
+/// The Ctrl+P launcher (Q17): an overlay fuzzy search over commands,
+/// cached skills, and settings actions. `search` reuses the composer's
+/// buffer primitives (one line); `selected` indexes the filtered list.
+#[derive(Debug, Default)]
+pub struct LauncherState {
+    pub search: Composer,
+    pub selected: usize,
+}
+
 /// The application state: store + render cache + viewport + UI surfaces.
 pub struct App {
     pub store: SessionStore,
@@ -252,6 +261,8 @@ pub struct App {
     /// The cached `@`-catalog (skill.list result), fetched once on first
     /// open; a failed fetch is not cached so the next open retries.
     pub at_catalog: Option<AtCatalog>,
+    /// The Ctrl+P launcher (None while closed).
+    pub launcher: Option<LauncherState>,
     pub running: bool,
     /// Last non-fatal error, shown in the status line.
     pub last_error: Option<String>,
@@ -303,6 +314,7 @@ impl Default for App {
             queue_action_sending: false,
             queue_editor: None,
             at_catalog: None,
+            launcher: None,
             running: true,
             last_error: None,
             pending_approvals: HashMap::new(),
@@ -559,6 +571,30 @@ impl App {
         if self.queue_popup_open {
             return Some(self.handle_queue_popup_key(key));
         }
+        // Ctrl+P toggles the global launcher. Inert in the seed popup (it
+        // owns the composer's keys); Ctrl+Q/Ctrl+C above stay untouched.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+            if self.launcher.is_some() {
+                self.launcher = None; // toggle closed
+                return Some(Action::None);
+            }
+            if self.composer.popup().is_some() {
+                return Some(Action::None);
+            }
+            let needs_fetch = self.at_catalog_stale();
+            self.launcher = Some(LauncherState::default());
+            // First open with no cached skills: the run loop fetches
+            // skill.list through the back-channel (loading line, like the
+            // `@` menu).
+            return Some(if needs_fetch {
+                Action::RequestCatalog
+            } else {
+                Action::None
+            });
+        }
+        if self.launcher.is_some() {
+            return Some(self.handle_launcher_key(key));
+        }
         if key.code == KeyCode::Tab {
             let next = self.focus.next();
             self.focus = next;
@@ -785,18 +821,125 @@ impl App {
         crate::ui::catalog::filter_entries(&entries, suffix)
     }
 
-    /// The `@` catalog needs fetching when the popup is open, the catalog
-    /// is not cached, and no fetch is in flight.
-    fn at_catalog_needs_fetch(&self) -> bool {
-        if !matches!(
-            self.composer.popup(),
-            Some(crate::ui::composer::PopupKind::At)
-        ) {
-            return false;
-        }
+    /// The skill catalog is not cached and no fetch is in flight.
+    fn at_catalog_stale(&self) -> bool {
         match &self.at_catalog {
             None => true,
             Some(AtCatalog { loading, skills }) => !loading && skills.is_empty(),
+        }
+    }
+
+    /// The `@` catalog needs fetching when the popup is open, the catalog
+    /// is not cached, and no fetch is in flight.
+    fn at_catalog_needs_fetch(&self) -> bool {
+        matches!(
+            self.composer.popup(),
+            Some(crate::ui::composer::PopupKind::At)
+        ) && self.at_catalog_stale()
+    }
+
+    /// The launcher's filtered entries — mirrored commands, cached skills,
+    /// and settings actions — subsequence-ranked by the search text (pub
+    /// for tests).
+    pub fn launcher_entries_filtered(&self) -> Vec<crate::ui::launcher::LauncherEntry> {
+        let Some(launcher) = &self.launcher else {
+            return Vec::new();
+        };
+        let skills = self
+            .at_catalog
+            .as_ref()
+            .map(|catalog| catalog.skills.as_slice())
+            .unwrap_or(&[]);
+        let entries = crate::ui::launcher::launcher_entries(self.locale, skills);
+        crate::ui::launcher::fuzzy_filter(&entries, launcher.search.buffer())
+    }
+
+    /// Launcher keys: typing filters, Up/Down/j/k move, Enter picks, Esc
+    /// closes. Picking a command/skill inserts it into the composer and
+    /// submits through the prompt path — dispatches immediately, no
+    /// leading-input state (the web's launcher semantics). Settings
+    /// actions execute in place, mirroring their shortcuts.
+    fn handle_launcher_key(&mut self, key: KeyEvent) -> Action {
+        use crossterm::event::KeyCode;
+        let len = self.launcher_entries_filtered().len();
+        match key.code {
+            KeyCode::Esc => {
+                self.launcher = None;
+                Action::None
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(launcher) = &mut self.launcher {
+                    launcher.selected = launcher.selected.saturating_sub(1);
+                }
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(launcher) = &mut self.launcher {
+                    launcher.selected = (launcher.selected + 1).min(len.saturating_sub(1));
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                let Some(launcher) = &self.launcher else {
+                    return Action::None;
+                };
+                let Some(entry) = self
+                    .launcher_entries_filtered()
+                    .get(launcher.selected)
+                    .cloned()
+                else {
+                    return Action::None;
+                };
+                self.launcher = None;
+                match entry.action {
+                    crate::ui::launcher::LauncherAction::Dispatch { text } => {
+                        // Insert into the composer buffer, then submit
+                        // through the prompt path (the gateway dispatches
+                        // slash text via session.prompt).
+                        self.composer.set_text(&text);
+                        Action::Submit(self.composer.take())
+                    }
+                    crate::ui::launcher::LauncherAction::OpenSettings => {
+                        self.mode = Mode::Settings(crate::ui::settings::SettingsState::new());
+                        self.hint = None;
+                        Action::FetchSettings
+                    }
+                    crate::ui::launcher::LauncherAction::OpenThemePicker => {
+                        if self.theme_picker.open {
+                            self.theme_picker.open = false;
+                        } else {
+                            self.theme_picker.selected = self
+                                .themes
+                                .themes
+                                .iter()
+                                .position(|theme| theme.name == self.theme.name)
+                                .unwrap_or(0);
+                            self.theme_picker.open = true;
+                        }
+                        Action::None
+                    }
+                    crate::ui::launcher::LauncherAction::CycleLocale => {
+                        self.cycle_locale();
+                        Action::None
+                    }
+                    crate::ui::launcher::LauncherAction::Quit => Action::Quit,
+                }
+            }
+            KeyCode::Backspace => {
+                if let Some(launcher) = &mut self.launcher {
+                    launcher.search.backspace();
+                    launcher.selected = 0;
+                }
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                if let Some(launcher) = &mut self.launcher {
+                    launcher.search.insert_char(c);
+                    launcher.selected = 0;
+                }
+                Action::None
+            }
+            _ => Action::None,
         }
     }
 

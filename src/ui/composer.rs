@@ -164,6 +164,15 @@ impl Composer {
         std::mem::take(&mut self.buffer)
     }
 
+    /// Replace the buffer wholesale (the Ctrl+P launcher inserts the picked
+    /// entry before dispatching). Resets caret and popup state.
+    pub fn set_text(&mut self, text: &str) {
+        self.buffer = text.to_string();
+        self.caret = self.buffer.len();
+        self.popup_dismissed = false;
+        self.popup_selected = 0;
+    }
+
     /// The seed popup the buffer triggers, if not dismissed: the buffer is a
     /// bare trigger prefix — starts with `/` or `@` and has no whitespace.
     pub fn popup(&self) -> Option<PopupKind> {

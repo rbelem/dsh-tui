@@ -24,6 +24,7 @@ use crate::render::chat_view::ChatView;
 use crate::theme::Theme;
 use crate::theme::ThemePopup;
 use crate::ui::composer::{ComposerView, SeedPopup};
+use crate::ui::launcher::LauncherPopup;
 use crate::ui::queue::{QueuePopup, QueueStrip};
 use crate::ui::sidebar::{SidebarView, sidebar_width};
 use crate::ui::style;
@@ -360,6 +361,24 @@ impl App {
         let popup_entries = self.popup_entries();
         let popup_loading = matches!(self.at_catalog, Some(AtCatalog { loading: true, .. }));
         let popup_selected = self.composer.popup_selected();
+        let launcher_open = self.launcher.is_some();
+        let launcher_entries = self.launcher_entries_filtered();
+        let launcher_search = self
+            .launcher
+            .as_ref()
+            .map(|launcher| launcher.search.buffer().to_string())
+            .unwrap_or_default();
+        let launcher_selected = self
+            .launcher
+            .as_ref()
+            .map(|launcher| launcher.selected)
+            .unwrap_or(0);
+        // Loading shows only while a skill.list fetch is in flight and no
+        // skills are cached yet (a failed fetch leaves the flag off).
+        let launcher_loading = matches!(
+            &self.at_catalog,
+            Some(AtCatalog { loading: true, skills }) if skills.is_empty()
+        );
 
         term.draw(|frame| {
             if sidebar_width > 0 {
@@ -482,6 +501,30 @@ impl App {
                 let (width, height) = popup.size(right.width, room);
                 let area = Rect {
                     x: right.x,
+                    y: composer_area.y.saturating_sub(height),
+                    width,
+                    height: height.min(room),
+                };
+                if area.height > 0 {
+                    frame.render_widget(popup, area);
+                }
+            }
+
+            // The Ctrl+P launcher: a centered overlay above the composer
+            // (mirrors the theme picker placement).
+            if launcher_open {
+                let popup = LauncherPopup {
+                    entries: &launcher_entries,
+                    selected: launcher_selected,
+                    search: &launcher_search,
+                    loading: launcher_loading,
+                    theme: &self.theme,
+                    locale: self.locale,
+                };
+                let room = composer_area.y;
+                let (width, height) = popup.size(right.width, room);
+                let area = Rect {
+                    x: right.x + right.width.saturating_sub(width) / 2,
                     y: composer_area.y.saturating_sub(height),
                     width,
                     height: height.min(room),
