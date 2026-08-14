@@ -141,6 +141,49 @@ impl SessionStore {
         self.sessions.get(session_id)
     }
 
+    /// Ensure a session state exists (history-first attach: the history page
+    /// may arrive before any `session/subscribed` frame).
+    pub fn open_session(&mut self, session_id: SessionId) {
+        let max_events = self.max_events;
+        self.sessions
+            .entry(session_id.clone())
+            .or_insert_with(|| SessionState::new(session_id, max_events));
+    }
+
+    /// Ingest a `session.history` page: entries are `(event, optional tool
+    /// view)` pairs, NOT mux frames. Same seq bookkeeping as `session/event`
+    /// ingest (`seq > last_seq` wins); each entry's view pairs with its event
+    /// so the fold can attach the tool/result view (the same `StoredEvent`
+    /// carrier the mux path uses).
+    pub fn ingest_history(
+        &mut self,
+        session_id: &SessionId,
+        entries: Vec<(SessionEvent, Option<ToolEventView>)>,
+    ) -> Result<(), StoreError> {
+        {
+            let max_events = self.max_events;
+            let state = self
+                .sessions
+                .entry(session_id.clone())
+                .or_insert_with(|| SessionState::new(session_id.clone(), max_events));
+            for (event, view) in entries {
+                let seq = event.seq;
+                let event_type = event.r#type.clone();
+                let stored = StoredEvent::try_new(event, view).map_err(|error| {
+                    StoreError::InvalidEventData {
+                        session_id: session_id.clone(),
+                        seq,
+                        event_type,
+                        detail: error.0,
+                    }
+                })?;
+                state.apply_event(stored);
+            }
+        }
+        self.rebuild(session_id);
+        Ok(())
+    }
+
     pub fn session_mut(&mut self, session_id: &SessionId) -> Option<&mut SessionState> {
         self.sessions.get_mut(session_id)
     }

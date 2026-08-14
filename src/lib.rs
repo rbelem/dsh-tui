@@ -3,6 +3,7 @@
 //! The wire protocol models live in [`wire`]; the crate is currently a stub
 //! binary around them.
 
+pub mod app;
 pub mod client;
 pub mod render;
 pub mod store;

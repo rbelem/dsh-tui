@@ -67,6 +67,7 @@ pub enum ClientError {
 /// Shared client state: the handle and the downlink subscriber tasks all hold
 /// an `Arc` of this.
 struct Inner {
+    port: u16,
     /// `http://127.0.0.1:{port}`
     base: String,
     /// `ws://127.0.0.1:{port}`
@@ -113,6 +114,7 @@ impl WireClient {
             .map_err(|e| ClientError::Transport(e.to_string()))?;
         Ok(WireClient {
             inner: Arc::new(Inner {
+                port,
                 base: format!("http://127.0.0.1:{port}"),
                 ws_base: format!("ws://127.0.0.1:{port}"),
                 http,
@@ -243,6 +245,11 @@ impl WireClient {
     /// [`WireClient::mux_stream`].
     pub fn host_stream(&self) -> mpsc::UnboundedReceiver<HostFrame> {
         spawn_downlink(&self.inner, "/api/events.host")
+    }
+
+    /// The gateway loopback port this client is attached to.
+    pub fn port(&self) -> u16 {
+        self.inner.port
     }
 
     /// Last WS downlink failure (connect/parse/read), for the status line.
