@@ -122,6 +122,9 @@ impl App {
                                 Some(Action::ArchiveSession(session_id)) => {
                                     self.archive_session(session_id, event_tx.clone())
                                 }
+                                Some(Action::CreateSession { workspace_id }) => {
+                                    self.create_session(workspace_id, event_tx.clone())
+                                }
                                 _ => {}
                             }
                             self.needs_draw = true;
@@ -156,6 +159,11 @@ impl App {
                         }
                         Some(AppEvent::ArchiveDone { session_id, result }) => {
                             self.on_archive_done(session_id, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::SessionCreateDone { result }) => {
+                            self.on_session_create_done(result);
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
@@ -450,6 +458,13 @@ impl App {
             &self.at_catalog,
             Some(AtCatalog { loading: true, skills }) if skills.is_empty()
         );
+        // New-session picker data, precomputed for the same disjoint-borrow
+        // reason (the draw closure holds `&mut self.row_cache`).
+        let new_session_entries = self.new_session_entries();
+        let new_session_state = self
+            .new_session
+            .as_ref()
+            .map(|state| (state.selected, state.sending));
 
         term.draw(|frame| {
             if sidebar_width > 0 {
@@ -475,6 +490,16 @@ impl App {
                         offset,
                         row_cache: &mut self.row_cache,
                         images: &mut self.image_cache,
+                    },
+                    chat_area,
+                );
+            } else {
+                // No session selected: the empty-chat hero (title, subtitle,
+                // key hints) instead of a blank panel.
+                frame.render_widget(
+                    crate::ui::HeroView {
+                        theme: &self.theme,
+                        locale: self.locale,
                     },
                     chat_area,
                 );
@@ -592,6 +617,29 @@ impl App {
                     selected: launcher_selected,
                     search: &launcher_search,
                     loading: launcher_loading,
+                    theme: &self.theme,
+                    locale: self.locale,
+                };
+                let room = composer_area.y;
+                let (width, height) = popup.size(right.width, room);
+                let area = Rect {
+                    x: right.x + right.width.saturating_sub(width) / 2,
+                    y: composer_area.y.saturating_sub(height),
+                    width,
+                    height: height.min(room),
+                };
+                if area.height > 0 {
+                    frame.render_widget(popup, area);
+                }
+            }
+
+            // The new-session picker (`n`): a centered overlay above the
+            // composer (the launcher's placement).
+            if let Some((selected, sending)) = new_session_state {
+                let popup = crate::ui::new_session::NewSessionPopup {
+                    entries: &new_session_entries,
+                    selected,
+                    sending,
                     theme: &self.theme,
                     locale: self.locale,
                 };
@@ -785,6 +833,95 @@ impl App {
             Err(error) => self.set_toast(crate::i18n::trf(
                 self.locale,
                 "toast.sidebar_action_failed",
+                &[&error.to_string()],
+            )),
+        }
+    }
+
+    /// Spawn `session.create` for the new-session picker (the loop keeps
+    /// pumping; the result lands as [`AppEvent::SessionCreateDone`]). One
+    /// create in flight at a time (the picker's `sending` guard); without
+    /// a client the action is dropped silently.
+    fn create_session(
+        &mut self,
+        workspace_id: Option<crate::wire::session::WorkspaceId>,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(state) = &mut self.new_session else {
+            return;
+        };
+        if state.sending {
+            return;
+        }
+        state.sending = true;
+        tokio::spawn(async move {
+            let result = client.session_create(workspace_id, None, None, None).await;
+            let _ = event_tx.send(AppEvent::SessionCreateDone { result });
+        });
+    }
+
+    /// Apply a finished `session.create`: on success close the picker,
+    /// toast the new id, insert the summary locally (blank, just-now — a
+    /// `host/session-added` frame may ALSO arrive; the dedup guard in
+    /// `handle_host_frame` skips it) and switch straight to the new
+    /// session (a fresh session has no history to fetch). On failure:
+    /// toast, the picker stays open with the guard re-armed, no state
+    /// change.
+    fn on_session_create_done(
+        &mut self,
+        result: Result<crate::wire::session::SessionCreateValue, ClientError>,
+    ) {
+        if let Some(state) = &mut self.new_session {
+            state.sending = false;
+        }
+        match result {
+            Ok(value) => {
+                self.new_session = None;
+                self.set_toast(crate::i18n::trf(
+                    self.locale,
+                    "toast.session_created",
+                    &[&value.session_id.0],
+                ));
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+                let session_id = value.session_id;
+                if !self
+                    .sessions
+                    .iter()
+                    .any(|summary| summary.session_id == session_id)
+                {
+                    self.sessions.insert(
+                        0,
+                        crate::wire::session::SessionSummary {
+                            session_id: session_id.clone(),
+                            updated_at: now,
+                            running: false,
+                            blank: true,
+                            parent_session_id: None,
+                            origin: None,
+                            cwd: None,
+                            agent_preset: value.agent_preset,
+                            projections: None,
+                        },
+                    );
+                }
+                // Switch to the new session (switch_to_selected semantics,
+                // without the Enter path).
+                self.store.open_session(session_id.clone());
+                self.row_cache.invalidate_all();
+                self.active_session = Some(session_id);
+                self.view.offset = 0;
+                self.view.follow = true;
+                self.hint = None;
+            }
+            Err(error) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.create_failed",
                 &[&error.to_string()],
             )),
         }

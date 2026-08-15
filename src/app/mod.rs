@@ -131,6 +131,12 @@ pub enum Action {
     /// Sidebar `a`: archive the session (spawned `workspace.archiveSession`;
     /// the result lands as [`AppEvent::ArchiveDone`]).
     ArchiveSession(SessionId),
+    /// New-session picker Enter: create under this workspace (`None` = no
+    /// workspace; the run loop spawns `session.create`, the result lands as
+    /// [`AppEvent::SessionCreateDone`]).
+    CreateSession {
+        workspace_id: Option<crate::wire::session::WorkspaceId>,
+    },
     /// Approval takeover answered with this outcome; the run loop posts the
     /// respond and resolves the takeover.
     AnswerApproval(ApprovalResponseOutcome),
@@ -232,6 +238,16 @@ pub struct LauncherState {
     pub selected: usize,
 }
 
+/// The new-session picker state (`n`): `selected` indexes the picker
+/// entries (workspaces in durable order + the trailing no-workspace
+/// entry); `sending` guards the in-flight `session.create` (further
+/// Enters inert, mirroring `sidebar_action_sending`).
+#[derive(Debug, Default)]
+pub struct NewSessionState {
+    pub selected: usize,
+    pub sending: bool,
+}
+
 /// The application state: store + render cache + viewport + UI surfaces.
 pub struct App {
     pub store: SessionStore,
@@ -290,6 +306,9 @@ pub struct App {
     /// A sidebar action (rename/fork/archive) is in flight — further
     /// actions are inert (mirrors `queue_action_sending`).
     pub sidebar_action_sending: bool,
+    /// The new-session picker (`n` in the chat or sidebar): workspace
+    /// choice + in-flight guard. Owns the keyboard while open.
+    pub new_session: Option<NewSessionState>,
     /// The cached `@`-catalog (skill.list result), fetched once on first
     /// open; a failed fetch is not cached so the next open retries.
     pub at_catalog: Option<AtCatalog>,
@@ -363,6 +382,7 @@ impl Default for App {
             queue_editor: None,
             rename_editor: None,
             sidebar_action_sending: false,
+            new_session: None,
             at_catalog: None,
             launcher: None,
             pending_attachments: HashSet::new(),
@@ -656,6 +676,11 @@ impl App {
         }
         if self.launcher.is_some() {
             return Some(self.handle_launcher_key(key));
+        }
+        // The new-session picker owns the keyboard while open (`n` opens it
+        // from the chat/sidebar focus; Ctrl+Q/Ctrl+C above stay global).
+        if self.new_session.is_some() {
+            return Some(self.handle_new_session_key(key));
         }
         if key.code == KeyCode::Tab {
             let next = self.focus.next();
@@ -1407,6 +1432,10 @@ impl App {
         match key.code {
             KeyCode::Char('q') => Some(Action::Quit),
             KeyCode::Char('v') => Some(self.open_image_viewer()),
+            KeyCode::Char('n') => {
+                self.open_new_session_picker();
+                Some(Action::None)
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 self.scroll(1);
                 Some(Action::Scroll(1))
@@ -1568,6 +1597,10 @@ impl App {
                 Some(Action::Select)
             }
             KeyCode::Enter => Some(self.switch_to_selected()),
+            KeyCode::Char('n') => {
+                self.open_new_session_picker();
+                Some(Action::None)
+            }
             // Sidebar session actions (rename/fork/archive): require a
             // visible selection and one in-flight action at a time.
             KeyCode::Char('r') => {
@@ -1637,6 +1670,72 @@ impl App {
             editor.insert_char(c);
         }
         self.rename_editor = Some((summary.session_id.clone(), editor));
+    }
+
+    /// The picker's entries: workspaces in display order (the durable
+    /// `workspace_order` first, unlisted workspaces appended — the
+    /// sidebar's rule) plus the trailing "no workspace" entry.
+    pub fn new_session_entries(&self) -> Vec<crate::ui::new_session::NewSessionEntry> {
+        let mut ordered: Vec<&crate::wire::workspace::WorkspaceView> = self
+            .workspace_order
+            .iter()
+            .filter_map(|id| self.workspaces.iter().find(|ws| &ws.workspace_id == id))
+            .collect();
+        ordered.extend(
+            self.workspaces
+                .iter()
+                .filter(|ws| !self.workspace_order.contains(&ws.workspace_id)),
+        );
+        let mut entries: Vec<_> = ordered
+            .into_iter()
+            .map(|ws| crate::ui::new_session::NewSessionEntry {
+                workspace_id: Some(ws.workspace_id.clone()),
+                label: ws.title.clone(),
+            })
+            .collect();
+        entries.push(crate::ui::new_session::NewSessionEntry {
+            workspace_id: None,
+            label: crate::i18n::tr(self.locale, "create.no_workspace").into(),
+        });
+        entries
+    }
+
+    /// `n` in the chat or sidebar: open the new-session picker.
+    fn open_new_session_picker(&mut self) {
+        self.new_session = Some(NewSessionState::default());
+    }
+
+    /// Picker bindings: `Up`/`Down` (or `j`/`k`) move the workspace
+    /// selection, `Enter` creates with the highlighted entry (inert while
+    /// a create is in flight), `Esc` closes; everything else is inert.
+    fn handle_new_session_key(&mut self, key: KeyEvent) -> Action {
+        use crossterm::event::KeyCode;
+        let entries = self.new_session_entries();
+        let Some(state) = &mut self.new_session else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.selected = state.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.selected = (state.selected + 1).min(entries.len().saturating_sub(1));
+            }
+            KeyCode::Enter => {
+                if state.sending {
+                    return Action::None;
+                }
+                let Some(entry) = entries.get(state.selected) else {
+                    return Action::None;
+                };
+                return Action::CreateSession {
+                    workspace_id: entry.workspace_id.clone(),
+                };
+            }
+            KeyCode::Esc => self.new_session = None,
+            _ => {}
+        }
+        Action::None
     }
 
     /// Enter in the composer: no-op on an empty buffer; a blocked no-op with

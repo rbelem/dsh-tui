@@ -17,7 +17,7 @@ use crate::wire::approvals::ApprovalRequestId;
 use crate::wire::events::{HostFrame, MuxFrame};
 use crate::wire::rpc::{RpcId, RpcReceipt};
 use crate::wire::session::{
-    AttachmentId, SessionAttachmentValue, SessionCancelValue, SessionForkValue,
+    AttachmentId, SessionAttachmentValue, SessionCancelValue, SessionCreateValue, SessionForkValue,
     SessionHistoryValue, SessionId, SessionPromptValue, SessionRenameValue,
     SessionUpdateQueueValue,
 };
@@ -76,6 +76,10 @@ pub enum AppEvent {
     /// A spawned sidebar `session.fork` finished (`f`).
     ForkDone {
         result: Result<SessionForkValue, ClientError>,
+    },
+    /// A spawned new-session picker `session.create` finished (`n`).
+    SessionCreateDone {
+        result: Result<SessionCreateValue, ClientError>,
     },
     /// A spawned sidebar `workspace.archiveSession` finished (`a`).
     ArchiveDone {
