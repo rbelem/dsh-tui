@@ -2049,6 +2049,13 @@ impl App {
     }
 
     /// Apply a signed scroll delta; manual scrolling turns follow off.
+    ///
+    /// Scrolling down is BOTTOM-LOCKED in line space: the offset never
+    /// passes `total - viewport_height`, the same anchor follow-mode uses
+    /// (run.rs draw: `viewport_height` is the chat pane height). Without
+    /// the clamp, ↓ could run the offset past the last content line —
+    /// `line_to_row` then pins the START at the final line, rendering the
+    /// tail at the TOP of the chat with a blank void below (v1 blocker).
     fn scroll(&mut self, delta: i64) {
         self.view.follow = false;
         if delta >= 0 {
@@ -2059,6 +2066,14 @@ impl App {
                 .offset
                 .saturating_sub(delta.unsigned_abs() as usize);
         }
+        let total: usize = self
+            .row_cache
+            .lines()
+            .iter()
+            .map(|row| row.lines.len())
+            .sum();
+        let max = total.saturating_sub(self.view.viewport_height as usize);
+        self.view.offset = self.view.offset.min(max);
     }
 }
 

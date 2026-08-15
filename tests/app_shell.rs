@@ -538,8 +538,110 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
 
     assert!(!app.view.follow, "manual scroll disables follow");
     // The clamp draw above pinned the bottom at offset 3 (5 rows; layout:
-    // chat 2 + composer 2 + status 1); j moves one row past it.
-    assert_eq!(app.view.offset, 4);
+    // chat 2 + composer 2 + status 1); j at the bottom-lock is a no-op —
+    // the offset NEVER passes the last content line (the old assertion
+    // `offset == 4` encoded the unclamped overscroll that blanked the
+    // viewport below the tail).
+    assert_eq!(app.view.offset, 3, "j is bottom-locked");
+}
+
+// ---------------------------------------------------------------------------
+// 5. scroll bottom-lock (v1 blocker regression)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn scroll_past_end_locks_the_tail_at_the_bottom() {
+    // Thirty one-line messages at 100x30: chat pane = 27 rows (100x30 minus
+    // composer 2 + status 1), so the bottom-locked max offset is 30 - 27 = 3.
+
+    // Phase 1: hammer j far past the end, then a half-page Ctrl+d. The
+    // offset must STOP at the bottom-lock (unclamped it would read 200+13).
+    let mut app = App::default();
+    app.active_session = Some(SessionId("s1".into()));
+    let backend = TestBackend::new(100, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app, term)
+    });
+    for seq in 1..=30 {
+        tx.send(AppEvent::Frame(frame(
+            "s1",
+            ev(
+                seq,
+                "user/message",
+                user_msg(&format!("m{seq}"), &format!("text-{seq}")),
+            ),
+        )))
+        .expect("frame");
+    }
+    for _ in 0..200 {
+        tx.send(AppEvent::Key(key(KeyCode::Char('j')))).expect("j");
+    }
+    tx.send(AppEvent::Key(ctrl(KeyCode::Char('d'))))
+        .expect("ctrl-d");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, app, term) = run_task.await.expect("run task");
+    result.expect("run");
+
+    // Bottom-locked: 200 j's + a half-page down never pass the last line.
+    assert_eq!(
+        app.view.offset, 3,
+        "scroll stops at total - chat_height, not past it"
+    );
+    assert!(!app.view.follow, "manual scroll disabled follow");
+    let view = format!("{}", term.backend());
+    let rows: Vec<&str> = view.lines().collect();
+    // The tail is locked at the chat area's LAST row (row 26; the composer
+    // occupies 27-28, status 29) — directly above the composer, not blank.
+    assert!(
+        rows.get(26).is_some_and(|row| row.contains("text-30")),
+        "tail at the bottom row: {view}"
+    );
+    // The window starts at line 3: the head is gone, the middle is intact.
+    assert!(
+        rows.first().is_some_and(|row| row.contains("text-4")),
+        "window start at the top row: {view}"
+    );
+    assert!(
+        !view.contains("text-1 ") && !view.contains("text-2 ") && !view.contains("text-3 "),
+        "head scrolled away (space-delimited to avoid text-10+): {view}"
+    );
+    assert!(view.contains("text-29"), "second-to-last visible: {view}");
+
+    // Phase 2: scrolling UP still works from the lock (Ctrl+u from 3 → 0).
+    let mut app = App::default();
+    app.active_session = Some(SessionId("s1".into()));
+    let backend = TestBackend::new(100, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app)
+    });
+    for seq in 1..=30 {
+        tx.send(AppEvent::Frame(frame(
+            "s1",
+            ev(
+                seq,
+                "user/message",
+                user_msg(&format!("m{seq}"), &format!("text-{seq}")),
+            ),
+        )))
+        .expect("frame");
+    }
+    for _ in 0..10 {
+        tx.send(AppEvent::Key(key(KeyCode::Char('j')))).expect("j");
+    }
+    tx.send(AppEvent::Key(ctrl(KeyCode::Char('u'))))
+        .expect("ctrl-u");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, app) = run_task.await.expect("run task");
+    result.expect("run");
+    assert_eq!(app.view.offset, 0, "Ctrl+u scrolls back to the top");
 }
 
 // ---------------------------------------------------------------------------
