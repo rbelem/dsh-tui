@@ -181,10 +181,13 @@ impl Scenario {
         // it toggles FLUSHO and the line discipline silently discards every
         // byte the child writes (Linux n_tty has no VDISCARD, so the ubuntu
         // leg never fired this). The alternate-screen escape proves
-        // enable_raw_mode has run, making 0x0F inert as intended.
+        // enable_raw_mode has run, making 0x0F inert as intended. Key on
+        // `?1049h` specifically: theme detection emits an earlier OSC 11
+        // query (`ESC ] 11 ; ? BEL`) whose ESC byte must not trigger the
+        // nudge while the tty is still canonical.
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if app.output().as_bytes().contains(&0x1b) {
+            if app.output().contains("?1049h") {
                 app.send(b"\x0f");
                 break;
             }
