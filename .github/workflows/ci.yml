@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - name: fmt
         run: cargo fmt --check
@@ -23,3 +23,39 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: test
         run: cargo test --all-targets
+
+  # macOS test leg: the e2e harness is portable-pty based (no Linux-only
+  # APIs), so the full suite must stay green there too.
+  rust-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: test
+        run: cargo test --all-targets
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      # Report-only artifact + a fail-under gate ONE POINT BELOW the last
+      # measured number (94.5% lines at the coverage push; the gate is at
+      # 93 to absorb normal drift without blocking regressions above the
+      # council target of >=85% lines / >=80% branches). See PARITY.md
+      # "## coverage" for the documented exclusions.
+      - name: coverage
+        run: cargo llvm-cov --all-targets --html --output-dir target/coverage --fail-under-lines 93
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/coverage/html

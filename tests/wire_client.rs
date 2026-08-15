@@ -17,6 +17,9 @@ use dsh_tui::wire::session::{Origin, PromptMode, SessionId};
 mod common;
 use common::{MockAction, MockGateway};
 
+/// env-touching tests serialize (DSH_PORT is process-global).
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // ---------------------------------------------------------------------------
 // rpc round-trip
 // ---------------------------------------------------------------------------
@@ -128,6 +131,102 @@ async fn unanswered_rpc_maps_to_timeout() {
         .await
         .unwrap_err();
     assert!(matches!(err, ClientError::Timeout), "got {err:?}");
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn attach_to_a_dead_port_is_a_transport_error() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener); // nothing listens on the port anymore
+    let err = WireClient::attach(port).err().expect("attach must fail");
+    assert!(matches!(err, ClientError::Transport(_)), "got {err:?}");
+}
+
+#[tokio::test]
+async fn rpc_id_mismatch_maps_to_protocol_error() {
+    let mock = MockGateway::start().await;
+    // No `{rpcId}` placeholder: the response echoes a WRONG rpcId.
+    mock.set_handler(
+        "session.list",
+        MockAction::Ok(
+            r#"{"type":"server-response","rpcId":"wrong-id","result":{"ok":true,"value":{"items":[]}}}"#,
+        ),
+    )
+    .await;
+    let client = WireClient::attach(mock.port()).unwrap();
+    let err = client.session_list().await.unwrap_err();
+    assert!(
+        matches!(err, ClientError::Protocol(ref m) if m.contains("rpcId mismatch")),
+        "got {err:?}"
+    );
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn unparseable_result_value_maps_to_protocol_error() {
+    let mock = MockGateway::start().await;
+    // ok:true with a value that cannot deserialize into SessionListValue.
+    mock.set_handler(
+        "session.list",
+        MockAction::Ok(
+            r#"{"type":"server-response","rpcId":"{rpcId}","result":{"ok":true,"value":{"items":"not-an-array"}}}"#,
+        ),
+    )
+    .await;
+    let client = WireClient::attach(mock.port()).unwrap();
+    let err = client.session_list().await.unwrap_err();
+    assert!(matches!(err, ClientError::Protocol(_)), "got {err:?}");
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn ok_false_without_error_maps_to_protocol_error() {
+    let mock = MockGateway::start().await;
+    mock.set_handler(
+        "session.list",
+        MockAction::Ok(r#"{"type":"server-response","rpcId":"{rpcId}","result":{"ok":false}}"#),
+    )
+    .await;
+    let client = WireClient::attach(mock.port()).unwrap();
+    let err = client.session_list().await.unwrap_err();
+    assert!(
+        matches!(err, ClientError::Protocol(ref m) if m.contains("ok:false without error")),
+        "got {err:?}"
+    );
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn session_select_model_round_trip() {
+    let mock = MockGateway::start().await;
+    mock.set_handler(
+        "session.selectModel",
+        MockAction::Ok(
+            r#"{"type":"server-response","rpcId":"{rpcId}","result":{"ok":true,"value":{"selected":{"provider":"p","model":"m","reasoningEffort":"high"}}}}"#,
+        ),
+    )
+    .await;
+    let client = WireClient::attach(mock.port()).unwrap();
+    let value = client
+        .session_select_model(
+            SessionId("s1".into()),
+            "p".into(),
+            "m".into(),
+            Some("high".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(value.selected.provider, "p");
+    assert_eq!(value.selected.model, "m");
+    assert_eq!(value.selected.reasoning_effort.as_deref(), Some("high"));
+
+    // The payload rides the full request form.
+    let requests = mock.requests().await;
+    let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+    assert_eq!(body["method"], "session.selectModel");
+    assert_eq!(body["payload"]["provider"], "p");
+    assert_eq!(body["payload"]["reasoningEffort"], "high");
     mock.stop().await;
 }
 
@@ -327,6 +426,42 @@ async fn respond_approval_echoes_frame_rpc_id_and_returns_receipt() {
     mock.stop().await;
 }
 
+#[tokio::test]
+async fn respond_http_failure_maps_to_status() {
+    let mock = MockGateway::start().await;
+    mock.set_handler("respond", MockAction::NotFound).await;
+    let client = WireClient::attach(mock.port()).unwrap();
+    let err = client
+        .respond_approval(
+            RpcId("r".into()),
+            SessionId("s1".into()),
+            ApprovalRequestId("a1".into()),
+            ApprovalResponseOutcome::Rejected,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ClientError::HttpStatus(404)), "got {err:?}");
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn respond_timeout_when_the_gateway_hangs() {
+    let mock = MockGateway::start().await;
+    mock.set_handler("respond", MockAction::Hang).await;
+    let client = WireClient::with_timeout(mock.port(), Duration::from_millis(200)).unwrap();
+    let err = client
+        .respond_approval(
+            RpcId("r".into()),
+            SessionId("s1".into()),
+            ApprovalRequestId("a1".into()),
+            ApprovalResponseOutcome::Rejected,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ClientError::Timeout), "got {err:?}");
+    mock.stop().await;
+}
+
 // ---------------------------------------------------------------------------
 // attach_from_env
 // ---------------------------------------------------------------------------
@@ -334,8 +469,8 @@ async fn respond_approval_echoes_frame_rpc_id_and_returns_receipt() {
 #[tokio::test(flavor = "current_thread")]
 async fn attach_from_env_reads_dsh_port() {
     let mock = MockGateway::start().await;
-    // SAFETY: single-threaded test and no other test reads DSH_PORT, so the
-    // process-wide env mutation cannot race with a reader.
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: serialized under ENV_LOCK, single-threaded.
     unsafe { std::env::set_var("DSH_PORT", mock.port().to_string()) };
     let attached = WireClient::attach_from_env().unwrap();
     assert!(attached.is_some(), "DSH_PORT set → Some(client)");
@@ -344,5 +479,178 @@ async fn attach_from_env_reads_dsh_port() {
     let detached = WireClient::attach_from_env().unwrap();
     assert!(detached.is_none(), "DSH_PORT unset → None (pure client)");
 
+    drop(_guard); // no awaits while the env lock is held
     mock.stop().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn attach_from_env_rejects_invalid_and_non_unicode_ports() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: serialized under ENV_LOCK; restored before return.
+    unsafe { std::env::set_var("DSH_PORT", "not-a-number") };
+    let err = WireClient::attach_from_env()
+        .err()
+        .expect("attach_from_env must fail");
+    assert!(
+        matches!(err, ClientError::Protocol(ref m) if m.contains("invalid DSH_PORT")),
+        "got {err:?}"
+    );
+    unsafe { std::env::remove_var("DSH_PORT") };
+
+    // A non-unicode value (invalid UTF-8 in the OsStr) hits the
+    // VarError::NotUnicode branch.
+    use std::os::unix::ffi::OsStringExt;
+    let bad = std::ffi::OsString::from_vec(vec![0xFF, 0xFE]);
+    unsafe { std::env::set_var("DSH_PORT", &bad) };
+    let err = WireClient::attach_from_env()
+        .err()
+        .expect("attach_from_env must fail");
+    assert!(
+        matches!(err, ClientError::Protocol(ref m) if m.contains("not valid unicode")),
+        "got {err:?}"
+    );
+    unsafe { std::env::remove_var("DSH_PORT") };
+}
+
+// ---------------------------------------------------------------------------
+// ws downlink death + reconnect
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ws_dies_mid_frame_and_the_subscriber_reconnects() {
+    let mock = MockGateway::start().await;
+    // Serve two frames, then close the socket cleanly: the subscriber must
+    // deliver the frames that made it through, then reconnect and re-serve.
+    mock.set_ws_frames_and_close(
+        "/api/events.mux",
+        vec![
+            r#"{"type":"server-request","rpcId":"ws-1","method":"events.mux","payload":{"type":"session/subscribed","sessionId":"s1","lastSeq":1}}"#.into(),
+            r#"{"type":"server-request","rpcId":"ws-2","method":"events.mux","payload":{"type":"session/subscribed","sessionId":"s1","lastSeq":2}}"#.into(),
+        ],
+    )
+    .await;
+
+    let client = WireClient::attach(mock.port()).unwrap();
+    let mut frames = client.mux_stream();
+
+    // The two scripted frames arrive before the death.
+    for _ in 0..2 {
+        let frame = tokio::time::timeout(Duration::from_secs(5), frames.recv())
+            .await
+            .expect("frame before the socket dies")
+            .expect("stream must not end");
+        assert!(matches!(frame.frame, MuxFrame::SessionSubscribed { .. }));
+    }
+    // The reconnect (capped backoff) re-serves the scripted frames.
+    let frame = tokio::time::timeout(Duration::from_secs(10), frames.recv())
+        .await
+        .expect("reconnected stream must deliver frames again")
+        .expect("stream must not end");
+    assert!(matches!(frame.frame, MuxFrame::SessionSubscribed { .. }));
+
+    mock.stop().await;
+}
+
+#[tokio::test]
+async fn gateway_down_records_a_ws_connect_error() {
+    let mock = MockGateway::start().await;
+    let client = WireClient::attach(mock.port()).unwrap();
+    mock.stop().await; // nothing accepts WS upgrades anymore
+
+    let _ = client.mux_stream(); // spawns the subscriber; connect fails
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if client.last_ws_error().is_some() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "ws connect error not recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn ws_read_error_is_recorded_not_fatal() {
+    let mock = MockGateway::start().await;
+    mock.set_ws_raw_garbage("/api/events.mux").await;
+
+    let client = WireClient::attach(mock.port()).unwrap();
+    let _ = client.mux_stream();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if client
+            .last_ws_error()
+            .is_some_and(|error| error.contains("ws read error"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "ws read error not recorded"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn dropping_the_receiver_stops_the_subscriber() {
+    let mock = MockGateway::start().await;
+    // No scripted frames: the mock holds the socket open.
+    mock.set_ws_frames("/api/events.mux", vec![]).await;
+
+    let client = WireClient::attach(mock.port()).unwrap();
+    let frames = client.mux_stream();
+    drop(frames); // consumer gone — the next frame kills the subscriber
+
+    // A pushed frame reaches the subscriber, whose tx.send fails; the
+    // subscriber stops and the socket closes, which the mock observes by
+    // dropping its pusher. Poll until push_ws_frame stops delivering.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let delivered = mock
+            .push_ws_frame(
+                "/api/events.mux",
+                r#"{"type":"server-request","rpcId":"x","method":"events.mux","payload":{"type":"session/subscribed","sessionId":"s1","lastSeq":1}}"#.into(),
+            )
+            .await;
+        if !delivered {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "subscriber still alive after the receiver dropped"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[tokio::test]
+async fn dropping_the_client_stops_the_subscriber() {
+    let mock = MockGateway::start().await;
+    mock.set_ws_frames("/api/events.mux", vec![]).await;
+
+    let client = WireClient::attach(mock.port()).unwrap();
+    let frames = client.mux_stream();
+    drop(frames);
+    drop(client); // last clone: the stop flag ends the subscriber loop
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let delivered = mock
+            .push_ws_frame(
+                "/api/events.mux",
+                r#"{"type":"server-request","rpcId":"x","method":"events.mux","payload":{"type":"session/subscribed","sessionId":"s1","lastSeq":1}}"#.into(),
+            )
+            .await;
+        if !delivered {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "subscriber still alive after the client dropped"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

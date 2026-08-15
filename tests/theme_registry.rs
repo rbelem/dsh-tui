@@ -547,3 +547,95 @@ fn picker_renders_a_listing() {
         "scrolled off the top: {view}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// coverage push: XDG tolerance + config error paths + picker marker
+// ---------------------------------------------------------------------------
+
+#[test]
+fn load_user_dir_tolerates_missing_or_file_xdg() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // No XDG_CONFIG_HOME at all: the user dir lookup gives up.
+    with_env_var("XDG_CONFIG_HOME", None, || {
+        let mut registry = ThemeRegistry::bundled();
+        registry.load_user_dir(); // no panic, no-op
+    });
+    // XDG pointing at a FILE: read_dir fails → tolerated.
+    let file = std::env::temp_dir().join(format!("dsh-tui-xdg-file-{}", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    std::fs::write(&file, "x").expect("write");
+    with_env_var("XDG_CONFIG_HOME", Some(file.to_str().unwrap()), || {
+        let mut registry = ThemeRegistry::bundled();
+        registry.load_user_dir();
+    });
+    let _ = std::fs::remove_file(&file);
+}
+
+#[test]
+fn load_user_dir_skips_non_toml_files() {
+    let dir = TempDir::new("non-toml");
+    let themes_dir = dir.path().join("dsh-tui").join("themes");
+    std::fs::create_dir_all(&themes_dir).expect("themes dir");
+    std::fs::write(themes_dir.join("notes.txt"), "not a theme").expect("write txt");
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_env_var(
+        "XDG_CONFIG_HOME",
+        Some(dir.path().to_str().unwrap()),
+        || {
+            let mut registry = ThemeRegistry::bundled();
+            registry.load_user_dir(); // the .txt is skipped, no panic
+        },
+    );
+}
+
+#[test]
+fn config_load_tolerates_missing_and_corrupt_files() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = TempDir::new("config-load");
+    // No config file in an otherwise-empty XDG dir: the default.
+    with_env_var(
+        "XDG_CONFIG_HOME",
+        Some(dir.path().to_str().unwrap()),
+        || {
+            assert_eq!(Config::load(), Config::default());
+        },
+    );
+    // A corrupt config file: the default.
+    let config_path = dir.path().join("dsh-tui").join("config.toml");
+    std::fs::create_dir_all(config_path.parent().unwrap()).expect("dir");
+    std::fs::write(&config_path, "not [valid toml").expect("write corrupt");
+    with_env_var(
+        "XDG_CONFIG_HOME",
+        Some(dir.path().to_str().unwrap()),
+        || {
+            assert_eq!(Config::load(), Config::default());
+        },
+    );
+}
+
+// NOTE: Config::save's "no config directory" error requires dirs::config_dir()
+// to return None, which cannot be forced on Linux — documented as excluded.
+// The save error path IS covered via the file-shaped-XDG tests elsewhere
+// (create_dir_all fails → Config error).
+
+#[test]
+fn picker_marks_the_current_theme() {
+    let app = App::default();
+    let current = &app.themes.themes[0];
+    let popup = ThemePopup {
+        themes: &app.themes.themes,
+        selected: 0,
+        current,
+        locale: Locale::En,
+    };
+    let (width, height) = popup.size(120);
+    let backend = TestBackend::new(width, height);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| f.render_widget(popup, f.area())).unwrap();
+    let view = format!("{}", terminal.backend());
+    assert!(
+        view.contains(" •") && view.contains(&current.name),
+        "current theme marked: {view}"
+    );
+}

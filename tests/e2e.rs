@@ -536,6 +536,96 @@ async fn ctrl_q_exits_cleanly() {
 }
 
 // ---------------------------------------------------------------------------
+// 7. process lifecycle: no DSH_PORT exits 2; an empty gateway warns
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_dsh_port_exits_with_a_hint() {
+    // The binary WITHOUT DSH_PORT: the pure-client contract says exit(2)
+    // with a hint on stderr (main.rs's no-port branch).
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_dsh-tui"));
+    cmd.env("DSH_TUI_LOCALE", "en");
+    let xdg = std::env::temp_dir().join(format!("dsh-tui-e2e-xdg-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&xdg);
+    cmd.env("XDG_CONFIG_HOME", &xdg);
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("openpty");
+    let mut child = pair.slave.spawn_command(cmd).expect("spawn child");
+    drop(pair.master.take_writer().expect("pty writer"));
+
+    // Drain the merged output on a thread (never joined — the pty read may
+    // not EOF, so the AppUnderTest pattern applies).
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let mut reader = pair.master.try_clone_reader().expect("pty reader");
+    let buffer = Arc::clone(&output);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 4096];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buffer
+                    .lock()
+                    .expect("output lock")
+                    .extend_from_slice(&chunk[..n]),
+            }
+        }
+    });
+
+    // Poll the exit status with a deadline (the child exits on its own).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            break Some(status.exit_code() as i32);
+        }
+        if Instant::now() > deadline {
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let text = {
+        let guard = output.lock().expect("output lock");
+        String::from_utf8_lossy(&guard).into_owned()
+    };
+    assert!(text.contains("no DSH_PORT set"), "hint on stderr: {text}");
+    assert_eq!(status, Some(2), "exit code 2 for the no-port contract");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_gateway_shows_the_no_sessions_notice() {
+    let mock = MockGateway::start().await;
+    mock.set_handler(
+        "session.list",
+        MockAction::Ok(
+            r#"{"type":"server-response","rpcId":"{rpcId}","result":{"ok":true,"value":{"items":[]}}}"#,
+        ),
+    )
+    .await;
+    mock.set_handler(
+        "workspace.list",
+        MockAction::Ok(
+            r#"{"type":"server-response","rpcId":"{rpcId}","result":{"ok":true,"value":{"items":[],"archivedSessionIds":[]}}}"#,
+        ),
+    )
+    .await;
+    let mut scenario = Scenario::boot(mock).await;
+    let app = scenario.app();
+    assert!(
+        app.wait_for(
+            "gateway has no sessions — start one from the web UI",
+            Duration::from_secs(10)
+        ),
+        "no-sessions status: {}",
+        app.output()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 

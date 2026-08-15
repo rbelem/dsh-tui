@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -151,6 +151,12 @@ pub struct MockGateway {
     /// already-connected subscriber, e.g. an approval trigger after boot).
     ws_pushers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
     ws_frames: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// WS paths whose scripted frames are followed by a clean socket close
+    /// (the client's reconnect path; `ws-dies-mid-frame` fixtures).
+    ws_close_after: Arc<Mutex<HashSet<String>>>,
+    /// WS paths that receive raw non-WS bytes after the upgrade (a
+    /// tungstenite-level read error on the client side).
+    ws_garbage: Arc<Mutex<HashSet<String>>>,
     shutdown: Option<oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -169,6 +175,10 @@ impl MockGateway {
         let task_history = Arc::clone(&history_fixtures);
         let ws_pushers = Arc::new(Mutex::new(HashMap::new()));
         let task_pushers = Arc::clone(&ws_pushers);
+        let ws_close_after = Arc::new(Mutex::new(HashSet::new()));
+        let task_ws_close = Arc::clone(&ws_close_after);
+        let ws_garbage = Arc::new(Mutex::new(HashSet::new()));
+        let task_ws_garbage = Arc::clone(&ws_garbage);
         let task_ws_frames = Arc::clone(&ws_frames);
         let task = tokio::spawn(async move {
             loop {
@@ -183,6 +193,8 @@ impl MockGateway {
                             Arc::clone(&task_history),
                             Arc::clone(&task_pushers),
                             Arc::clone(&task_ws_frames),
+                            Arc::clone(&task_ws_close),
+                            Arc::clone(&task_ws_garbage),
                         ));
                     }
                 }
@@ -195,6 +207,8 @@ impl MockGateway {
             history_fixtures,
             ws_pushers,
             ws_frames: Arc::clone(&ws_frames),
+            ws_close_after,
+            ws_garbage,
             shutdown: Some(shutdown_tx),
             task,
         }
@@ -222,6 +236,21 @@ impl MockGateway {
 
     pub async fn set_ws_frames(&self, path: &str, frames: Vec<String>) {
         self.ws_frames.lock().await.insert(path.to_string(), frames);
+    }
+
+    /// Serve `frames` on `path`, then close the socket cleanly instead of
+    /// holding it open — a `ws-dies-mid-frame` fixture for the client's
+    /// reconnect path.
+    pub async fn set_ws_frames_and_close(&self, path: &str, frames: Vec<String>) {
+        self.ws_close_after.lock().await.insert(path.to_string());
+        self.ws_frames.lock().await.insert(path.to_string(), frames);
+    }
+
+    /// Serve raw non-WS bytes after the upgrade on `path` — a
+    /// tungstenite-level read error on the client side (the mock's own
+    /// frames, if any, come first).
+    pub async fn set_ws_raw_garbage(&self, path: &str) {
+        self.ws_garbage.lock().await.insert(path.to_string());
     }
 
     /// Push one frame to the live downlink subscriber for `path` (a no-op
@@ -288,6 +317,7 @@ impl MockGateway {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut stream: TcpStream,
     requests: Arc<Mutex<Vec<CapturedRequest>>>,
@@ -295,6 +325,8 @@ async fn handle_connection(
     history_fixtures: Arc<Mutex<HashMap<String, String>>>,
     ws_pushers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
     ws_frames: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    ws_close_after: Arc<Mutex<HashSet<String>>>,
+    ws_garbage: Arc<Mutex<HashSet<String>>>,
 ) {
     // Peek (non-consuming) until the request head is complete. An upgrade
     // request must be handed to `accept_async` with its bytes still in the
@@ -328,6 +360,22 @@ async fn handle_connection(
         for frame in frames {
             socket.send(Message::Text(frame)).await.unwrap();
             tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        // `ws-dies-mid-frame` fixtures: close cleanly after the scripted
+        // frames so the client's reconnect path is exercised.
+        if ws_close_after.lock().await.contains(&path) {
+            let _ = socket.close(None).await;
+            ws_pushers.lock().await.remove(&path);
+            return;
+        }
+        // Raw-garbage fixtures: write invalid WS bytes (bypassing the
+        // tungstenite framing) so the client hits a read error.
+        if ws_garbage.lock().await.contains(&path) {
+            use tokio::io::AsyncWriteExt;
+            let _ = socket.get_mut().write_all(b"\xff\x00\x00\x00\x00").await;
+            let _ = socket.get_mut().shutdown().await;
+            ws_pushers.lock().await.remove(&path);
+            return;
         }
         loop {
             tokio::select! {
