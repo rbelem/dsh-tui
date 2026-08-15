@@ -5,6 +5,7 @@
 
 pub mod app;
 pub mod client;
+pub mod clipboard;
 pub mod i18n;
 pub mod render;
 pub mod store;

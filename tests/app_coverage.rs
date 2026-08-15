@@ -1625,14 +1625,14 @@ async fn attachment_done_bad_base64_toasts_and_pickerless_is_dropped() {
 #[tokio::test]
 async fn open_image_viewer_hints_without_session_or_images() {
     let mut app = App::default();
-    app.focus = Focus::Chat; // 'v' is chat-focus bound (boot is Composer)
-    // No session: 'v' hints.
-    assert_eq!(app.handle_key(key(KeyCode::Char('v'))), Some(Action::None));
+    app.focus = Focus::Chat; // 'i' (open the viewer) is chat-bound; boot is Composer
+    // No session: 'i' hints.
+    assert_eq!(app.handle_key(key(KeyCode::Char('i'))), Some(Action::None));
     assert_eq!(app.hint.as_deref(), Some("no images in this session"));
     // A session with no image blocks: same hint.
     let mut app = app_with_session();
     app.focus = Focus::Chat;
-    assert_eq!(app.handle_key(key(KeyCode::Char('v'))), Some(Action::None));
+    assert_eq!(app.handle_key(key(KeyCode::Char('i'))), Some(Action::None));
     assert_eq!(app.hint.as_deref(), Some("no images in this session"));
     assert!(matches!(app.mode, Mode::Chat));
 }

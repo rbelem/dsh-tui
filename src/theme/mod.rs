@@ -298,6 +298,11 @@ pub const DEFAULT_KEYBINDINGS: &[(&str, &str)] = &[
     ("settings", "ctrl+,"),
     ("launcher", "ctrl+p"),
     ("queue", "alt+q"),
+    // mouse selection mode (#12): `v` in the chat arms drag-to-select;
+    // the image viewer moved to `i` (it keeps its hardcoded binding as a
+    // fallback when `image-viewer` is rebound, but `v` is selection's).
+    ("selection-toggle", "v"),
+    ("image-viewer", "i"),
     // composer
     ("composer.submit", "enter"),
     ("composer.newline", "shift+enter"),

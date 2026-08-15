@@ -29,6 +29,7 @@ use std::convert::Infallible;
 use std::time::{Duration, Instant};
 
 use crossterm::event::KeyEvent;
+use ratatui::layout::Rect;
 
 use crate::client::{ClientError, WireClient};
 use crate::render::row_cache::RowCache;
@@ -382,6 +383,21 @@ pub struct App {
     /// Draw counter (integration-test observability; plain field because
     /// integration tests link the lib without `cfg(test)`).
     pub draws: usize,
+    /// The last drawn surface rects, for mouse hit-testing (#12). Zero
+    /// until the first draw; a mouse event before that is a no-op.
+    pub sidebar_area: Rect,
+    pub chat_area: Rect,
+    pub composer_area: Rect,
+    /// Mouse text selection (#12): the anchor and current cell positions in
+    /// CHAT-CONTENT space (rows relative to the content area — the cached
+    /// line index is `view.offset + row`). `None` while not selecting.
+    pub selection: Option<(CellPos, CellPos)>,
+    /// `v` selection mode: drags select, mouse-up copies and exits.
+    pub select_mode: bool,
+    /// The `copied · N chars` flash: text + when it expires (~2s). Shown
+    /// in the status line's right cluster in `success` (no toast system —
+    /// this is a status-line flash only).
+    pub copied_flash: Option<(String, Instant)>,
 }
 
 impl Default for App {
@@ -435,8 +451,23 @@ impl Default for App {
             needs_draw: true,
             last_draw: None,
             draws: 0,
+            sidebar_area: Rect::default(),
+            chat_area: Rect::default(),
+            composer_area: Rect::default(),
+            selection: None,
+            select_mode: false,
+            copied_flash: None,
         }
     }
+}
+
+/// A cell position in chat-content space (row, column), used by the mouse
+/// selection (#12). Row 0 is the content area's first row (below the blank
+/// top spacer); column 0 its first cell (after the 2/2 margin).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellPos {
+    pub row: u16,
+    pub col: u16,
 }
 
 impl App {
@@ -566,6 +597,18 @@ impl App {
             .is_some_and(|(_, at)| at.elapsed() >= TOAST_TTL)
         {
             self.toast = None;
+            self.needs_draw = true;
+        }
+    }
+
+    /// Expire the `copied · N chars` status flash (the tick drives this).
+    pub fn expire_copied_flash(&mut self) {
+        if self
+            .copied_flash
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= COPY_FLASH_TTL)
+        {
+            self.copied_flash = None;
             self.needs_draw = true;
         }
     }
@@ -1528,9 +1571,20 @@ impl App {
     fn handle_chat_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        // #12: `v` (rebindable via `[keymap] selection-toggle`) arms the
+        // mouse selection mode; `i` (rebindable via `[keymap]
+        // image-viewer`) opens the image viewer. Both are keymap-routed
+        // with no hardcoded fallback: rebinding (or moving) the action
+        // truly moves the key, and the popup/mode gates above already
+        // route around the overlays.
+        if self.config.keymap.matches("selection-toggle", key) {
+            return Some(self.toggle_selection_mode());
+        }
+        if self.config.keymap.matches("image-viewer", key) {
+            return Some(self.open_image_viewer());
+        }
         match key.code {
             KeyCode::Char('q') => Some(Action::Quit),
-            KeyCode::Char('v') => Some(self.open_image_viewer()),
             KeyCode::Char('n') => {
                 self.open_new_session_picker();
                 Some(Action::None)
@@ -1562,9 +1616,339 @@ impl App {
                 self.scroll(-half);
                 Some(Action::Scroll(-half))
             }
-            KeyCode::Esc => Some(Action::None),
+            // #12: Esc cancels an armed selection (the status hint says
+            // `v select · esc cancel`).
+            KeyCode::Esc => {
+                if self.select_mode {
+                    self.cancel_selection();
+                }
+                Some(Action::None)
+            }
             _ => None,
         }
+    }
+
+    // -------------------------------------------------------------------
+    // #12: mouse support
+    // -------------------------------------------------------------------
+
+    /// `v`: arm (or disarm) the mouse selection mode. Arming shows the
+    /// `v select · esc cancel` hint in the status line; a drag then
+    /// selects, and mouse-up copies and exits.
+    fn toggle_selection_mode(&mut self) -> Action {
+        self.select_mode = !self.select_mode;
+        if self.select_mode {
+            self.hint = Some(crate::i18n::tr(self.locale, "status.select_hint").into());
+        } else {
+            self.selection = None;
+            self.hint = None;
+        }
+        Action::None
+    }
+
+    /// Esc / a non-chat click: drop the selection state and the mode.
+    fn cancel_selection(&mut self) {
+        self.selection = None;
+        self.select_mode = false;
+        self.hint = None;
+    }
+
+    /// A mouse event (capture enabled at terminal setup). Popup-open and
+    /// non-chat modes route everything to the popup: chat/sidebar/composer
+    /// mouse and `v` are no-ops there.
+    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> Action {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        // Any overlay owns the surface: the theme picker, queue popup,
+        // launcher, new-session/search popups, the composer's seed popup,
+        // and the takeover/settings/image modes.
+        let popup_open = self.theme_picker.open
+            || self.queue_popup_open
+            || self.launcher.is_some()
+            || self.new_session.is_some()
+            || self.sidebar_search.is_some()
+            || self.composer.popup().is_some()
+            || !matches!(self.mode, Mode::Chat);
+        if popup_open {
+            return Action::None;
+        }
+        let column = event.column;
+        let row = event.row;
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.mouse_down(column, row),
+            MouseEventKind::Drag(MouseButton::Left) => self.mouse_drag(column, row),
+            MouseEventKind::Up(MouseButton::Left) => self.mouse_up(),
+            MouseEventKind::ScrollUp => self.mouse_wheel(-1, column, row),
+            MouseEventKind::ScrollDown => self.mouse_wheel(1, column, row),
+            // Right/middle clicks, plain moves, and scroll-drag variants
+            // are no-ops in v1 (Shift+wheel / Shift+drag stay the
+            // terminal-level escape hatch).
+            _ => Action::None,
+        }
+    }
+
+    /// Whether `(column, row)` is inside `rect`.
+    fn in_rect(rect: Rect, column: u16, row: u16) -> bool {
+        column >= rect.x && column < rect.right() && row >= rect.y && row < rect.bottom()
+    }
+
+    /// The chat content area (the 2/2 margin + the 1 blank top row the
+    /// ChatView applies internally) — selection coordinates are relative
+    /// to this rect.
+    fn chat_content_rect(&self) -> Rect {
+        Rect {
+            x: self.chat_area.x + 2,
+            y: self.chat_area.y + 1,
+            width: self.chat_area.width.saturating_sub(4),
+            height: self.chat_area.height.saturating_sub(1),
+        }
+    }
+
+    /// Left-button down: sidebar row click / group-header toggle, composer
+    /// click-to-cursor, or a selection anchor on the chat (select mode).
+    fn mouse_down(&mut self, column: u16, row: u16) -> Action {
+        if Self::in_rect(self.sidebar_area, column, row) {
+            self.cancel_selection();
+            return self.sidebar_click(row);
+        }
+        if Self::in_rect(self.composer_area, column, row) {
+            self.cancel_selection();
+            self.focus = Focus::Composer;
+            self.composer_click(column, row);
+            return Action::Focus(Focus::Composer);
+        }
+        // Chat: selection only while `v` mode is armed; otherwise a chat
+        // click is a no-op (no click-to-position in v1).
+        if self.select_mode {
+            let content = self.chat_content_rect();
+            if Self::in_rect(content, column, row) {
+                let pos = CellPos {
+                    row: row - content.y,
+                    col: column - content.x,
+                };
+                self.selection = Some((pos, pos));
+                self.hint = None;
+                return Action::None;
+            }
+        }
+        Action::None
+    }
+
+    /// Left-button drag: extend the selection, clamped to the chat rect
+    /// (the queue/composer are never selected).
+    fn mouse_drag(&mut self, column: u16, row: u16) -> Action {
+        if self.selection.is_none() {
+            return Action::None;
+        }
+        let content = self.chat_content_rect();
+        let pos = CellPos {
+            row: row
+                .saturating_sub(content.y)
+                .min(content.height.saturating_sub(1)),
+            col: column
+                .saturating_sub(content.x)
+                .min(content.width.saturating_sub(1)),
+        };
+        if let Some((anchor, _)) = &mut self.selection {
+            self.selection = Some((*anchor, pos));
+        }
+        Action::None
+    }
+
+    /// Left-button up: finish the selection — copy the selected text via
+    /// OSC 52, flash `copied · N chars`, and exit select mode.
+    fn mouse_up(&mut self) -> Action {
+        let Some((anchor, current)) = self.selection else {
+            return Action::None;
+        };
+        self.selection = None;
+        let text = self.selected_text(anchor, current);
+        if text.is_empty() {
+            self.select_mode = false;
+            self.hint = None;
+            return Action::None;
+        }
+        let count = crate::clipboard::copy_text(&text);
+        self.copied_flash = Some((
+            crate::i18n::trf(self.locale, "status.copied", &[&count.to_string()]),
+            Instant::now(),
+        ));
+        self.select_mode = false;
+        self.hint = None;
+        self.needs_draw = true;
+        Action::None
+    }
+
+    /// Wheel: 3 lines per event. Over the chat it scrolls the viewport
+    /// (and the selection follows the content); over the sidebar it scrolls
+    /// the session list when it overflows; the status line and the hero
+    /// are no-ops.
+    fn mouse_wheel(&mut self, direction: i64, column: u16, row: u16) -> Action {
+        if Self::in_rect(self.chat_area, column, row) {
+            // `scroll` clamps at the top/bottom bounds and disables follow.
+            self.scroll(direction * 3);
+            return Action::Scroll(direction * 3);
+        }
+        if Self::in_rect(self.sidebar_area, column, row) {
+            self.sidebar_wheel(direction);
+            return Action::None;
+        }
+        Action::None
+    }
+
+    /// Wheel over the sidebar: the list scrolls via the selection-driven
+    /// window — moving the selection by 3 (clamped), only when the list
+    /// actually overflows its window.
+    fn sidebar_wheel(&mut self, direction: i64) {
+        let groups = self.sidebar_groups();
+        let inner_height = self.sidebar_area.height;
+        if inner_height == 0 {
+            return;
+        }
+        let (rows, _) =
+            crate::ui::sidebar::display_layout(&groups, self.sidebar.selected, inner_height);
+        // The visible window is `inner_height - 3` rows; scroll only when
+        // the list is taller than it.
+        if rows.len() <= inner_height.saturating_sub(3) as usize {
+            return;
+        }
+        let len = crate::ui::sidebar::SidebarGroup::visible_len(&groups);
+        self.sidebar.move_by((direction * 3) as isize, len);
+    }
+
+    /// A click on a sidebar row: select that session (switching when it is
+    /// not already active). Clicking the active row is a no-op — a click
+    /// never steals the composer's focus. A group header click toggles the
+    /// group's collapse.
+    fn sidebar_click(&mut self, row: u16) -> Action {
+        let area = self.sidebar_area;
+        if area.height == 0 || area.width == 0 {
+            return Action::None;
+        }
+        let inner = area.inner(ratatui::layout::Margin {
+            horizontal: 2,
+            vertical: 0,
+        });
+        let line_index = row.saturating_sub(inner.y);
+        // Header + blank row above; the footer line below — no rows there.
+        if line_index < 2 || line_index >= inner.height.saturating_sub(1) {
+            return Action::None;
+        }
+        let groups = self.sidebar_groups();
+        let (rows, start) =
+            crate::ui::sidebar::display_layout(&groups, self.sidebar.selected, inner.height);
+        let Some(display) = rows.get(start + (line_index - 2) as usize) else {
+            return Action::None;
+        };
+        match display {
+            crate::ui::sidebar::DisplayRow::Header(group_index) => {
+                // Only the archived group is collapsible in the v1 model;
+                // build_groups always appends it last, so a click on the
+                // last header toggles its expansion (a no-op when no
+                // archived sessions exist — nothing to toggle).
+                if *group_index + 1 == groups.len() {
+                    self.archived_expanded = !self.archived_expanded;
+                    self.sidebar
+                        .clamp(crate::ui::sidebar::SidebarGroup::visible_len(&groups));
+                }
+                Action::None
+            }
+            crate::ui::sidebar::DisplayRow::Session { index, ordinal } => {
+                self.sidebar.selected = *ordinal;
+                self.switch_to_session(self.sessions[*index].session_id.clone())
+            }
+        }
+    }
+
+    /// A click in the composer's content area: place the caret at the
+    /// clicked cell (clamped to the line end, honoring the horizontal
+    /// scroll). The click already moved focus.
+    fn composer_click(&mut self, column: u16, row: u16) {
+        let area = self.composer_area;
+        let inner = Rect {
+            x: area.x + 2,
+            y: area.y + 1,
+            width: area.width.saturating_sub(4),
+            height: area.height.saturating_sub(1),
+        };
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let content_row = row.saturating_sub(inner.y);
+        let col_cells = column.saturating_sub(inner.x);
+        // The caret's rendered column includes the current scroll; a click
+        // at a visible cell maps to line space via it.
+        let scroll = self.composer.caret_layout(inner.width).2;
+        self.composer
+            .click_to_cell(content_row as usize, col_cells + scroll);
+    }
+
+    /// The text inside the selected range: the cached (rendered) lines'
+    /// content, per-line cell-clamped to the range (CJK-safe), trailing
+    /// whitespace trimmed, lines joined with newlines. Content row `r`
+    /// maps to cache line `view.offset + r` (ChatView renders 1:1).
+    fn selected_text(&self, anchor: CellPos, current: CellPos) -> String {
+        let (start, end) = if (anchor.row, anchor.col) <= (current.row, current.col) {
+            (anchor, current)
+        } else {
+            (current, anchor)
+        };
+        let flat: Vec<&ratatui::text::Line> = self
+            .row_cache
+            .lines()
+            .iter()
+            .flat_map(|row| row.lines.iter())
+            .collect();
+        let mut out = Vec::new();
+        for row in start.row..=end.row {
+            let Some(line) = flat.get(self.view.offset + row as usize) else {
+                continue; // past the conversation's tail
+            };
+            let (col_start, col_end) = if row == start.row && row == end.row {
+                (start.col.min(end.col), start.col.max(end.col))
+            } else if row == start.row {
+                (start.col, u16::MAX)
+            } else if row == end.row {
+                (0, end.col)
+            } else {
+                (0, u16::MAX)
+            };
+            // Collect (char, start-cell) pairs, then slice by cell range.
+            let mut cells = 0u16;
+            let mut text = String::new();
+            'chars: for span in &line.spans {
+                for ch in span.content.chars() {
+                    let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                    if cells >= col_end {
+                        break 'chars;
+                    }
+                    if cells >= col_start {
+                        text.push(ch);
+                    }
+                    cells += w;
+                }
+            }
+            out.push(text.trim_end().to_string());
+        }
+        out.join("\n")
+    }
+
+    /// Paste: insert into the composer only while it is focused (and no
+    /// popup owns the keyboard); everywhere else the payload is dropped.
+    pub fn handle_paste(&mut self, text: String) -> Action {
+        if self.focus != Focus::Composer
+            || self.theme_picker.open
+            || self.queue_popup_open
+            || self.launcher.is_some()
+            || self.new_session.is_some()
+            || self.sidebar_search.is_some()
+            || !matches!(self.mode, Mode::Chat)
+        {
+            return Action::None;
+        }
+        for ch in text.chars() {
+            self.composer.insert_char(ch);
+        }
+        Action::None
     }
 
     /// Composer bindings: chars edit the buffer; `Enter` submits,
@@ -2191,6 +2575,9 @@ pub(crate) const DRAW_INTERVAL: Duration = Duration::from_millis(16);
 /// Toast lifetime: cleared on the first tick at least this long after it
 /// was set.
 pub(crate) const TOAST_TTL: Duration = Duration::from_secs(3);
+
+/// The `copied · N chars` status flash lifetime (#12).
+pub(crate) const COPY_FLASH_TTL: Duration = Duration::from_secs(2);
 
 /// Toast text for a remotely resolved approval (no exclusivity, Q10).
 fn remote_approval_text(outcome: ApprovalOutcome, locale: crate::i18n::Locale) -> String {

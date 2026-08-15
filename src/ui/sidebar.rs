@@ -226,13 +226,54 @@ impl SidebarState {
     }
 }
 
-/// One display row: a group header or a session row.
-enum DisplayRow {
-    /// Group header text (workspace title / ungrouped / archived label).
-    Header(String),
+/// One display row: a group header or a session row. Shared by the renderer
+/// and the mouse hit-testing (#12): a click on a `Header` toggles that
+/// group's collapse; a click on a `Session` selects it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DisplayRow {
+    /// A group header: the group's index into the sidebar's group list
+    /// (the title renders from `groups[i].title`).
+    Header(usize),
     /// A session row: index into `SidebarView::sessions`, and its ordinal
     /// in session-space (for the selection highlight).
     Session { index: usize, ordinal: usize },
+}
+
+/// Flatten `groups` into display rows and compute the scroll window's first
+/// visible row. The window is selection-driven (the selected row stays
+/// visible, sitting at the edge while scrolling), so the mouse hit-test
+/// reproduces exactly what the renderer draws. `inner_height` is the pane's
+/// content height (the "Sessions" header row, the blank row under it, and
+/// the footer line are outside the window).
+pub fn display_layout(
+    groups: &[SidebarGroup],
+    selected: usize,
+    inner_height: u16,
+) -> (Vec<DisplayRow>, usize) {
+    let mut rows: Vec<DisplayRow> = Vec::new();
+    let mut ordinal = 0;
+    let mut selected_display = 0;
+    for (group_index, group) in groups.iter().enumerate() {
+        if group.title.is_some() {
+            rows.push(DisplayRow::Header(group_index));
+        }
+        if group.collapsed {
+            continue;
+        }
+        for index in &group.sessions {
+            if ordinal == selected {
+                selected_display = rows.len();
+            }
+            rows.push(DisplayRow::Session {
+                index: *index,
+                ordinal,
+            });
+            ordinal += 1;
+        }
+    }
+    let visible = inner_height.saturating_sub(3) as usize;
+    let start = selected_display.saturating_sub(visible.saturating_sub(1));
+    (rows, start)
 }
 
 /// The sidebar widget: header + groups of session rows.
@@ -298,35 +339,10 @@ impl Widget for SidebarView<'_> {
             return;
         }
 
-        // Flatten groups into display rows, tracking each visible session's
-        // display position and session-space ordinal.
-        let mut rows: Vec<DisplayRow> = Vec::new();
-        let mut ordinal = 0;
-        let mut selected_display = 0;
-        for group in self.groups {
-            if let Some(title) = &group.title {
-                rows.push(DisplayRow::Header(title.clone()));
-            }
-            if group.collapsed {
-                continue;
-            }
-            for index in &group.sessions {
-                if ordinal == self.selected {
-                    selected_display = rows.len();
-                }
-                rows.push(DisplayRow::Session {
-                    index: *index,
-                    ordinal,
-                });
-                ordinal += 1;
-            }
-        }
-
-        // Rows share the pane with the header row, the blank row under it,
-        // and the footer line.
-        let visible = inner.height.saturating_sub(3) as usize;
-        // Keep the selected row visible (scrolls so it sits at the edge).
-        let start = selected_display.saturating_sub(visible.saturating_sub(1));
+        // Flatten groups into display rows (shared with the mouse
+        // hit-testing — a click must land on the same row the renderer
+        // drew). The window is selection-driven.
+        let (rows, start) = display_layout(self.groups, self.selected, inner.height);
         let grouped = self.groups.iter().any(|group| group.title.is_some());
         for (row_index, row) in rows.iter().enumerate().skip(start) {
             let line_index = row_index - start + 2;
@@ -335,11 +351,15 @@ impl Widget for SidebarView<'_> {
             }
             let y = inner.y + line_index as u16;
             match row {
-                DisplayRow::Header(title) => {
+                DisplayRow::Header(group_index) => {
+                    let title = self.groups[*group_index]
+                        .title
+                        .as_deref()
+                        .unwrap_or_default();
                     buf.set_line(
                         inner.x,
                         y,
-                        &Line::styled(title.as_str(), style::hint(self.theme)),
+                        &Line::styled(title, style::hint(self.theme)),
                         inner.width,
                     );
                 }

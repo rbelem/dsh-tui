@@ -29,6 +29,11 @@ use crate::wire::workspace::WorkspaceArchiveSessionValue;
 #[derive(Debug)]
 pub enum AppEvent {
     Key(KeyEvent),
+    /// A crossterm mouse event (capture is enabled at terminal setup, #12).
+    Mouse(crossterm::event::MouseEvent),
+    /// Bracketed-paste payload (a terminal-mediated paste; the composer
+    /// inserts it when focused).
+    Paste(String),
     Frame(MuxFrame),
     /// An answerable frame (`approval/requested`, `question/requested`) with
     /// its envelope rpcId — the echo target for the answering ClientResponse
@@ -168,9 +173,13 @@ pub fn is_answerable(frame: &MuxFrame) -> bool {
 }
 
 /// Spawn the crossterm input bridge: reads terminal events and forwards
-/// Key/Resize (mouse/focus/paste have no v1 surface). `crossterm::event::read`
-/// blocks, so the loop runs on the tokio blocking pool. Stops when the
-/// channel closes or the terminal errors.
+/// Key/Resize/Mouse/Paste. `crossterm::event::read` blocks, so the loop runs
+/// on the tokio blocking pool. Stops when the channel closes or the terminal
+/// errors.
+///
+/// Poll interval: 50ms — snappier wheel response than the historical 100ms
+/// (#12; the 10Hz bridge still coalesces wheel bursts into one draw per
+/// tick via `needs_draw` + `DRAW_INTERVAL`).
 pub fn spawn_input_bridge(tx: mpsc::UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
@@ -179,10 +188,20 @@ pub fn spawn_input_bridge(tx: mpsc::UnboundedSender<AppEvent>) {
                 // must be able to notice the channel closing so the app can
                 // exit cleanly (an unbounded `read()` would hang the runtime
                 // shutdown after Ctrl+Q).
-                match crossterm::event::poll(Duration::from_millis(100)) {
+                match crossterm::event::poll(Duration::from_millis(50)) {
                     Ok(true) => match crossterm::event::read() {
                         Ok(crossterm::event::Event::Key(key)) => {
                             if tx.send(AppEvent::Key(key)).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(crossterm::event::Event::Mouse(mouse)) => {
+                            if tx.send(AppEvent::Mouse(mouse)).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(crossterm::event::Event::Paste(text)) => {
+                            if tx.send(AppEvent::Paste(text)).is_err() {
                                 break;
                             }
                         }

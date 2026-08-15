@@ -112,7 +112,7 @@ fn three_image_events() -> Vec<SessionEvent> {
 
 fn app_with_events(events: Vec<SessionEvent>) -> App {
     let mut app = App::default();
-    app.focus = Focus::Chat; // 'v' (open the viewer) is chat-bound; boot is Composer
+    app.focus = Focus::Chat; // 'i' (open the viewer) is chat-bound; boot is Composer
     app.active_session = Some(SessionId("s1".into()));
     for event in events {
         app.store.ingest(frame("s1", event)).expect("ingest");
@@ -262,7 +262,7 @@ async fn viewer_opens_draws_placeholder_and_closes() {
             &mut app,
             &mut term,
             vec![
-                AppEvent::Key(key(KeyCode::Char('v'))),
+                AppEvent::Key(key(KeyCode::Char('i'))),
                 AppEvent::Key(key(KeyCode::Esc)),
                 AppEvent::Key(ctrl(KeyCode::Char('q'))),
             ],
@@ -287,7 +287,7 @@ async fn viewer_opens_draws_placeholder_and_closes() {
     let mut channel = EventChannel::new();
     channel
         .tx
-        .send(AppEvent::Key(key(KeyCode::Char('v'))))
+        .send(AppEvent::Key(key(KeyCode::Char('i'))))
         .expect("v");
     // Draw happens on the key event; quit from the viewer via Ctrl+Q.
     channel
@@ -312,7 +312,7 @@ async fn viewer_opens_draws_placeholder_and_closes() {
 fn viewer_cycles_next_prev_with_wraparound() {
     let mut app = app_with_events(three_image_events());
     assert_eq!(
-        app.handle_key(key(KeyCode::Char('v'))),
+        app.handle_key(key(KeyCode::Char('i'))),
         Some(Action::None),
         "v opens the viewer"
     );
@@ -354,7 +354,7 @@ fn viewer_cycles_next_prev_with_wraparound() {
 #[test]
 fn viewer_t_toggles_fit_actual() {
     let mut app = app_with_events(three_image_events());
-    app.handle_key(key(KeyCode::Char('v')));
+    app.handle_key(key(KeyCode::Char('i')));
     let Mode::Image(viewer) = &app.mode else {
         panic!()
     };
@@ -374,7 +374,7 @@ fn viewer_t_toggles_fit_actual() {
 #[test]
 fn viewer_swallows_chat_keys_and_ctrl_q_quits() {
     let mut app = app_with_events(three_image_events());
-    app.handle_key(key(KeyCode::Char('v')));
+    app.handle_key(key(KeyCode::Char('i')));
     assert!(matches!(app.mode, Mode::Image(_)));
     // Chat keys are inert while the viewer is open.
     assert_eq!(app.handle_key(key(KeyCode::Char('j'))), Some(Action::None));
@@ -386,7 +386,7 @@ fn viewer_swallows_chat_keys_and_ctrl_q_quits() {
     assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Some(Action::None));
     assert!(matches!(app.mode, Mode::Chat), "q closed the viewer");
     // Reopen; Ctrl+Q still quits from the viewer (takeover exception).
-    app.handle_key(key(KeyCode::Char('v')));
+    app.handle_key(key(KeyCode::Char('i')));
     assert!(matches!(app.mode, Mode::Image(_)));
     assert_eq!(
         app.handle_key(ctrl(KeyCode::Char('q'))),
@@ -399,7 +399,7 @@ fn viewer_swallows_chat_keys_and_ctrl_q_quits() {
 fn viewer_hint_without_images() {
     let mut app = app_with_events(vec![ev(1, "user/message", user_msg("m1", "just text"))]);
     assert_eq!(
-        app.handle_key(key(KeyCode::Char('v'))),
+        app.handle_key(key(KeyCode::Char('i'))),
         Some(Action::None),
         "v with no images is a consumed no-op"
     );
@@ -418,7 +418,7 @@ fn image_block_without_bytes_is_a_placeholder_not_a_panic() {
         "user/message",
         image_msg("m1", vec![image_block("att-1", "wide.png")]),
     )]);
-    app.handle_key(key(KeyCode::Char('v')));
+    app.handle_key(key(KeyCode::Char('i')));
     let Mode::Image(viewer) = &app.mode else {
         panic!()
     };

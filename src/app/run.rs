@@ -12,7 +12,7 @@ use std::time::Instant;
 use ratatui::Terminal;
 use ratatui::backend::Backend;
 use ratatui::layout::{Constraint, Layout, Margin, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
@@ -249,8 +249,31 @@ impl App {
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
+                        Some(AppEvent::Mouse(mouse)) => {
+                            // #12: clicks/wheel/selection; draws coalesce
+                            // wheel bursts into one redraw per tick. Plain
+                            // `Moved` events (every pointer motion while
+                            // capture is on) schedule NO draw — there is no
+                            // hover chrome, and repainting per motion would
+                            // flood the 16ms redraw budget (and rebuild the
+                            // selection line-widths on every frame).
+                            let is_move =
+                                matches!(mouse.kind, crossterm::event::MouseEventKind::Moved);
+                            self.handle_mouse(mouse);
+                            if is_move {
+                                continue;
+                            }
+                            self.needs_draw = true;
+                            self.draw_if_due(term, false)?;
+                        }
+                        Some(AppEvent::Paste(text)) => {
+                            self.handle_paste(text);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
                         Some(AppEvent::Tick) => {
                             self.expire_toast();
+                            self.expire_copied_flash();
                             self.draw_if_due(term, false)?;
                         }
                         None => break,
@@ -258,6 +281,7 @@ impl App {
                 }
                 _ = tick.tick() => {
                     self.expire_toast();
+                    self.expire_copied_flash();
                     self.draw_if_due(term, false)?;
                 }
             }
@@ -404,6 +428,12 @@ impl App {
         ])
         .areas(right);
 
+        // #12: the surface rects the mouse hit-testing reads (stored per
+        // draw — the first mouse event before any draw is a no-op).
+        self.sidebar_area = sidebar_area;
+        self.chat_area = chat_area;
+        self.composer_area = composer_area;
+
         // ChatView reserves 1 blank top row, so the visible content rows are
         // one fewer than the pane height; follow/clamp math uses the content
         // height so the tail always lands on the bottom row.
@@ -460,6 +490,45 @@ impl App {
             .sum::<u16>()
             .max(1);
         let offset = self.view.offset;
+        // #12: the mouse-selection highlight, precomputed to buffer-space
+        // rects (content row → buffer row via the content rect; cols
+        // clamped to each line's text width so blank rows never highlight).
+        let selection_overlay: Vec<Rect> = self
+            .selection
+            .map(|(anchor, current)| {
+                let (start, end) = if (anchor.row, anchor.col) <= (current.row, current.col) {
+                    (anchor, current)
+                } else {
+                    (current, anchor)
+                };
+                let content = self.chat_content_rect();
+                let line_widths: Vec<u16> = self
+                    .row_cache
+                    .lines()
+                    .iter()
+                    .flat_map(|row| row.lines.iter())
+                    .map(|line| line.width() as u16)
+                    .collect();
+                (start.row..=end.row)
+                    .filter_map(|row| {
+                        let line_width = line_widths.get(self.view.offset + row as usize)?;
+                        let col_start = if row == start.row { start.col } else { 0 };
+                        let col_end = if row == end.row { end.col } else { u16::MAX };
+                        let col_start = col_start.min(*line_width);
+                        let col_end = col_end.min(*line_width);
+                        if col_end <= col_start {
+                            return None;
+                        }
+                        Some(Rect {
+                            x: content.x + col_start,
+                            y: content.y + row,
+                            width: col_end - col_start,
+                            height: 1,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         // Field-level chain (not `self.active_queue()`) so the borrow stays
         // disjoint from `&mut self.row_cache` inside the closure.
         let queue_items = self
@@ -564,6 +633,15 @@ impl App {
                     },
                     chat_area,
                 );
+            }
+            // #12: the transient selection highlight (REVERSED — reintroduced
+            // for text selection only; the `▎`-stripe chrome is a different
+            // verb). Painted after the chat so it always wins.
+            if !selection_overlay.is_empty() {
+                let highlight = Style::new().add_modifier(Modifier::REVERSED);
+                for rect in &selection_overlay {
+                    frame.buffer_mut().set_style(*rect, highlight);
+                }
             }
             if queue_height > 0 {
                 frame.render_widget(
@@ -1621,31 +1699,56 @@ impl App {
         } else {
             ("●", Style::default().fg(theme.success))
         };
-        let right = vec![Span::styled(indicator.0, indicator.1)];
+        // #12: the `copied · N chars` flash replaces the indicator for its
+        // ~2s lifetime (a status-line flash — no toast system).
+        let right = if let Some((text, at)) = &self.copied_flash
+            && at.elapsed() < crate::app::COPY_FLASH_TTL
+        {
+            vec![Span::styled(
+                text.clone(),
+                Style::default().fg(theme.success),
+            )]
+        } else {
+            vec![Span::styled(indicator.0, indicator.1)]
+        };
         (left, right)
     }
 }
 
 /// RAII restore of the raw-mode/alternate-screen terminal state. Create it
 /// right after `enable_raw_mode` + `EnterAlternateScreen`; Drop restores on
-/// normal exit and on panic.
+/// normal exit and on panic. Mouse capture and bracketed paste are disabled
+/// BEFORE raw mode off (the inverse of setup).
 pub struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
         use crossterm::execute;
         use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
-        let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+        let _ = execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
         let _ = disable_raw_mode();
     }
 }
 
-/// Production terminal setup: raw mode + alternate screen.
+/// Production terminal setup: raw mode + alternate screen + mouse capture
+/// + bracketed paste.
 pub fn setup_terminal()
 -> Result<Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, AppError> {
+    use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    crossterm::execute!(stdout, crossterm::terminal::EnterAlternateScreen)?;
+    crossterm::execute!(
+        stdout,
+        crossterm::terminal::EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     Ok(Terminal::new(backend)?)
 }

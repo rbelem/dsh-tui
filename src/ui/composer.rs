@@ -238,6 +238,27 @@ impl Composer {
         (row as u16, col_cells - scroll, scroll)
     }
 
+    /// Place the caret at `(row, col_cells)` — a mouse click in the
+    /// composer's content area (#12). `col_cells` is in LINE space (the
+    /// caller adds the current horizontal scroll), cell-width-based
+    /// (CJK-safe), clamped to the end of the target line.
+    pub fn click_to_cell(&mut self, row: usize, col_cells: u16) {
+        let row = row.min(self.line_count().saturating_sub(1));
+        let line = self.line(row);
+        let mut cells = 0usize;
+        let mut chars = 0usize;
+        for ch in line.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if cells + w > col_cells as usize {
+                break;
+            }
+            cells += w;
+            chars += 1;
+        }
+        self.caret =
+            self.line_start(row) + line.chars().take(chars).map(char::len_utf8).sum::<usize>();
+    }
+
     /// The `n`-th logical line (empty string when out of range).
     fn line(&self, n: usize) -> &str {
         self.buffer.split('\n').nth(n).unwrap_or("")
