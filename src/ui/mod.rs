@@ -20,5 +20,5 @@ pub use image_viewer::{ImageViewer, ImageViewerView};
 pub use launcher::{LauncherAction, LauncherEntry, LauncherPopup};
 pub use queue::{QueuePopup, QueueStrip};
 pub use settings::{SettingsState, SettingsView};
-pub use sidebar::{SidebarState, SidebarView, sidebar_width};
+pub use sidebar::{SidebarGroup, SidebarState, SidebarView, build_groups, sidebar_width};
 pub use takeover::{ApprovalTakeover, ApprovalView, Mode, QuestionTakeover, QuestionView};

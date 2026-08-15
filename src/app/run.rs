@@ -354,7 +354,11 @@ impl App {
         let chat_height = chat_area.height;
         let width = chat_area.width;
 
-        self.sidebar.clamp(self.sessions.len());
+        let sidebar_groups = self.sidebar_groups();
+        self.sidebar
+            .clamp(crate::ui::sidebar::SidebarGroup::visible_len(
+                &sidebar_groups,
+            ));
         let session_id = self.active_session.clone();
         if let Some(session_id) = &session_id {
             self.row_cache.sync(
@@ -420,6 +424,7 @@ impl App {
                 frame.render_widget(
                     SidebarView {
                         sessions: &self.sessions,
+                        groups: &sidebar_groups,
                         active: self.active_session.as_ref(),
                         selected: self.sidebar.selected,
                         focused: self.focus == Focus::Sidebar,

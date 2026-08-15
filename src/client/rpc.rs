@@ -28,6 +28,7 @@ use crate::wire::settings::{
     SettingsDescribeRequest, SettingsDescribeValue, SettingsUpdateRequest, SettingsWriteValue,
 };
 use crate::wire::skills::{SkillListRequest, SkillListValue};
+use crate::wire::workspace::{WorkspaceListRequest, WorkspaceListValue};
 
 impl WireClient {
     /// `session.list` — the summary rows.
@@ -229,6 +230,13 @@ impl WireClient {
     pub async fn skill_list(&self, session_id: SessionId) -> Result<SkillListValue, ClientError> {
         self.call("skill.list", SkillListRequest { session_id })
             .await
+    }
+
+    /// `workspace.list` — the sidebar's grouping snapshot: workspace rows
+    /// (each carrying its member `sessionIds`) plus the archived session
+    /// id set. The full value is returned (both halves feed app state).
+    pub async fn workspace_list(&self) -> Result<WorkspaceListValue, ClientError> {
+        self.call("workspace.list", WorkspaceListRequest {}).await
     }
 
     /// Answer an `approval/requested` frame. `rpc_id` MUST echo the frame's

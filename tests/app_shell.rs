@@ -184,7 +184,7 @@ async fn attach_history_draw_end_to_end() {
 
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, sessions) = attach(&client, &mut store, Locale::En)
+    let (opened, sessions, _workspaces) = attach(&client, &mut store, Locale::En)
         .await
         .expect("attach");
     assert_eq!(opened, Some(SessionId("s1".into())));
@@ -540,7 +540,7 @@ async fn no_session_attach_renders_empty_chat() {
     .await;
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, sessions) = attach(&client, &mut store, Locale::En)
+    let (opened, sessions, _workspaces) = attach(&client, &mut store, Locale::En)
         .await
         .expect("attach");
     assert_eq!(opened, None, "no sessions on the gateway");

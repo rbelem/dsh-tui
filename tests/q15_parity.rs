@@ -367,7 +367,7 @@ async fn attach_with_sessions(mock: &MockGateway) -> (WireClient, SessionStore) 
         .await;
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, _sessions) = dsh_tui::app::attach(&client, &mut store, Locale::En)
+    let (opened, _sessions, _workspaces) = dsh_tui::app::attach(&client, &mut store, Locale::En)
         .await
         .expect("attach");
     assert_eq!(opened, Some(SessionId("sA".into())));

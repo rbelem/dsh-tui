@@ -5,6 +5,7 @@ use crate::app::AppError;
 use crate::client::WireClient;
 use crate::store::SessionStore;
 use crate::wire::session::{SessionId, SessionSummary};
+use crate::wire::workspace::WorkspaceListValue;
 
 /// History page size for the attach resume.
 const HISTORY_PAGE: usize = 200;
@@ -12,15 +13,35 @@ const HISTORY_PAGE: usize = 200;
 /// Attach to the gateway's sessions: `session.list`, then load the most
 /// recently updated non-blank session's history tail into the store.
 ///
+/// `workspace.list` rides along (in parallel) to seed the sidebar's
+/// grouping. It is TOLERANT: a failure degrades to the flat sidebar
+/// (empty groups, no archived set) with a stderr note — the session list
+/// is the only hard requirement for boot.
+///
 /// Returns the opened session id (`None` when the gateway has no sessions —
-/// the app stays on an empty chat and the caller sets a hint) plus the full
-/// summary list for the sidebar.
+/// the app stays on an empty chat and the caller sets a hint), the full
+/// summary list for the sidebar, and the workspace snapshot.
 pub async fn attach(
     client: &WireClient,
     store: &mut SessionStore,
     locale: crate::i18n::Locale,
-) -> Result<(Option<SessionId>, Vec<SessionSummary>), AppError> {
-    let summaries = client.session_list().await?;
+) -> Result<(Option<SessionId>, Vec<SessionSummary>, WorkspaceListValue), AppError> {
+    let (summaries, workspaces) = {
+        let summaries = client.session_list();
+        let workspaces = client.workspace_list();
+        let (summaries, workspaces) = tokio::join!(summaries, workspaces);
+        let workspaces = match workspaces {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    crate::i18n::trf(locale, "main.workspace_list_failed", &[&error.to_string()],)
+                );
+                WorkspaceListValue::default()
+            }
+        };
+        (summaries?, workspaces)
+    };
     // Most recently updated non-blank session; fall back to any session.
     let chosen = summaries
         .iter()
@@ -32,7 +53,7 @@ pub async fn attach(
                 .max_by(|a, b| a.updated_at.total_cmp(&b.updated_at))
         });
     let Some(summary) = chosen else {
-        return Ok((None, summaries));
+        return Ok((None, summaries, workspaces));
     };
 
     let history = client
@@ -54,5 +75,5 @@ pub async fn attach(
         )
     );
     let opened = summary.session_id.clone();
-    Ok((Some(opened), summaries))
+    Ok((Some(opened), summaries, workspaces))
 }

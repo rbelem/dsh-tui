@@ -30,9 +30,17 @@ async fn run_app(client: WireClient) -> Result<(), AppError> {
     // Locale resolution (increment 3): config wins, then DSH_TUI_LOCALE,
     // then LANG/LC_ALL (Locale::detect); persisted on Ctrl+L.
     app.locale = dsh_tui::i18n::Locale::detect(app.config.locale.as_deref());
-    let (session_id, sessions) = attach(&client, &mut app.store, app.locale).await?;
+    let (session_id, sessions, workspace_list) =
+        attach(&client, &mut app.store, app.locale).await?;
     app.active_session = session_id.clone();
     app.sessions = sessions;
+    app.workspace_order = workspace_list
+        .items
+        .iter()
+        .map(|workspace| workspace.workspace_id.clone())
+        .collect();
+    app.workspaces = workspace_list.items;
+    app.archived_session_ids = workspace_list.archived_session_ids;
     app.client = Some(client.clone());
     if session_id.is_none() {
         app.last_error = Some(dsh_tui::i18n::tr(app.locale, "main.no_sessions").into());

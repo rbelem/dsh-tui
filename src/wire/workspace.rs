@@ -26,8 +26,10 @@ pub struct WorkspaceView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WorkspaceListRequest {}
 
-/// Mirrors workspaceListValueSchema (workspace.schema.ts:29-32).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Mirrors workspaceListValueSchema (workspace.schema.ts:29-32). Default =
+/// the flat sidebar (no groups, no archived set) — the attach flow degrades
+/// to it when `workspace.list` fails.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct WorkspaceListValue {
     pub items: Vec<WorkspaceView>,
     #[serde(rename = "archivedSessionIds")]

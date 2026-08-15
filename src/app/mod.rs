@@ -229,6 +229,18 @@ pub struct App {
     /// The sidebar's session rows: the attach flow's `session.list` snapshot
     /// plus live host-stream updates (`host/session-added|removed|status`).
     pub sessions: Vec<SessionSummary>,
+    /// The sidebar's grouping: `workspace.list` rows (each workspace's
+    /// `session_ids` claim its members; a session belongs to at most one
+    /// workspace) plus live `host/workspace-changed|removed` updates.
+    pub workspaces: Vec<crate::wire::workspace::WorkspaceView>,
+    /// The sidebar's workspace display order (`host/workspace-order-changed`;
+    /// seeded from the `workspace.list` item order at attach). Ids missing
+    /// from this list append after the ordered ones.
+    pub workspace_order: Vec<crate::wire::session::WorkspaceId>,
+    /// Archived sessions (from `workspace.list` /
+    /// `host/archived-sessions-changed`): grouped under a collapsed
+    /// "archived" header at the sidebar's foot, out of j/k navigation.
+    pub archived_session_ids: Vec<SessionId>,
     /// Which surface holds the keyboard focus.
     pub focus: Focus,
     pub composer: Composer,
@@ -312,6 +324,9 @@ impl Default for App {
             view: ViewState::default(),
             active_session: None,
             sessions: Vec::new(),
+            workspaces: Vec::new(),
+            workspace_order: Vec::new(),
+            archived_session_ids: Vec::new(),
             focus: Focus::default(),
             composer: Composer::new(),
             sidebar: SidebarState::default(),
@@ -1012,13 +1027,28 @@ impl App {
             .unwrap_or(&[])
     }
 
+    /// The sidebar's group model: workspace groups (in durable order) →
+    /// ungrouped → collapsed archived (ui::sidebar::build_groups).
+    pub fn sidebar_groups(&self) -> Vec<crate::ui::sidebar::SidebarGroup> {
+        crate::ui::sidebar::build_groups(
+            &self.sessions,
+            &self.workspaces,
+            &self.workspace_order,
+            &self.archived_session_ids,
+            self.locale,
+        )
+    }
+
     /// Live sidebar updates from the host stream (Q2). Handled: session
     /// added (lands at the top — the list stays updatedAt-desc), removed
     /// (an active removal clears to the empty chat; no auto-switch v1),
-    /// status (the running flag). Ignored with a TODO: workspace-changed/
-    /// removed/order-changed (workspace grouping is a later lane),
-    /// archived-sessions-changed (archived filtering later), remote-event,
-    /// agent-error (no v1 surface).
+    /// status (the running flag); workspace changed (upsert — membership
+    /// derives from `workspace.session_ids`), removed (its sessions reflow
+    /// to ungrouped), order-changed (the durable display order), and
+    /// archived-sessions-changed (the archived set — those sessions drop
+    /// out of navigation into the collapsed footer group). Ignored with a
+    /// TODO: remote-event, agent-error (no v1 surface). The selection is
+    /// re-clamped against the new group model.
     pub fn handle_host_frame(&mut self, frame: HostFrame) {
         match frame {
             HostFrame::HostSessionAdded {
@@ -1076,10 +1106,39 @@ impl App {
                     summary.running = running;
                 }
             }
-            // TODO(later lanes): workspace grouping, archived filtering,
-            // remote events, agent errors.
+            HostFrame::HostWorkspaceChanged { workspace } => {
+                if let Some(existing) = self
+                    .workspaces
+                    .iter_mut()
+                    .find(|ws| ws.workspace_id == workspace.workspace_id)
+                {
+                    *existing = workspace;
+                } else {
+                    self.workspaces.push(workspace);
+                }
+            }
+            HostFrame::HostWorkspaceRemoved { workspace_id } => {
+                self.workspaces.retain(|ws| ws.workspace_id != workspace_id);
+                self.workspace_order.retain(|id| id != &workspace_id);
+                // The removed workspace's sessions reflow to ungrouped —
+                // membership derives from workspace.session_ids, nothing
+                // else to do.
+            }
+            HostFrame::HostWorkspaceOrderChanged { workspace_ids } => {
+                self.workspace_order = workspace_ids;
+            }
+            HostFrame::HostArchivedSessionsChanged {
+                archived_session_ids,
+            } => {
+                self.archived_session_ids = archived_session_ids;
+            }
+            // TODO(later lanes): remote events, agent errors.
             _ => {}
         }
+        self.sidebar
+            .clamp(crate::ui::sidebar::SidebarGroup::visible_len(
+                &self.sidebar_groups(),
+            ));
     }
 
     /// Takeover bindings (Q6/Q13). Approval: `y` allow once, `n`/`Esc`
@@ -1432,10 +1491,12 @@ impl App {
 
     /// Sidebar bindings: `j`/`k`/arrows move the selection, `g`/`G` (and
     /// Home/End) jump to the ends, `Enter` switches the active session,
-    /// `Esc` returns focus to the chat, `q` quits.
+    /// `Esc` returns focus to the chat, `q` quits. The selection moves in
+    /// session-space: group headers are skipped and collapsed (archived)
+    /// sessions are unreachable.
     fn handle_sidebar_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::KeyCode;
-        let len = self.sessions.len();
+        let len = crate::ui::sidebar::SidebarGroup::visible_len(&self.sidebar_groups());
         match key.code {
             KeyCode::Char('q') => Some(Action::Quit),
             KeyCode::Char('j') | KeyCode::Down => {
@@ -1485,10 +1546,13 @@ impl App {
     /// Pending approvals/questions stay global across switches (blocking
     /// frames are not session-scoped in v1).
     fn switch_to_selected(&mut self) -> Action {
-        let Some(summary) = self.sessions.get(self.sidebar.selected) else {
+        let groups = self.sidebar_groups();
+        let Some(index) =
+            crate::ui::sidebar::SidebarGroup::visible_session(&groups, self.sidebar.selected)
+        else {
             return Action::None;
         };
-        let session_id = summary.session_id.clone();
+        let session_id = self.sessions[index].session_id.clone();
         if self.active_session.as_ref() == Some(&session_id) {
             return Action::None;
         }
