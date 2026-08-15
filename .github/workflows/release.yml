@@ -2,12 +2,14 @@
 # prebuild targets (linux on ubuntu, darwin on macOS runners — the Apple
 # SDK lives there), byte-pinned per target (dist/<target>/SHA256SUMS), then
 # a follow-up job assembles the per-platform packages and uploads them as
-# release assets with the `gh` CLI (present on runners; no extra action).
+# GitHub release assets with the `gh` CLI (present on runners; no extra
+# action). Each target's assets are uploaded under target-unique names
+# (dsh-tui-<target> + dsh-tui-<target>.SHA256SUMS) — see the upload step.
 #
 # The npm publish flow (entry bundle + four platform packages) is a manual
-# step — see scripts/release/ and the bundle README. This workflow produces
-# the artifacts and the GitHub release; publishing from the same tarballs is
-# the documented TODO.
+# step (`.github/workflows/publish.yml`, workflow_dispatch) that consumes
+# this workflow's RUN ARTIFACTS (actions/upload-artifact), not the release
+# assets; publishing from the same tarballs is the documented flow.
 name: release
 
 on:
@@ -87,6 +89,18 @@ jobs:
             scripts/release/sha256.sh --verify "$dir"
           done
 
+      # Asset naming contract (GitHub release assets, for human download):
+      #   dsh-tui-<target>            — the prebuilt binary
+      #   dsh-tui-<target>.SHA256SUMS — its byte-pin checksum (sha256sum -c
+      #                                  after renaming the binary to the
+      #                                  listed name `dsh-tui`; content is
+      #                                  the dist/ byte-pin contract file)
+      # where <target> is the rust triple (e.g. x86_64-unknown-linux-gnu).
+      # `gh release upload` names each asset by its basename, so the flat
+      # `dsh-tui`/`SHA256SUMS` names would collide across the four targets —
+      # the `file#name` syntax renames each asset to its target-unique name.
+      # No `--clobber`: names are unique, so re-uploads must fail loudly
+      # rather than silently replace a release.
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -94,8 +108,11 @@ jobs:
           set -euo pipefail
           assets=()
           for dir in dist/dsh-tui-*; do
-            for f in "$dir"/dsh-tui "$dir"/SHA256SUMS; do
-              assets+=("$f")
-            done
+            target="${dir#dist/dsh-tui-}"
+            [ -f "$dir/dsh-tui" ] || { echo "missing binary in $dir" >&2; exit 1; }
+            assets+=(
+              "$dir/dsh-tui#dsh-tui-$target"
+              "$dir/SHA256SUMS#dsh-tui-$target.SHA256SUMS"
+            )
           done
-          gh release upload "${{ github.ref_name }}" "${assets[@]}" --clobber
+          gh release upload "${{ github.ref_name }}" "${assets[@]}"

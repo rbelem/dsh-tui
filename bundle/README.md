@@ -78,7 +78,11 @@ macOS runners (Apple SDK). `scripts/release/prebuild-packages.sh` stages
 the four `prebuilds/<platform>/` packages from the dist artifacts; each
 directory is `npm pack`-able. The `v*` tag workflow
 (`.github/workflows/release.yml`) builds the matrix and uploads the
-byte-pinned artifacts as release assets.
+byte-pinned artifacts as GitHub release assets under target-unique names:
+`dsh-tui-<target>` (binary) + `dsh-tui-<target>.SHA256SUMS` (checksum),
+where `<target>` is the rust triple (e.g. `dsh-tui-x86_64-unknown-linux-gnu`).
+Verify a download with `sha256sum -c dsh-tui-<target>.SHA256SUMS` after
+renaming the binary to the listed name `dsh-tui`.
 
 ## Not yet
 
