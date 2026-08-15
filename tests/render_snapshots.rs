@@ -424,6 +424,27 @@ fn offset_scrolling_renders_from_viewport() {
     );
 }
 
+/// Regression (ticket 08 Q5 live smoke): the viewport offset is LINE-space,
+/// so an offset past the end (follow-mode: `total_lines - height`) must
+/// clamp to the conversation's last line — never to the top. The store here
+/// is ~18 rendered lines tall; a huge offset must show the tail.
+#[test]
+fn offset_past_end_clamps_to_bottom_not_top() {
+    let store = build_full_store();
+    let mut cache = RowCache::new();
+    let snapshot = render_snapshot(&store, &mut cache, 120, 30, 1000);
+    // The last node's last line is the compaction summary — the tail must
+    // be visible, while the head must be gone.
+    assert!(
+        snapshot.contains("summarized content"),
+        "tail missing: {snapshot}"
+    );
+    assert!(
+        !snapshot.contains("Check this out"),
+        "head still visible: {snapshot}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // row cache unit tests
 // ---------------------------------------------------------------------------

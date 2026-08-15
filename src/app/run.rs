@@ -402,7 +402,15 @@ impl App {
                 &self.image_cache,
             );
             if self.view.follow {
-                let total = self.row_cache.lines().len();
+                // Follow in LINE space: the viewport offset counts rendered
+                // lines (scroll moves by lines), so the bottom anchor is
+                // total lines minus the viewport height.
+                let total: usize = self
+                    .row_cache
+                    .lines()
+                    .iter()
+                    .map(|row| row.lines.len())
+                    .sum();
                 self.view.offset = total.saturating_sub(chat_height as usize);
             }
         }

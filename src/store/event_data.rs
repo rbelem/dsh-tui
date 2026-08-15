@@ -533,13 +533,22 @@ pub fn parse_finish_reason(value: &Value) -> Result<FinishReason, EventDataError
         .get("kind")
         .and_then(Value::as_str)
         .ok_or_else(|| EventDataError("finish reason object missing `kind`".into()))?;
-    let failure: LlmFailure = obj
-        .get("failure")
-        .ok_or_else(|| EventDataError("aborted/error finish requires `failure`".into()))
-        .and_then(typed)?;
     Ok(match kind {
-        "aborted" => FinishReason::Aborted { failure },
-        "error" => FinishReason::Error { failure },
+        "stop" => FinishReason::Stop,
+        "tool-calls" => FinishReason::ToolCalls,
+        "max-tokens" => FinishReason::MaxTokens,
+        "aborted" => FinishReason::Aborted {
+            failure: obj
+                .get("failure")
+                .ok_or_else(|| EventDataError("aborted finish requires `failure`".into()))
+                .and_then(typed)?,
+        },
+        "error" => FinishReason::Error {
+            failure: obj
+                .get("failure")
+                .ok_or_else(|| EventDataError("error finish requires `failure`".into()))
+                .and_then(typed)?,
+        },
         other => FinishReason::Unknown(other.to_string()),
     })
 }

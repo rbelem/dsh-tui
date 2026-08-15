@@ -37,13 +37,18 @@ impl Widget for ChatView<'_> {
         if rows.is_empty() || area.height == 0 {
             return;
         }
-        let height = area.height as usize;
-        // Clamp the offset so the viewport stays inside the row array.
-        let offset = self.offset.min(rows.len().saturating_sub(height));
+        // The offset is LINE-space (the app scrolls by rendered lines); map
+        // it to a (row, line-within-row) start and clamp to the last line.
+        let (start_row, start_line) = self.row_cache.line_to_row(self.offset);
         let mut y = area.top();
-        for row in &rows[offset..] {
+        for (row_index, row) in rows.iter().enumerate().skip(start_row) {
             let row_top = y;
-            for line in &row.lines {
+            let skip = if row_index == start_row {
+                start_line
+            } else {
+                0
+            };
+            for line in row.lines.iter().skip(skip) {
                 if y >= area.bottom() {
                     break;
                 }

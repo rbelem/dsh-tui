@@ -1789,7 +1789,10 @@ impl App {
         }
         let rows = self.row_cache.lines();
         let mut start = if rows.is_empty() { 0 } else { total - 1 };
-        for row in rows.iter().skip(self.view.offset.min(rows.len())) {
+        // The viewport offset is line-space; map it to the row at the
+        // viewport top so the viewer starts at the first image at/after it.
+        let (row_at_top, _) = self.row_cache.line_to_row(self.view.offset);
+        for row in rows.iter().skip(row_at_top) {
             if let Some(first) = starts.get(row.node_key.as_str()) {
                 start = *first;
                 break;

@@ -176,6 +176,25 @@ impl RowCache {
         &self.rows
     }
 
+    /// Map a LINE-space viewport offset (the app scrolls by rendered lines)
+    /// to the (row index, line-within-row) start. The offset is clamped to
+    /// the last line: an offset past the end yields the final line of the
+    /// final row, so follow-mode (`offset = total - height`) always lands at
+    /// the true bottom.
+    pub fn line_to_row(&self, offset: usize) -> (usize, usize) {
+        let mut remaining = offset;
+        for (index, row) in self.rows.iter().enumerate() {
+            if remaining < row.lines.len() {
+                return (index, remaining);
+            }
+            remaining -= row.lines.len();
+        }
+        match self.rows.last() {
+            Some(row) => (self.rows.len() - 1, row.lines.len().saturating_sub(1)),
+            None => (0, 0),
+        }
+    }
+
     /// Find and remove the cached row for `key` (sync's reordering helper).
     fn take_row(&mut self, key: &str) -> Option<CachedRow> {
         let position = self.rows.iter().position(|row| row.node_key == key)?;

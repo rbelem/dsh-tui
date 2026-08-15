@@ -1417,3 +1417,168 @@ fn fold_events_is_pure_and_idempotent() {
         .unwrap();
     assert_eq!(session_state(&store, s).nodes, first);
 }
+
+// ---------------------------------------------------------------------------
+// live-gateway finish shapes (ticket 08 Q5 smoke regression)
+// ---------------------------------------------------------------------------
+
+/// The real gateway emits finish chunks with the object reason shape
+/// `{"kind":"stop"}` (FinishReasonMap, llm/src/types.ts:116-122) — `failure`
+/// rides ONLY on aborted/error finishes. A stop finish without `failure`
+/// must ingest cleanly (this crashed attach on the live smoke).
+#[test]
+fn finish_chunk_object_reason_shapes_ingest() {
+    let mut store = SessionStore::new();
+    let s = "s1";
+    ingest_all(
+        &mut store,
+        s,
+        vec![
+            ev(1, "user/message", user_msg("m1", "hi", user_source())),
+            ev(2, "step/start", json!({"turn": 1, "step": 1})),
+            ev(
+                3,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "block-start", "index": 0, "blockType": "text"}),
+                ),
+            ),
+            ev(
+                4,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "text-delta", "index": 0, "text": "Hi"}),
+                ),
+            ),
+            // stop finish, OBJECT reason, no `failure` (live gateway shape).
+            ev(
+                5,
+                "assistant/chunk",
+                chunk(1, 1, json!({"type": "finish", "reason": {"kind": "stop"}})),
+            ),
+            ev(
+                6,
+                "assistant/message",
+                json!({
+                    "turn": 1, "step": 1,
+                    "message": {"id": "m2", "role": "assistant", "content": [{"type": "text", "text": "Hi"}], "source": {"kind": "model", "provider": "p", "model": "m"}},
+                }),
+            ),
+            ev(7, "step/end", json!({"turn": 1, "step": 1})),
+            ev(
+                8,
+                "turn/end",
+                json!({"turn": 1, "reason": {"kind": "completed"}}),
+            ),
+        ],
+    );
+    let state = session_state(&store, s);
+    assert_eq!(state.last_seq, 8);
+    // The folded assistant node carries the completed text.
+    let assistant = nodes(&store, s)
+        .iter()
+        .find(|node| matches!(&node.data, NodeData::Assistant { blocks, .. } if blocks.iter().any(|b| matches!(b, AssistantBlock::Text { text } if text == "Hi"))));
+    assert!(
+        assistant.is_some(),
+        "assistant node with text missing: {:?}",
+        nodes(&store, s)
+    );
+}
+
+/// Aborted/error finishes DO require `failure` (unchanged behavior), and
+/// the tool-calls/max-tokens object shapes parse without it.
+#[test]
+fn finish_chunk_object_reason_failure_and_other_shapes() {
+    let mut store = SessionStore::new();
+    let s = "s1";
+    ingest_all(
+        &mut store,
+        s,
+        vec![
+            ev(1, "user/message", user_msg("m1", "hi", user_source())),
+            ev(2, "step/start", json!({"turn": 1, "step": 1})),
+            ev(
+                3,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "finish", "reason": {"kind": "tool-calls"}}),
+                ),
+            ),
+            ev(
+                4,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "finish", "reason": {"kind": "max-tokens"}}),
+                ),
+            ),
+            ev(
+                5,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({
+                        "type": "finish",
+                        "reason": {
+                            "kind": "aborted",
+                            "failure": {"code": "provider-error", "message": "boom"},
+                        },
+                    }),
+                ),
+            ),
+            ev(
+                6,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({
+                        "type": "finish",
+                        "reason": {
+                            "kind": "error",
+                            "failure": {"code": "provider-error", "message": "kaput"},
+                        },
+                    }),
+                ),
+            ),
+        ],
+    );
+    assert_eq!(session_state(&store, s).last_seq, 6);
+
+    // An aborted finish WITHOUT `failure` is still rejected (tolerant shape
+    // is stop/tool-calls/max-tokens only).
+    let mut store = SessionStore::new();
+    let s = "s1";
+    ingest_all(
+        &mut store,
+        s,
+        vec![
+            ev(1, "user/message", user_msg("m1", "hi", user_source())),
+            ev(2, "step/start", json!({"turn": 1, "step": 1})),
+        ],
+    );
+    let rejected = store.ingest(frame(
+        s,
+        ev(
+            3,
+            "assistant/chunk",
+            chunk(
+                1,
+                1,
+                json!({"type": "finish", "reason": {"kind": "aborted"}}),
+            ),
+        ),
+    ));
+    assert!(
+        rejected.is_err(),
+        "aborted finish without failure must be rejected"
+    );
+}
