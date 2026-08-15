@@ -391,7 +391,7 @@ impl Default for App {
             workspace_order: Vec::new(),
             archived_session_ids: Vec::new(),
             archived_expanded: false,
-            focus: Focus::default(),
+            focus: Focus::Composer,
             composer: Composer::new(),
             sidebar: SidebarState::default(),
             client: None,

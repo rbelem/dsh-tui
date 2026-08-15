@@ -13,7 +13,7 @@ use ratatui::backend::TestBackend;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use dsh_tui::app::{App, AppEvent, EventChannel};
+use dsh_tui::app::{App, AppEvent, EventChannel, Focus};
 use dsh_tui::client::WireClient;
 use dsh_tui::i18n::Locale;
 use dsh_tui::store::SessionStore;
@@ -380,6 +380,7 @@ async fn history_loads_on_sidebar_switch() {
     let (client, store) = attach_with_sessions(&mock).await;
 
     let mut app = App::default();
+    app.focus = Focus::Chat; // Tab,Tab to the sidebar assumes chat boot
     app.client = Some(client);
     app.store = store;
     app.active_session = Some(SessionId("sA".into()));
@@ -430,6 +431,7 @@ async fn history_hint_shows_while_in_flight() {
     let (client, store) = attach_with_sessions(&mock).await;
 
     let mut app = App::default();
+    app.focus = Focus::Chat; // Tab,Tab to the sidebar assumes chat boot
     app.client = Some(client);
     app.store = store;
     app.active_session = Some(SessionId("sA".into()));
@@ -469,6 +471,7 @@ async fn stale_history_result_is_dropped() {
     let (client, store) = attach_with_sessions(&mock).await;
 
     let mut app = App::default();
+    app.focus = Focus::Chat; // Tab,Tab to the sidebar assumes chat boot
     app.client = Some(client);
     app.store = store;
     app.active_session = Some(SessionId("sA".into()));

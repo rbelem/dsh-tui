@@ -10,7 +10,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::json;
 
-use dsh_tui::app::{Action, App, AppEvent, EventChannel};
+use dsh_tui::app::{Action, App, AppEvent, EventChannel, Focus};
 use dsh_tui::i18n::Locale;
 use dsh_tui::render::{ChatView, ImageCache, ImageProtocol, RowCache, picker_for};
 use dsh_tui::theme::Theme;
@@ -112,6 +112,7 @@ fn three_image_events() -> Vec<SessionEvent> {
 
 fn app_with_events(events: Vec<SessionEvent>) -> App {
     let mut app = App::default();
+    app.focus = Focus::Chat; // 'v' (open the viewer) is chat-bound; boot is Composer
     app.active_session = Some(SessionId("s1".into()));
     for event in events {
         app.store.ingest(frame("s1", event)).expect("ingest");

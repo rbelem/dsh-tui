@@ -159,8 +159,10 @@ impl Scenario {
     async fn boot(mock: MockGateway) -> Self {
         let mut app = AppUnderTest::spawn(mock.port(), 120, 30);
         // Nudge: the app draws only on events; a no-op key forces the first
-        // paint (inert in every mode).
-        app.send(b"x");
+        // paint. Ctrl+O (0x0F) is unbound in every surface — inert — while
+        // plain letters type into the composer (the app boots focused
+        // there), so `x` no longer qualifies as a nudge.
+        app.send(b"\x0f");
         Scenario { mock, app }
     }
 
@@ -286,8 +288,7 @@ async fn prompt_submit_streams_response() {
             app.wait_for("attached to 127.0.0.1:", Duration::from_secs(10)),
             "attach"
         );
-        // Focus the composer, type, and submit.
-        app.send(b"\t");
+        // The app boots in the composer (input area): type and submit.
         app.send(b"hello e2e");
         app.send(b"\r");
     }
@@ -378,17 +379,25 @@ async fn approval_takeover_answers_with_echoed_rpc_id() {
         );
     }
 
-    // The gateway triggers an approval after boot.
-    assert!(
-        scenario
+    // The gateway triggers an approval after boot. The mock's pusher
+    // registers when the app's mux subscriber connects — poll the push
+    // under parallel load instead of asserting a single delivery.
+    let frame: String = r#"{"type":"server-request","rpcId":"rpc-e2e-1","method":"events.mux","payload":{"type":"approval/requested","sessionId":"sA","approvalId":"a-e2e","toolName":"read_file","callId":"call-1","reason":"reads /etc"}}"#.into();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if scenario
             .mock
-            .push_ws_frame(
-                "/api/events.mux",
-                r#"{"type":"server-request","rpcId":"rpc-e2e-1","method":"events.mux","payload":{"type":"approval/requested","sessionId":"sA","approvalId":"a-e2e","toolName":"read_file","callId":"call-1","reason":"reads /etc"}}"#.into(),
-            )
-            .await,
-        "pusher delivered"
-    );
+            .push_ws_frame("/api/events.mux", frame.clone())
+            .await
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "approval frame never delivered"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     // The takeover shows the tool name and the action hints.
     {
@@ -497,10 +506,10 @@ async fn theme_picker_opens_and_closes() {
         app.output()
     );
 
-    // Esc closes the picker: keys reach the composer again (the output is
-    // cumulative, so assert interaction rather than absence).
+    // Esc closes the picker: keys reach the composer again (the app boots
+    // focused there; the output is cumulative, so assert interaction
+    // rather than absence).
     app.send(b"\x1b");
-    app.send(b"\t"); // focus the composer
     app.send(b"hi");
     assert!(
         app.wait_for("hi", Duration::from_secs(5)),
@@ -588,9 +597,18 @@ async fn missing_dsh_port_exits_with_a_hint() {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
+    // The reader thread drains asynchronously — poll the accumulated output
+    // (a single read can race the thread under parallel load and see an
+    // empty buffer even though the child printed instantly).
     let text = {
-        let guard = output.lock().expect("output lock");
-        String::from_utf8_lossy(&guard).into_owned()
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let text = String::from_utf8_lossy(&output.lock().expect("output lock")).into_owned();
+            if text.contains("no DSH_PORT set") || Instant::now() > deadline {
+                break text;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
     };
     assert!(text.contains("no DSH_PORT set"), "hint on stderr: {text}");
     assert_eq!(status, Some(2), "exit code 2 for the no-port contract");

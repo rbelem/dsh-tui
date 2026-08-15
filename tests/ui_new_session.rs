@@ -48,8 +48,11 @@ fn workspace(id: &str, title: &str) -> WorkspaceView {
 }
 
 /// An app with two workspaces (durable order beta first) and no sessions.
+/// The picker opens with `n`, a chat/sidebar-bound key — pin the focus
+/// explicitly (the app boots in the composer).
 fn picker_app() -> App {
     let mut app = App::default();
+    app.focus = Focus::Chat;
     app.workspaces = vec![workspace("wA", "alpha"), workspace("wB", "beta")];
     app.workspace_order = vec![WorkspaceId("wB".into()), WorkspaceId("wA".into())];
     app

@@ -191,6 +191,7 @@ async fn attach_history_draw_end_to_end() {
     assert_eq!(sessions.len(), 2, "attach hands the sidebar the full list");
 
     let mut app = App::default();
+    app.focus = Focus::Chat; // the test's 'q' quit key is chat-bound (boot is Composer)
     app.store = store;
     app.active_session = opened;
     app.sessions = sessions;
@@ -233,6 +234,7 @@ async fn attach_history_draw_end_to_end() {
 #[tokio::test]
 async fn coalescing_draws_once_per_batch() {
     let mut app = App::default();
+    app.focus = Focus::Chat; // 'x' (inert) and 'q' (quit) are chat-bound (boot is Composer)
     let backend = TestBackend::new(100, 30);
     let mut term = Terminal::new(backend).unwrap();
     let mut events = Vec::new();
@@ -259,6 +261,9 @@ async fn coalescing_draws_once_per_batch() {
 fn keymap_table() {
     fn composer_focus(app: &mut App) {
         app.focus = Focus::Composer;
+    }
+    fn chat_focus(app: &mut App) {
+        app.focus = Focus::Chat;
     }
     fn sidebar_focus(app: &mut App) {
         app.focus = Focus::Sidebar;
@@ -342,17 +347,25 @@ fn keymap_table() {
     /// One binding case: setup, the key, the expected action.
     type Case = (fn(&mut App), KeyEvent, Option<Action>);
     let cases: Vec<Case> = vec![
-        // chat (default focus): scroll keys, quit, Esc no-op
-        (|_| {}, key(KeyCode::Char('q')), Some(Action::Quit)),
+        // composer (default focus): typing edits, Tab leaves, q types
+        (|_| {}, key(KeyCode::Char('q')), Some(Action::Input)),
+        (|_| {}, key(KeyCode::Char('a')), Some(Action::Input)),
+        (
+            |_| {},
+            key(KeyCode::Tab),
+            Some(Action::Focus(Focus::Sidebar)),
+        ),
+        // chat focus (explicit): scroll keys, quit, Esc no-op
+        (chat_focus, key(KeyCode::Char('q')), Some(Action::Quit)),
         // Ctrl+C: idle quits (Q15); a running turn cancels instead.
-        (|_| {}, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
+        (chat_focus, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
         (
             running_session,
             ctrl(KeyCode::Char('c')),
             Some(Action::CancelTurn),
         ),
         // Ctrl+Q quits in every mode.
-        (|_| {}, ctrl(KeyCode::Char('q')), Some(Action::Quit)),
+        (chat_focus, ctrl(KeyCode::Char('q')), Some(Action::Quit)),
         (
             running_session,
             ctrl(KeyCode::Char('q')),
@@ -362,29 +375,49 @@ fn keymap_table() {
         (approval_mode, ctrl(KeyCode::Char('q')), Some(Action::Quit)),
         // Takeover Ctrl+C stays the quit panic-button.
         (approval_mode, ctrl(KeyCode::Char('c')), Some(Action::Quit)),
-        (|_| {}, key(KeyCode::Char('j')), Some(Action::Scroll(1))),
-        (|_| {}, key(KeyCode::Down), Some(Action::Scroll(1))),
-        (|_| {}, key(KeyCode::Char('k')), Some(Action::Scroll(-1))),
-        (|_| {}, key(KeyCode::Up), Some(Action::Scroll(-1))),
+        (chat_focus, key(KeyCode::Char('j')), Some(Action::Scroll(1))),
+        (chat_focus, key(KeyCode::Down), Some(Action::Scroll(1))),
         (
-            |_| {},
+            chat_focus,
+            key(KeyCode::Char('k')),
+            Some(Action::Scroll(-1)),
+        ),
+        (chat_focus, key(KeyCode::Up), Some(Action::Scroll(-1))),
+        (
+            chat_focus,
             key(KeyCode::Char('g')),
             Some(Action::Scroll(i64::MIN)),
         ),
-        (|_| {}, key(KeyCode::Home), Some(Action::Scroll(i64::MIN))),
         (
-            |_| {},
+            chat_focus,
+            key(KeyCode::Home),
+            Some(Action::Scroll(i64::MIN)),
+        ),
+        (
+            chat_focus,
             key(KeyCode::Char('G')),
             Some(Action::Scroll(i64::MAX)),
         ),
-        (|_| {}, key(KeyCode::End), Some(Action::Scroll(i64::MAX))),
-        (|_| {}, ctrl(KeyCode::Char('d')), Some(Action::Scroll(12))),
-        (|_| {}, ctrl(KeyCode::Char('u')), Some(Action::Scroll(-12))),
-        (|_| {}, key(KeyCode::Esc), Some(Action::None)),
-        (|_| {}, key(KeyCode::Char('x')), None),
+        (
+            chat_focus,
+            key(KeyCode::End),
+            Some(Action::Scroll(i64::MAX)),
+        ),
+        (
+            chat_focus,
+            ctrl(KeyCode::Char('d')),
+            Some(Action::Scroll(12)),
+        ),
+        (
+            chat_focus,
+            ctrl(KeyCode::Char('u')),
+            Some(Action::Scroll(-12)),
+        ),
+        (chat_focus, key(KeyCode::Esc), Some(Action::None)),
+        (chat_focus, key(KeyCode::Char('x')), None),
         // Tab cycles chat → composer → sidebar → chat
         (
-            |_| {},
+            chat_focus,
             key(KeyCode::Tab),
             Some(Action::Focus(Focus::Composer)),
         ),
@@ -509,6 +542,7 @@ fn keymap_table() {
 #[tokio::test]
 async fn follow_sticks_to_bottom_until_manual_scroll() {
     let mut app = App::default();
+    app.focus = Focus::Chat; // 'x'/'j'/'q' chat keys (boot is Composer)
     app.active_session = Some(SessionId("s1".into()));
     let backend = TestBackend::new(100, 5);
     let mut term = Terminal::new(backend).unwrap();
@@ -557,6 +591,7 @@ async fn scroll_past_end_locks_the_tail_at_the_bottom() {
     // Phase 1: hammer j far past the end, then a half-page Ctrl+d. The
     // offset must STOP at the bottom-lock (unclamped it would read 200+13).
     let mut app = App::default();
+    app.focus = Focus::Chat; // j/ctrl-d/'q' are chat keys (boot is Composer)
     app.active_session = Some(SessionId("s1".into()));
     let backend = TestBackend::new(100, 30);
     let mut term = Terminal::new(backend).unwrap();
@@ -613,6 +648,7 @@ async fn scroll_past_end_locks_the_tail_at_the_bottom() {
 
     // Phase 2: scrolling UP still works from the lock (Ctrl+u from 3 → 0).
     let mut app = App::default();
+    app.focus = Focus::Chat; // j/ctrl-u/'q' are chat keys (boot is Composer)
     app.active_session = Some(SessionId("s1".into()));
     let backend = TestBackend::new(100, 30);
     let mut term = Terminal::new(backend).unwrap();
@@ -667,6 +703,7 @@ async fn no_session_attach_renders_empty_chat() {
     assert!(sessions.is_empty());
 
     let mut app = App::default();
+    app.focus = Focus::Chat; // the test's 'q' quit key is chat-bound (boot is Composer)
     app.store = store;
     app.last_error = Some("gateway has no sessions".into());
     let backend = TestBackend::new(60, 15);
@@ -696,6 +733,7 @@ async fn no_session_attach_renders_empty_chat() {
 #[tokio::test]
 async fn resize_invalidates_and_rerenders() {
     let mut app = App::default();
+    app.focus = Focus::Chat; // 'q'/'x' chat keys in both phases (boot is Composer)
     app.active_session = Some(SessionId("s1".into()));
     let long_text = "This is a fairly long paragraph line that will definitely wrap at narrower widths like sixty columns or so. And here is another sentence to make the paragraph long enough that the wrap counts differ clearly between widths.";
     let backend = TestBackend::new(100, 30);
@@ -821,7 +859,9 @@ async fn approval_pending_tracking_and_respond_echo() {
     );
 
     // The resolved frame (a pure push with its own fresh rpcId) removes the
-    // pending entry; correlation is by payload approvalId.
+    // pending entry; correlation is by payload approvalId. The phase's 'q'
+    // quit key is chat-bound (boot is Composer).
+    app.focus = Focus::Chat;
     app.running = true;
     let mut channel = EventChannel::new();
     let tx = channel.tx.clone();

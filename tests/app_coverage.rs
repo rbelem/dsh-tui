@@ -256,6 +256,7 @@ async fn queue_cancel_and_history_are_no_ops_without_a_client() {
 #[tokio::test]
 async fn catalog_settings_and_search_are_no_ops_without_a_client() {
     let mut app = app_with_session();
+    app.focus = Focus::Chat; // these surfaces are chat-focus bound (boot is Composer)
     let backend = TestBackend::new(100, 30);
     let mut term = Terminal::new(backend).unwrap();
     run_with(
@@ -1523,11 +1524,13 @@ async fn attachment_done_bad_base64_toasts_and_pickerless_is_dropped() {
 #[tokio::test]
 async fn open_image_viewer_hints_without_session_or_images() {
     let mut app = App::default();
+    app.focus = Focus::Chat; // 'v' is chat-focus bound (boot is Composer)
     // No session: 'v' hints.
     assert_eq!(app.handle_key(key(KeyCode::Char('v'))), Some(Action::None));
     assert_eq!(app.hint.as_deref(), Some("no images in this session"));
     // A session with no image blocks: same hint.
     let mut app = app_with_session();
+    app.focus = Focus::Chat;
     assert_eq!(app.handle_key(key(KeyCode::Char('v'))), Some(Action::None));
     assert_eq!(app.hint.as_deref(), Some("no images in this session"));
     assert!(matches!(app.mode, Mode::Chat));

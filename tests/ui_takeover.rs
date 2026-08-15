@@ -12,7 +12,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::json;
 
-use dsh_tui::app::{App, AppEvent, EventChannel};
+use dsh_tui::app::{App, AppEvent, EventChannel, Focus};
 use dsh_tui::client::WireClient;
 use dsh_tui::ui::takeover::Mode;
 use dsh_tui::wire::approvals::ApprovalRequestId;
@@ -285,6 +285,8 @@ async fn approval_answer_echoes_rpc_id_and_resolves() {
     assert_eq!(body["result"]["value"]["outcome"], "allowed-once");
 
     // The resolved echo arrives later: no pending entry, so no second toast.
+    // The phase's 'q' quit key is chat-bound (boot is Composer).
+    app.focus = Focus::Chat;
     app.running = true;
     run_with(
         &mut app,

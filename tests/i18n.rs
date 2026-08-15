@@ -184,9 +184,11 @@ fn locale_detection_precedence() {
 
 async fn render_zh_app(app: &mut App, term: &mut Terminal<TestBackend>, events: Vec<AppEvent>) {
     let mut channel = EventChannel::new();
+    // F1 is inert in every surface (it only forces the immediate draw);
+    // plain letters would type into the composer (boot focus).
     channel
         .tx
-        .send(AppEvent::Key(key(KeyCode::Char('x'))))
+        .send(AppEvent::Key(key(KeyCode::F(1))))
         .expect("key to force a draw");
     for event in events {
         channel.tx.send(event).expect("event channel");

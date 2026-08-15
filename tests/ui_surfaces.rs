@@ -165,7 +165,7 @@ async fn composer_typed_text_120x30() {
     app.active_session = Some(SessionId("s1".into()));
     let backend = TestBackend::new(120, 30);
     let mut term = Terminal::new(backend).unwrap();
-    let mut events = vec![AppEvent::Key(key(KeyCode::Tab))]; // chat → composer
+    let mut events = Vec::new(); // the app boots in the composer — no Tab
     type_text(&mut events, "hello world");
     draw_and_quit(&mut app, &mut term, events).await;
 
@@ -190,7 +190,7 @@ async fn slash_seed_popup_opens_120x30() {
     let mut app = App::default();
     let backend = TestBackend::new(120, 30);
     let mut term = Terminal::new(backend).unwrap();
-    let mut events = vec![AppEvent::Key(key(KeyCode::Tab))];
+    let mut events = Vec::new(); // the app boots in the composer — no Tab
     type_text(&mut events, "/");
     // No trailing Esc: it would dismiss the popup before the last draw.
     // Ctrl+C quits without redrawing, so the buffer keeps the popup draw.
@@ -268,7 +268,7 @@ async fn composer_submit_posts_session_prompt() {
     app.active_session = Some(SessionId("s1".into()));
     let backend = TestBackend::new(120, 30);
     let mut term = Terminal::new(backend).unwrap();
-    let mut events = vec![AppEvent::Key(key(KeyCode::Tab))];
+    let mut events = Vec::new(); // the app boots in the composer — no Tab
     type_text(&mut events, "hello gateway");
     events.push(AppEvent::Key(key(KeyCode::Enter)));
     events.push(AppEvent::Key(ctrl(KeyCode::Char('c'))));
@@ -377,11 +377,11 @@ async fn sidebar_enter_switches_the_active_session() {
 #[tokio::test]
 async fn tab_cycles_focus_through_all_surfaces() {
     let mut app = App::default();
-    assert_eq!(app.focus, Focus::Chat);
+    assert_eq!(app.focus, Focus::Composer, "boot focuses the input area");
     let expected = [
-        (Focus::Composer, "composer"),
         (Focus::Sidebar, "sidebar"),
         (Focus::Chat, "chat"),
+        (Focus::Composer, "composer"),
     ];
     for (focus, label) in expected {
         assert_eq!(
