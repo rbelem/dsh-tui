@@ -150,6 +150,8 @@ fn locale_detection_precedence() {
         with_env_var("LC_ALL", None, || {
             with_env_var("DSH_TUI_LOCALE", None, || {
                 assert_eq!(Locale::detect(None), Locale::Zh);
+                // A blank config value means "detect", not "zh".
+                assert_eq!(Locale::detect(Some("")), Locale::Zh);
                 // The env var beats LANG.
                 with_env_var("DSH_TUI_LOCALE", Some("en-US"), || {
                     assert_eq!(Locale::detect(None), Locale::En);
@@ -157,6 +159,15 @@ fn locale_detection_precedence() {
                     assert_eq!(Locale::detect(Some("zh")), Locale::Zh);
                     assert_eq!(Locale::detect(Some("en")), Locale::En);
                 });
+            });
+        });
+    });
+    with_env_var("LANG", Some("en_US.UTF-8"), || {
+        with_env_var("LC_ALL", None, || {
+            with_env_var("DSH_TUI_LOCALE", None, || {
+                assert_eq!(Locale::detect(None), Locale::En);
+                // The stale-zh config scenario: blank config + English system → En.
+                assert_eq!(Locale::detect(Some("")), Locale::En);
             });
         });
     });
