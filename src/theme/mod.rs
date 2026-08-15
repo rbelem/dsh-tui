@@ -199,7 +199,9 @@ fn user_themes_dir() -> Option<PathBuf> {
 }
 
 /// `$XDG_CONFIG_HOME/dsh-tui` (or `~/.config/dsh-tui`). `dirs` resolves the
-/// XDG override per call, so tests can point it at a temp dir.
+/// directory per call, so tests can point it at a temp dir — via
+/// `XDG_CONFIG_HOME` on Linux, via `HOME` on macOS (which ignores
+/// `XDG_CONFIG_HOME` and uses `~/Library/Application Support`).
 fn config_root() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("dsh-tui"))
 }

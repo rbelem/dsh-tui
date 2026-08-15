@@ -109,6 +109,50 @@ async fn draw_and_quit(app: &mut App, term: &mut Terminal<TestBackend>, events: 
 /// the tests would race each other's env mutations.
 static ENV_LOCK_XDG: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Set an env var for the duration of the closure and restore it after
+/// (edition 2024: `set_var` is unsafe; single-threaded test usage only).
+fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce()) {
+    let previous = std::env::var(key).ok();
+    // SAFETY: serialized under ENV_LOCK_XDG; restored before return.
+    match value {
+        Some(value) => unsafe { std::env::set_var(key, value) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+    f();
+    match previous {
+        Some(previous) => unsafe { std::env::set_var(key, previous) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+}
+
+/// Redirect `dirs::config_dir()` under `base` for the closure's duration and
+/// hand the closure the app config root it resolves to (`<config dir>/dsh-tui`).
+///
+/// `dirs` honors `XDG_CONFIG_HOME` only on Linux; macOS ignores it and builds
+/// `~/Library/Application Support` from `$HOME` instead, so there the test
+/// isolates by overriding `HOME`. Asserting against the resolved root (never
+/// the temp-dir literal) keeps the same test green on every platform.
+fn with_config_root(base: &std::path::Path, f: impl FnOnce(&std::path::Path)) {
+    with_env_var("XDG_CONFIG_HOME", Some(base.to_str().unwrap()), || {
+        with_home_override(base, || {
+            let root = dirs::config_dir().expect("config dir").join("dsh-tui");
+            f(&root);
+        });
+    });
+}
+
+/// On macOS `dirs` ignores `XDG_CONFIG_HOME`, so `HOME` carries the
+/// override; a no-op elsewhere.
+#[cfg(target_os = "macos")]
+fn with_home_override(base: &std::path::Path, f: impl FnOnce()) {
+    with_env_var("HOME", Some(base.join("home").to_str().unwrap()), f);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_home_override(_base: &std::path::Path, f: impl FnOnce()) {
+    f();
+}
+
 /// A fresh app with one session active (the common starting point).
 fn app_with_session() -> App {
     let mut app = App::default();
@@ -1049,83 +1093,80 @@ async fn question_takeover_promotes_after_the_approval_resolves() {
 
 #[test]
 fn theme_picker_toggle_and_apply() {
-    // Isolated XDG: applying a theme persists the config (shared lock).
+    // Isolated config dir: applying a theme persists the config (shared lock).
     let _guard = ENV_LOCK_XDG.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("dsh-tui-picker-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    // SAFETY: serialized under ENV_LOCK_XDG; restored before return.
-    unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
 
-    let mut app = app_with_session();
-    app.handle_key(ctrl(KeyCode::Char('t')));
-    assert!(app.theme_picker.open, "opened");
-    // Ctrl+T while open closes it.
-    app.handle_key(ctrl(KeyCode::Char('t')));
-    assert!(!app.theme_picker.open, "closed");
+    with_config_root(&dir, |config_root| {
+        let mut app = app_with_session();
+        app.handle_key(ctrl(KeyCode::Char('t')));
+        assert!(app.theme_picker.open, "opened");
+        // Ctrl+T while open closes it.
+        app.handle_key(ctrl(KeyCode::Char('t')));
+        assert!(!app.theme_picker.open, "closed");
 
-    // Open again, jump past the last theme (clamped), then apply.
-    app.handle_key(ctrl(KeyCode::Char('t')));
-    let last = app.themes.themes.len().saturating_sub(1);
-    for _ in 0..last + 3 {
-        app.handle_key(key(KeyCode::Char('j')));
-    }
-    assert_eq!(app.theme_picker.selected, last, "j clamps at the last");
-    app.handle_key(key(KeyCode::Char('k')));
-    assert_eq!(app.theme_picker.selected, last - 1, "k moves up");
-    app.handle_key(key(KeyCode::Enter));
-    assert!(!app.theme_picker.open, "applied");
-    assert!(
-        app.themes.themes.iter().any(|t| t.name == app.theme.name),
-        "picked theme applied: {}",
-        app.theme.name
-    );
-    assert!(
-        dir.join("dsh-tui").join("config.toml").exists(),
-        "the pick persists the config"
-    );
-    unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        // Open again, jump past the last theme (clamped), then apply.
+        app.handle_key(ctrl(KeyCode::Char('t')));
+        let last = app.themes.themes.len().saturating_sub(1);
+        for _ in 0..last + 3 {
+            app.handle_key(key(KeyCode::Char('j')));
+        }
+        assert_eq!(app.theme_picker.selected, last, "j clamps at the last");
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.theme_picker.selected, last - 1, "k moves up");
+        app.handle_key(key(KeyCode::Enter));
+        assert!(!app.theme_picker.open, "applied");
+        assert!(
+            app.themes.themes.iter().any(|t| t.name == app.theme.name),
+            "picked theme applied: {}",
+            app.theme.name
+        );
+        assert!(
+            config_root.join("config.toml").exists(),
+            "the pick persists the config"
+        );
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn ctrl_l_cycles_locale_and_toasts_on_a_failed_save() {
-    // Serialized with the other XDG-touching tests (a cross-test race wrote
-    // the REAL config once — the lock must be shared).
+    // Serialized with the other config-dir-touching tests (a cross-test race
+    // wrote the REAL config once — the lock must be shared).
     let _guard = ENV_LOCK_XDG.lock().unwrap_or_else(|e| e.into_inner());
 
     // Cycle into zh with an isolated config dir.
     let dir = std::env::temp_dir().join(format!("dsh-tui-cov-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    // SAFETY: serialized under ENV_LOCK_XDG; restored before return.
-    unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
-    let mut app = app_with_session();
-    app.handle_key(ctrl(KeyCode::Char('l')));
-    assert_eq!(app.locale, dsh_tui::i18n::Locale::Zh, "cycled");
-    assert_eq!(app.toast_text(), Some("语言：中文"), "zh toast");
-    // The config persisted.
-    let config_path = dir.join("dsh-tui").join("config.toml");
-    assert!(config_path.exists(), "config persisted");
-    unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+    with_config_root(&dir, |config_root| {
+        let mut app = app_with_session();
+        app.handle_key(ctrl(KeyCode::Char('l')));
+        assert_eq!(app.locale, dsh_tui::i18n::Locale::Zh, "cycled");
+        assert_eq!(app.toast_text(), Some("语言：中文"), "zh toast");
+        // The config persisted.
+        assert!(config_root.join("config.toml").exists(), "config persisted");
+    });
+    let _ = std::fs::remove_dir_all(&dir);
 
     // A config dir that is a FILE makes the save fail → toast.
     let file = std::env::temp_dir().join(format!("dsh-tui-cov-file-{}", std::process::id()));
     let _ = std::fs::remove_file(&file);
     std::fs::write(&file, "x").expect("write file");
-    unsafe { std::env::set_var("XDG_CONFIG_HOME", &file) };
-    let mut app = app_with_session();
-    app.handle_key(ctrl(KeyCode::Char('l')));
-    // cycle_locale's failure arm runs BEFORE the locale toast replaces it —
-    // assert the save truly failed (no config file could be written under a
-    // FILE-shaped XDG dir) and the cycle still completed.
-    assert_eq!(app.locale, dsh_tui::i18n::Locale::Zh, "cycle completed");
-    assert!(
-        !file.join("dsh-tui").join("config.toml").exists(),
-        "the failed save wrote nothing"
-    );
-    unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
-    let _ = std::fs::remove_dir_all(&dir);
+    with_config_root(&file, |config_root| {
+        let mut app = app_with_session();
+        app.handle_key(ctrl(KeyCode::Char('l')));
+        // cycle_locale's failure arm runs BEFORE the locale toast replaces it —
+        // assert the save truly failed (no config file could be written under a
+        // FILE-shaped config dir) and the cycle still completed.
+        assert_eq!(app.locale, dsh_tui::i18n::Locale::Zh, "cycle completed");
+        assert!(
+            !config_root.join("config.toml").exists(),
+            "the failed save wrote nothing"
+        );
+    });
     let _ = std::fs::remove_file(&file);
 }
 
@@ -1291,63 +1332,62 @@ async fn queue_popup_editor_commits_cancels_and_guards() {
 
 #[tokio::test]
 async fn launcher_arms_dispatch_and_guard() {
-    // The locale action persists the config — isolate XDG (shared lock).
+    // The locale action persists the config — isolate the config dir (shared
+    // lock).
     let _guard = ENV_LOCK_XDG.lock().unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!("dsh-tui-launcher-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("temp dir");
-    // SAFETY: serialized under ENV_LOCK_XDG; restored before return.
-    unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
 
-    let mut app = app_with_session();
-    app.handle_key(ctrl(KeyCode::Char('p')));
-    // Enter with an empty match list is a no-op.
-    app.handle_key(key(KeyCode::Char('z')));
-    app.handle_key(key(KeyCode::Char('z')));
-    app.handle_key(key(KeyCode::Char('z')));
-    assert_eq!(app.handle_key(key(KeyCode::Enter)), Some(Action::None));
-    // Backspace empties the search and resets the selection.
-    app.handle_key(key(KeyCode::Backspace));
-    app.handle_key(key(KeyCode::Backspace));
-    app.handle_key(key(KeyCode::Backspace));
-    assert_eq!(app.launcher.as_ref().unwrap().search.buffer(), "");
-    // An inert key while open.
-    app.handle_key(key(KeyCode::Home));
-    assert!(app.launcher.is_some());
+    with_config_root(&dir, |_config_root| {
+        let mut app = app_with_session();
+        app.handle_key(ctrl(KeyCode::Char('p')));
+        // Enter with an empty match list is a no-op.
+        app.handle_key(key(KeyCode::Char('z')));
+        app.handle_key(key(KeyCode::Char('z')));
+        app.handle_key(key(KeyCode::Char('z')));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Some(Action::None));
+        // Backspace empties the search and resets the selection.
+        app.handle_key(key(KeyCode::Backspace));
+        app.handle_key(key(KeyCode::Backspace));
+        app.handle_key(key(KeyCode::Backspace));
+        assert_eq!(app.launcher.as_ref().unwrap().search.buffer(), "");
+        // An inert key while open.
+        app.handle_key(key(KeyCode::Home));
+        assert!(app.launcher.is_some());
 
-    // The settings action opens the settings view.
-    app.handle_key(key(KeyCode::Char('s')));
-    app.handle_key(key(KeyCode::Char('e')));
-    app.handle_key(key(KeyCode::Char('t')));
-    app.handle_key(key(KeyCode::Char('t')));
-    app.handle_key(key(KeyCode::Char('i')));
-    app.handle_key(key(KeyCode::Char('n')));
-    app.handle_key(key(KeyCode::Char('g')));
-    app.handle_key(key(KeyCode::Char('s')));
-    app.handle_key(key(KeyCode::Enter));
-    assert!(matches!(app.mode, Mode::Settings(_)), "settings opened");
-    app.mode = Mode::Chat;
+        // The settings action opens the settings view.
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Char('e')));
+        app.handle_key(key(KeyCode::Char('t')));
+        app.handle_key(key(KeyCode::Char('t')));
+        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_key(key(KeyCode::Char('n')));
+        app.handle_key(key(KeyCode::Char('g')));
+        app.handle_key(key(KeyCode::Char('s')));
+        app.handle_key(key(KeyCode::Enter));
+        assert!(matches!(app.mode, Mode::Settings(_)), "settings opened");
+        app.mode = Mode::Chat;
 
-    // The locale action cycles.
-    app.handle_key(ctrl(KeyCode::Char('p')));
-    app.handle_key(key(KeyCode::Char('l')));
-    app.handle_key(key(KeyCode::Char('o')));
-    app.handle_key(key(KeyCode::Char('c')));
-    app.handle_key(key(KeyCode::Char('a')));
-    app.handle_key(key(KeyCode::Char('l')));
-    app.handle_key(key(KeyCode::Char('e')));
-    app.handle_key(key(KeyCode::Enter));
-    assert_eq!(app.locale, dsh_tui::i18n::Locale::Zh, "locale cycled");
-    app.locale = dsh_tui::i18n::Locale::En; // labels are localized
-    // The quit action.
-    app.handle_key(ctrl(KeyCode::Char('p')));
-    app.handle_key(key(KeyCode::Char('q')));
-    app.handle_key(key(KeyCode::Char('u')));
-    app.handle_key(key(KeyCode::Char('i')));
-    app.handle_key(key(KeyCode::Char('t')));
-    assert_eq!(app.handle_key(key(KeyCode::Enter)), Some(Action::Quit));
-
-    unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        // The locale action cycles.
+        app.handle_key(ctrl(KeyCode::Char('p')));
+        app.handle_key(key(KeyCode::Char('l')));
+        app.handle_key(key(KeyCode::Char('o')));
+        app.handle_key(key(KeyCode::Char('c')));
+        app.handle_key(key(KeyCode::Char('a')));
+        app.handle_key(key(KeyCode::Char('l')));
+        app.handle_key(key(KeyCode::Char('e')));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.locale, dsh_tui::i18n::Locale::Zh, "locale cycled");
+        app.locale = dsh_tui::i18n::Locale::En; // labels are localized
+        // The quit action.
+        app.handle_key(ctrl(KeyCode::Char('p')));
+        app.handle_key(key(KeyCode::Char('q')));
+        app.handle_key(key(KeyCode::Char('u')));
+        app.handle_key(key(KeyCode::Char('i')));
+        app.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(app.handle_key(key(KeyCode::Enter)), Some(Action::Quit));
+    });
     let _ = std::fs::remove_dir_all(&dir);
 }
 

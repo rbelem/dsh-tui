@@ -68,6 +68,60 @@ fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce()) {
     }
 }
 
+/// Redirect `dirs::config_dir()` under `base` for the closure's duration and
+/// hand the closure the app config root it resolves to (`<config dir>/dsh-tui`).
+///
+/// `dirs` honors `XDG_CONFIG_HOME` only on Linux; macOS ignores it and builds
+/// `~/Library/Application Support` from `$HOME` instead, so there the test
+/// isolates by overriding `HOME`.
+fn with_config_root(base: &std::path::Path, f: impl FnOnce(&std::path::Path)) {
+    with_env_var("XDG_CONFIG_HOME", Some(base.to_str().unwrap()), || {
+        with_home_override(base, || {
+            let root = dirs::config_dir().expect("config dir").join("dsh-tui");
+            f(&root);
+        });
+    });
+}
+
+/// On macOS `dirs` ignores `XDG_CONFIG_HOME`, so `HOME` carries the
+/// override; a no-op elsewhere.
+#[cfg(target_os = "macos")]
+fn with_home_override(base: &std::path::Path, f: impl FnOnce()) {
+    with_env_var("HOME", Some(base.join("home").to_str().unwrap()), f);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_home_override(_base: &std::path::Path, f: impl FnOnce()) {
+    f();
+}
+
+/// Like [`with_config_root`] for async bodies: the env stays redirected
+/// while the future runs (the run loop reads the config mid-await).
+async fn with_config_root_async(
+    base: &std::path::Path,
+    f: impl std::future::Future<Output = ()>,
+) {
+    let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+    // SAFETY: serialized under ENV_LOCK; restored before return.
+    unsafe { std::env::set_var("XDG_CONFIG_HOME", base.to_str().unwrap()) };
+    #[cfg(target_os = "macos")]
+    let prev_home = std::env::var("HOME").ok();
+    #[cfg(target_os = "macos")]
+    unsafe { std::env::set_var("HOME", base.join("home").to_str().unwrap()) };
+
+    f.await;
+
+    match prev_xdg {
+        Some(previous) => unsafe { std::env::set_var("XDG_CONFIG_HOME", previous) },
+        None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+    }
+    #[cfg(target_os = "macos")]
+    match prev_home {
+        Some(previous) => unsafe { std::env::set_var("HOME", previous) },
+        None => unsafe { std::env::remove_var("HOME") },
+    }
+}
+
 struct TempDir(std::path::PathBuf);
 
 impl TempDir {
@@ -344,9 +398,8 @@ fn cjk_paragraph_wraps_by_width() {
 #[test]
 fn ctrl_l_cycles_and_persists() {
     let dir = TempDir::new("locale");
-    std::fs::create_dir_all(dir.0.join("dsh-tui")).expect("config dir");
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    with_env_var("XDG_CONFIG_HOME", Some(dir.0.to_str().unwrap()), || {
+    with_config_root(&dir.0, |_config_root| {
         let mut app = App::default();
         assert_eq!(app.locale, Locale::En);
         // En → Zh.
@@ -399,66 +452,61 @@ fn ctrl_l_is_inert_in_settings_and_takeovers() {
 #[allow(clippy::await_holding_lock)]
 async fn settings_locale_save_syncs_app() {
     let dir = TempDir::new("settings-locale");
-    std::fs::create_dir_all(dir.0.join("dsh-tui")).expect("config dir");
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let previous = std::env::var("XDG_CONFIG_HOME").ok();
-    // SAFETY: under ENV_LOCK; restored before the test returns.
-    unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.0.to_str().unwrap()) };
-
-    async fn sync(app: &mut App, language: &str) {
-        let view = dsh_tui::wire::settings::SettingsNamespaceView {
-            ns: "locale".into(),
-            schema: json!({}),
-            value: json!({"language": language}),
-            base: None,
-            user: None,
-            applies: dsh_tui::wire::settings::AppliesMode::Live,
-            secrets: vec![],
-            revision: 1.0,
-        };
-        let mut channel = EventChannel::new();
-        channel
-            .tx
-            .send(AppEvent::SettingsSaveDone {
+    with_config_root_async(&dir.0, async {
+        async fn sync(app: &mut App, language: &str) {
+            let view = dsh_tui::wire::settings::SettingsNamespaceView {
                 ns: "locale".into(),
-                result: Ok(view),
-            })
-            .expect("event");
-        channel
-            .tx
-            .send(AppEvent::Key(ctrl(KeyCode::Char('q'))))
-            .expect("quit");
-        let backend = TestBackend::new(120, 30);
-        let mut term = Terminal::new(backend).unwrap();
-        app.run(&mut term, &mut channel).await.expect("run");
-    }
+                schema: json!({}),
+                value: json!({"language": language}),
+                base: None,
+                user: None,
+                applies: dsh_tui::wire::settings::AppliesMode::Live,
+                secrets: vec![],
+                revision: 1.0,
+            };
+            let mut channel = EventChannel::new();
+            channel
+                .tx
+                .send(AppEvent::SettingsSaveDone {
+                    ns: "locale".into(),
+                    result: Ok(view),
+                })
+                .expect("event");
+            channel
+                .tx
+                .send(AppEvent::Key(ctrl(KeyCode::Char('q'))))
+                .expect("quit");
+            let backend = TestBackend::new(120, 30);
+            let mut term = Terminal::new(backend).unwrap();
+            app.run(&mut term, &mut channel).await.expect("run");
+        }
 
-    let mut app = App::default();
-    app.mode = dsh_tui::ui::takeover::Mode::Settings(dsh_tui::ui::settings::SettingsState::new());
-    sync(&mut app, "zh").await;
-    assert_eq!(
-        app.locale,
-        Locale::Zh,
-        "locale namespace save syncs App.locale"
-    );
-    assert_eq!(
-        Config::load().locale.as_deref(),
-        Some("zh"),
-        "config written"
-    );
-    assert!(
-        matches!(app.mode, dsh_tui::ui::takeover::Mode::Chat),
-        "back to chat"
-    );
+        let mut app = App::default();
+        app.mode =
+            dsh_tui::ui::takeover::Mode::Settings(dsh_tui::ui::settings::SettingsState::new());
+        sync(&mut app, "zh").await;
+        assert_eq!(
+            app.locale,
+            Locale::Zh,
+            "locale namespace save syncs App.locale"
+        );
+        assert_eq!(
+            Config::load().locale.as_deref(),
+            Some("zh"),
+            "config written"
+        );
+        assert!(
+            matches!(app.mode, dsh_tui::ui::takeover::Mode::Chat),
+            "back to chat"
+        );
 
-    // A non-locale value in the locale namespace is ignored.
-    let mut app = App::default();
-    app.mode = dsh_tui::ui::takeover::Mode::Settings(dsh_tui::ui::settings::SettingsState::new());
-    sync(&mut app, "klingon").await;
-    assert_eq!(app.locale, Locale::En, "non-locale value ignored");
-
-    match previous {
-        Some(previous) => unsafe { std::env::set_var("XDG_CONFIG_HOME", previous) },
-        None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
-    }
+        // A non-locale value in the locale namespace is ignored.
+        let mut app = App::default();
+        app.mode =
+            dsh_tui::ui::takeover::Mode::Settings(dsh_tui::ui::settings::SettingsState::new());
+        sync(&mut app, "klingon").await;
+        assert_eq!(app.locale, Locale::En, "non-locale value ignored");
+    })
+    .await;
 }

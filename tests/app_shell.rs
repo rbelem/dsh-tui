@@ -576,7 +576,11 @@ fn keymap_table() {
         // `[keymap]` overrides replace the default bindings.
         (custom_quit, ctrl(KeyCode::Char('d')), Some(Action::Quit)),
         (custom_quit, ctrl(KeyCode::Char('q')), Some(Action::None)),
-        (custom_backspace, ctrl(KeyCode::Char('h')), Some(Action::Input)),
+        (
+            custom_backspace,
+            ctrl(KeyCode::Char('h')),
+            Some(Action::Input),
+        ),
         (
             custom_backspace,
             key(KeyCode::Backspace),

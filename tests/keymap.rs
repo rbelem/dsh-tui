@@ -51,7 +51,10 @@ fn modifiers_match_exactly() {
     assert!(!km.matches("quit", key(KeyCode::Char('q'))));
     assert!(!km.matches(
         "quit",
-        KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        KeyEvent::new(
+            KeyCode::Char('Q'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT
+        )
     ));
     // a bare enter is not a newline
     assert!(!km.matches("composer.newline", key(KeyCode::Enter)));
@@ -119,7 +122,11 @@ quit = "ctrl+d"
     assert!(config.keymap.matches("quit", ctrl(KeyCode::Char('d'))));
     assert!(!config.keymap.matches("quit", ctrl(KeyCode::Char('q'))));
     // unspecified actions keep their defaults
-    assert!(config.keymap.matches("composer.submit", key(KeyCode::Enter)));
+    assert!(
+        config
+            .keymap
+            .matches("composer.submit", key(KeyCode::Enter))
+    );
     assert_eq!(config.keymap.configured("quit"), Some("ctrl+d"));
     // a save round-trip is stable
     let text = toml::to_string(&config).expect("config serializes");

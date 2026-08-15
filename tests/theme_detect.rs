@@ -61,6 +61,33 @@ fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce()) {
     }
 }
 
+/// Redirect `dirs::config_dir()` under `base` for the closure's duration and
+/// hand the closure the app config root it resolves to (`<config dir>/dsh-tui`).
+///
+/// `dirs` honors `XDG_CONFIG_HOME` only on Linux; macOS ignores it and builds
+/// `~/Library/Application Support` from `$HOME` instead, so there the test
+/// isolates by overriding `HOME`.
+fn with_config_root(base: &std::path::Path, f: impl FnOnce(&std::path::Path)) {
+    with_env_var("XDG_CONFIG_HOME", Some(base.to_str().unwrap()), || {
+        with_home_override(base, || {
+            let root = dirs::config_dir().expect("config dir").join("dsh-tui");
+            f(&root);
+        });
+    });
+}
+
+/// On macOS `dirs` ignores `XDG_CONFIG_HOME`, so `HOME` carries the
+/// override; a no-op elsewhere.
+#[cfg(target_os = "macos")]
+fn with_home_override(base: &std::path::Path, f: impl FnOnce()) {
+    with_env_var("HOME", Some(base.join("home").to_str().unwrap()), f);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_home_override(_base: &std::path::Path, f: impl FnOnce()) {
+    f();
+}
+
 // ---------------------------------------------------------------------------
 // OSC 11 parsing
 // ---------------------------------------------------------------------------
@@ -191,54 +218,42 @@ fn env_signal_via_colorfgbg() {
 #[test]
 fn config_theme_wins_over_detection() {
     let dir = TempDir::new("detect-config");
-    std::fs::create_dir_all(dir.path().join("dsh-tui")).expect("config dir");
-    std::fs::write(
-        dir.path().join("dsh-tui").join("config.toml"),
-        "theme = \"nord\"\n",
-    )
-    .expect("write config");
 
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    with_env_var(
-        "XDG_CONFIG_HOME",
-        Some(dir.path().to_str().unwrap()),
-        || {
-            with_env_var("COLORTERM", Some("truecolor"), || {
-                with_env_var("GTK_THEME", Some("Adwaita:dark"), || {
-                    let mut app = App::default();
-                    app.load_theme_config();
-                    assert_eq!(app.theme.name, "nord");
-                    assert_eq!(app.config.theme.as_deref(), Some("nord"));
-                });
+    with_config_root(dir.path(), |config_root| {
+        std::fs::create_dir_all(config_root).expect("config dir");
+        std::fs::write(config_root.join("config.toml"), "theme = \"nord\"\n")
+            .expect("write config");
+        with_env_var("COLORTERM", Some("truecolor"), || {
+            with_env_var("GTK_THEME", Some("Adwaita:dark"), || {
+                let mut app = App::default();
+                app.load_theme_config();
+                assert_eq!(app.theme.name, "nord");
+                assert_eq!(app.config.theme.as_deref(), Some("nord"));
             });
-        },
-    );
+        });
+    });
 }
 
 #[test]
 fn detection_picks_frappe_for_dark() {
     let dir = TempDir::new("detect-dark");
-    std::fs::create_dir_all(dir.path().join("dsh-tui")).expect("config dir");
 
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    with_env_var(
-        "XDG_CONFIG_HOME",
-        Some(dir.path().to_str().unwrap()),
-        || {
-            with_env_var("COLORTERM", Some("truecolor"), || {
-                // Dark scheme → catppuccin frappe.
-                with_env_var("GTK_THEME", Some("Adwaita:dark"), || {
-                    let mut app = App::default();
-                    app.load_theme_config();
-                    assert_eq!(app.theme.name, "catppuccin-frappe");
-                });
-                // Light scheme → catppuccin latte.
-                with_env_var("GTK_THEME", Some("Adwaita:light"), || {
-                    let mut app = App::default();
-                    app.load_theme_config();
-                    assert_eq!(app.theme.name, "catppuccin-latte");
-                });
+    with_config_root(dir.path(), |_config_root| {
+        with_env_var("COLORTERM", Some("truecolor"), || {
+            // Dark scheme → catppuccin frappe.
+            with_env_var("GTK_THEME", Some("Adwaita:dark"), || {
+                let mut app = App::default();
+                app.load_theme_config();
+                assert_eq!(app.theme.name, "catppuccin-frappe");
             });
-        },
-    );
+            // Light scheme → catppuccin latte.
+            with_env_var("GTK_THEME", Some("Adwaita:light"), || {
+                let mut app = App::default();
+                app.load_theme_config();
+                assert_eq!(app.theme.name, "catppuccin-latte");
+            });
+        });
+    });
 }

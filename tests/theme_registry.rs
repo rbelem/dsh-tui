@@ -147,6 +147,33 @@ fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce()) {
     }
 }
 
+/// Redirect `dirs::config_dir()` under `base` for the closure's duration and
+/// hand the closure the app config root it resolves to (`<config dir>/dsh-tui`).
+///
+/// `dirs` honors `XDG_CONFIG_HOME` only on Linux; macOS ignores it and builds
+/// `~/Library/Application Support` from `$HOME` instead, so there the test
+/// isolates by overriding `HOME`.
+fn with_config_root(base: &std::path::Path, f: impl FnOnce(&std::path::Path)) {
+    with_env_var("XDG_CONFIG_HOME", Some(base.to_str().unwrap()), || {
+        with_home_override(base, || {
+            let root = dirs::config_dir().expect("config dir").join("dsh-tui");
+            f(&root);
+        });
+    });
+}
+
+/// On macOS `dirs` ignores `XDG_CONFIG_HOME`, so `HOME` carries the
+/// override; a no-op elsewhere.
+#[cfg(target_os = "macos")]
+fn with_home_override(base: &std::path::Path, f: impl FnOnce()) {
+    with_env_var("HOME", Some(base.join("home").to_str().unwrap()), f);
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_home_override(_base: &std::path::Path, f: impl FnOnce()) {
+    f();
+}
+
 // ---------------------------------------------------------------------------
 // bundled registry
 // ---------------------------------------------------------------------------
@@ -312,18 +339,20 @@ fn default_theme_render_is_unchanged() {
 #[test]
 fn user_dir_loads_valid_and_skips_corrupt() {
     let dir = TempDir::new("themes");
-    let themes_dir = dir.path().join("dsh-tui").join("themes");
-    std::fs::create_dir_all(&themes_dir).expect("themes dir");
-    // A valid user theme that replaces a bundled name.
-    std::fs::write(
-        themes_dir.join("catppuccin-mocha.toml"),
-        include_str!("../themes/catppuccin-mocha.toml").replace("#89b4fa", "#000001"),
-    )
-    .expect("write valid");
-    // A brand-new user theme.
-    std::fs::write(
-        themes_dir.join("mine.toml"),
-        r##"
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_config_root(dir.path(), |config_root| {
+        let themes_dir = config_root.join("themes");
+        std::fs::create_dir_all(&themes_dir).expect("themes dir");
+        // A valid user theme that replaces a bundled name.
+        std::fs::write(
+            themes_dir.join("catppuccin-mocha.toml"),
+            include_str!("../themes/catppuccin-mocha.toml").replace("#89b4fa", "#000001"),
+        )
+        .expect("write valid");
+        // A brand-new user theme.
+        std::fs::write(
+            themes_dir.join("mine.toml"),
+            r##"
 name = "mine"
 accent = "#010203"
 muted = "#040506"
@@ -334,39 +363,34 @@ code = "#101112"
 bg = "#131415"
 text = "#161718"
 "##,
-    )
-    .expect("write mine");
-    // A corrupt theme: skipped, not fatal.
-    std::fs::write(
-        themes_dir.join("broken.toml"),
-        "name = \"broken\"\naccent = \"nope\"",
-    )
-    .expect("write broken");
-    std::fs::write(themes_dir.join("also-broken.toml"), "not toml at all").expect("write broken2");
+        )
+        .expect("write mine");
+        // A corrupt theme: skipped, not fatal.
+        std::fs::write(
+            themes_dir.join("broken.toml"),
+            "name = \"broken\"\naccent = \"nope\"",
+        )
+        .expect("write broken");
+        std::fs::write(themes_dir.join("also-broken.toml"), "not toml at all")
+            .expect("write broken2");
 
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    with_env_var(
-        "XDG_CONFIG_HOME",
-        Some(dir.path().to_str().unwrap()),
-        || {
-            let mut registry = ThemeRegistry::bundled();
-            registry.load_user_dir();
-            let mocha = registry
-                .find("catppuccin-mocha")
-                .expect("bundled name still present");
-            assert_eq!(
-                mocha.accent,
-                Color::Rgb(0x00, 0x00, 0x01),
-                "user theme replaced the bundled entry"
-            );
-            let mine = registry.find("mine").expect("new user theme loaded");
-            assert_eq!(mine.text, Color::Rgb(0x16, 0x17, 0x18));
-            assert!(
-                registry.find("broken").is_none(),
-                "corrupt themes are skipped"
-            );
-        },
-    );
+        let mut registry = ThemeRegistry::bundled();
+        registry.load_user_dir();
+        let mocha = registry
+            .find("catppuccin-mocha")
+            .expect("bundled name still present");
+        assert_eq!(
+            mocha.accent,
+            Color::Rgb(0x00, 0x00, 0x01),
+            "user theme replaced the bundled entry"
+        );
+        let mine = registry.find("mine").expect("new user theme loaded");
+        assert_eq!(mine.text, Color::Rgb(0x16, 0x17, 0x18));
+        assert!(
+            registry.find("broken").is_none(),
+            "corrupt themes are skipped"
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -376,53 +400,48 @@ text = "#161718"
 #[test]
 fn config_write_read_back_and_apply() {
     let dir = TempDir::new("config");
-    let config_dir = dir.path().join("dsh-tui");
-    std::fs::create_dir_all(&config_dir).expect("config dir");
 
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    with_env_var(
-        "XDG_CONFIG_HOME",
-        Some(dir.path().to_str().unwrap()),
-        || {
-            // Missing config → default (no theme).
-            assert_eq!(Config::load(), Config::default());
+    with_config_root(dir.path(), |config_root| {
+        std::fs::create_dir_all(config_root).expect("config dir");
+        // Missing config → default (no theme).
+        assert_eq!(Config::load(), Config::default());
 
-            // Write → read back.
-            let config = Config {
-                theme: Some("catppuccin-mocha".into()),
-                locale: None,
-                keymap: dsh_tui::theme::Keymap::default(),
-            };
-            config.save().expect("save");
-            let path = Config::path().expect("config path");
-            assert!(path.exists(), "config file written");
-            assert_eq!(Config::load(), config, "read-back matches");
+        // Write → read back.
+        let config = Config {
+            theme: Some("catppuccin-mocha".into()),
+            locale: None,
+            keymap: dsh_tui::theme::Keymap::default(),
+        };
+        config.save().expect("save");
+        let path = Config::path().expect("config path");
+        assert!(path.exists(), "config file written");
+        assert_eq!(Config::load(), config, "read-back matches");
 
-            // Apply via the app startup path (needs a truecolor terminal).
-            let mut app = App::default();
-            with_env_var("COLORTERM", Some("truecolor"), || {
-                app.load_theme_config();
-            });
-            assert_eq!(app.theme.name, "catppuccin-mocha");
-            assert_eq!(app.config, config);
-            assert!(
-                app.themes.find("catppuccin-mocha").is_some(),
-                "registry has the theme"
-            );
+        // Apply via the app startup path (needs a truecolor terminal).
+        let mut app = App::default();
+        with_env_var("COLORTERM", Some("truecolor"), || {
+            app.load_theme_config();
+        });
+        assert_eq!(app.theme.name, "catppuccin-mocha");
+        assert_eq!(app.config, config);
+        assert!(
+            app.themes.find("catppuccin-mocha").is_some(),
+            "registry has the theme"
+        );
 
-            // Without truecolor, the config theme is not applied (terminal-
-            // following default stays).
-            let mut app = App::default();
-            with_env_var("COLORTERM", None, || {
-                assert!(!terminal_supports_color());
-                app.load_theme_config();
-            });
-            assert_eq!(
-                app.theme.name, "default",
-                "Reset-based neutral without COLORTERM"
-            );
-        },
-    );
+        // Without truecolor, the config theme is not applied (terminal-
+        // following default stays).
+        let mut app = App::default();
+        with_env_var("COLORTERM", None, || {
+            assert!(!terminal_supports_color());
+            app.load_theme_config();
+        });
+        assert_eq!(
+            app.theme.name, "default",
+            "Reset-based neutral without COLORTERM"
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -440,68 +459,63 @@ fn ctrl(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
 #[test]
 fn picker_opens_applies_and_closes() {
     let dir = TempDir::new("picker-config");
-    std::fs::create_dir_all(dir.path().join("dsh-tui")).expect("config dir");
 
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    with_env_var(
-        "XDG_CONFIG_HOME",
-        Some(dir.path().to_str().unwrap()),
-        || {
-            let mut app = App::default();
-            assert!(!app.theme_picker.open);
+    with_config_root(dir.path(), |_config_root| {
+        let mut app = App::default();
+        assert!(!app.theme_picker.open);
 
-            // Ctrl+T opens with the current theme preselected (default → index 0
-            // since "default" is not in the registry).
-            assert_eq!(
-                app.handle_key(ctrl(crossterm::event::KeyCode::Char('t'))),
-                Some(Action::None)
-            );
-            assert!(app.theme_picker.open);
-            assert_eq!(app.theme_picker.selected, 0);
+        // Ctrl+T opens with the current theme preselected (default → index 0
+        // since "default" is not in the registry).
+        assert_eq!(
+            app.handle_key(ctrl(crossterm::event::KeyCode::Char('t'))),
+            Some(Action::None)
+        );
+        assert!(app.theme_picker.open);
+        assert_eq!(app.theme_picker.selected, 0);
 
-            // Down moves; the picker swallows other keys.
-            assert_eq!(
-                app.handle_key(key(crossterm::event::KeyCode::Down)),
-                Some(Action::None)
-            );
-            assert_eq!(app.theme_picker.selected, 1);
-            assert_eq!(
-                app.handle_key(key(crossterm::event::KeyCode::Char('q'))),
-                Some(Action::None)
-            );
-            assert!(app.theme_picker.open, "q is inert while the picker is open");
+        // Down moves; the picker swallows other keys.
+        assert_eq!(
+            app.handle_key(key(crossterm::event::KeyCode::Down)),
+            Some(Action::None)
+        );
+        assert_eq!(app.theme_picker.selected, 1);
+        assert_eq!(
+            app.handle_key(key(crossterm::event::KeyCode::Char('q'))),
+            Some(Action::None)
+        );
+        assert!(app.theme_picker.open, "q is inert while the picker is open");
 
-            // Enter applies live, persists, and closes.
-            let picked = app.themes.themes[1].name.clone();
-            app.handle_key(key(crossterm::event::KeyCode::Enter));
-            assert!(!app.theme_picker.open, "picker closed after apply");
-            assert_eq!(app.theme.name, picked, "theme applied live");
-            assert_eq!(app.config.theme.as_deref(), Some(picked.as_str()));
-            let saved = Config::load();
-            assert_eq!(
-                saved.theme.as_deref(),
-                Some(picked.as_str()),
-                "choice persisted"
-            );
+        // Enter applies live, persists, and closes.
+        let picked = app.themes.themes[1].name.clone();
+        app.handle_key(key(crossterm::event::KeyCode::Enter));
+        assert!(!app.theme_picker.open, "picker closed after apply");
+        assert_eq!(app.theme.name, picked, "theme applied live");
+        assert_eq!(app.config.theme.as_deref(), Some(picked.as_str()));
+        let saved = Config::load();
+        assert_eq!(
+            saved.theme.as_deref(),
+            Some(picked.as_str()),
+            "choice persisted"
+        );
 
-            // Reopen: the current theme is preselected; Esc closes without
-            // applying a change.
-            app.handle_key(ctrl(crossterm::event::KeyCode::Char('t')));
-            assert!(app.theme_picker.open);
-            assert_eq!(
-                app.theme_picker.selected,
-                app.themes
-                    .themes
-                    .iter()
-                    .position(|t| t.name == app.theme.name)
-                    .unwrap_or(0),
-                "current theme preselected"
-            );
-            app.handle_key(key(crossterm::event::KeyCode::Esc));
-            assert!(!app.theme_picker.open);
-            assert_eq!(app.theme.name, picked, "Esc did not change the theme");
-        },
-    );
+        // Reopen: the current theme is preselected; Esc closes without
+        // applying a change.
+        app.handle_key(ctrl(crossterm::event::KeyCode::Char('t')));
+        assert!(app.theme_picker.open);
+        assert_eq!(
+            app.theme_picker.selected,
+            app.themes
+                .themes
+                .iter()
+                .position(|t| t.name == app.theme.name)
+                .unwrap_or(0),
+            "current theme preselected"
+        );
+        app.handle_key(key(crossterm::event::KeyCode::Esc));
+        assert!(!app.theme_picker.open);
+        assert_eq!(app.theme.name, picked, "Esc did not change the theme");
+    });
 }
 
 #[test]
@@ -556,16 +570,16 @@ fn picker_renders_a_listing() {
 #[test]
 fn load_user_dir_tolerates_missing_or_file_xdg() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // No XDG_CONFIG_HOME at all: the user dir lookup gives up.
+    // No config dir at all: the user dir lookup gives up.
     with_env_var("XDG_CONFIG_HOME", None, || {
         let mut registry = ThemeRegistry::bundled();
         registry.load_user_dir(); // no panic, no-op
     });
-    // XDG pointing at a FILE: read_dir fails → tolerated.
+    // A FILE-shaped config dir: read_dir fails → tolerated.
     let file = std::env::temp_dir().join(format!("dsh-tui-xdg-file-{}", std::process::id()));
     let _ = std::fs::remove_file(&file);
     std::fs::write(&file, "x").expect("write");
-    with_env_var("XDG_CONFIG_HOME", Some(file.to_str().unwrap()), || {
+    with_config_root(&file, |_config_root| {
         let mut registry = ThemeRegistry::bundled();
         registry.load_user_dir();
     });
@@ -575,44 +589,29 @@ fn load_user_dir_tolerates_missing_or_file_xdg() {
 #[test]
 fn load_user_dir_skips_non_toml_files() {
     let dir = TempDir::new("non-toml");
-    let themes_dir = dir.path().join("dsh-tui").join("themes");
-    std::fs::create_dir_all(&themes_dir).expect("themes dir");
-    std::fs::write(themes_dir.join("notes.txt"), "not a theme").expect("write txt");
-
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    with_env_var(
-        "XDG_CONFIG_HOME",
-        Some(dir.path().to_str().unwrap()),
-        || {
-            let mut registry = ThemeRegistry::bundled();
-            registry.load_user_dir(); // the .txt is skipped, no panic
-        },
-    );
+    with_config_root(dir.path(), |config_root| {
+        let themes_dir = config_root.join("themes");
+        std::fs::create_dir_all(&themes_dir).expect("themes dir");
+        std::fs::write(themes_dir.join("notes.txt"), "not a theme").expect("write txt");
+
+        let mut registry = ThemeRegistry::bundled();
+        registry.load_user_dir(); // the .txt is skipped, no panic
+    });
 }
 
 #[test]
 fn config_load_tolerates_missing_and_corrupt_files() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = TempDir::new("config-load");
-    // No config file in an otherwise-empty XDG dir: the default.
-    with_env_var(
-        "XDG_CONFIG_HOME",
-        Some(dir.path().to_str().unwrap()),
-        || {
-            assert_eq!(Config::load(), Config::default());
-        },
-    );
-    // A corrupt config file: the default.
-    let config_path = dir.path().join("dsh-tui").join("config.toml");
-    std::fs::create_dir_all(config_path.parent().unwrap()).expect("dir");
-    std::fs::write(&config_path, "not [valid toml").expect("write corrupt");
-    with_env_var(
-        "XDG_CONFIG_HOME",
-        Some(dir.path().to_str().unwrap()),
-        || {
-            assert_eq!(Config::load(), Config::default());
-        },
-    );
+    with_config_root(dir.path(), |config_root| {
+        // No config file in an otherwise-empty config dir: the default.
+        assert_eq!(Config::load(), Config::default());
+        // A corrupt config file: the default.
+        std::fs::create_dir_all(config_root).expect("dir");
+        std::fs::write(config_root.join("config.toml"), "not [valid toml").expect("write corrupt");
+        assert_eq!(Config::load(), Config::default());
+    });
 }
 
 // NOTE: Config::save's "no config directory" error requires dirs::config_dir()

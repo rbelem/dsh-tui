@@ -566,10 +566,10 @@ fn herdr_stub(dir: &TempDir) -> (String, PathBuf) {
 fn stub_log_contains(log: &PathBuf, needle: &str) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Ok(text) = std::fs::read_to_string(log) {
-            if text.contains(needle) {
-                return true;
-            }
+        if let Ok(text) = std::fs::read_to_string(log)
+            && text.contains(needle)
+        {
+            return true;
         }
         if Instant::now() > deadline {
             return false;
