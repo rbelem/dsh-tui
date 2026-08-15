@@ -125,8 +125,11 @@ may not arrive — plain `Enter` submits).
 - **Themes** — 15 bundled themes (catppuccin ×4, kanagawa, tokyonight ×3,
   gruvbox, dracula, solarized, nord, rose-pine, everforest, one-dark);
   Ctrl+T opens the picker, `Enter` applies and persists. User themes load
-  from `~/.config/dsh-tui/themes/*.toml`. The default follows the terminal
-  (truecolor when `COLORTERM` is set, else 256-color).
+  from `~/.config/dsh-tui/themes/*.toml`. With no explicit theme, the
+  default follows the detected terminal/system scheme — catppuccin frappe
+  (dark) / catppuccin latte (light) on truecolor terminals, falling back
+  to the terminal-following neutral look (truecolor when `COLORTERM` is
+  set, else 256-color) when detection fails.
 - **Locale** — zh/en, keyed string tables; Ctrl+L cycles and persists;
   CJK width is handled.
 - **Config file** — `~/.config/dsh-tui/` (isolated from the host config in

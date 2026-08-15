@@ -428,7 +428,10 @@ impl Default for App {
             image_cache: crate::render::image::ImageCache::default(),
             toast: None,
             hint: None,
-            needs_draw: false,
+            // Draw the first frame on the first tick: a fresh terminal must
+            // not sit blank until an input event (the startup OSC 11 query
+            // may also consume the first stray byte, which is harmless).
+            needs_draw: true,
             last_draw: None,
             draws: 0,
         }
@@ -826,8 +829,10 @@ impl App {
 
     /// Startup theme resolution: load user themes, then apply the persisted
     /// config theme when the terminal can render palettes (truecolor
-    /// `COLORTERM`); otherwise the terminal-following default (Reset-based
-    /// neutral) stays.
+    /// `COLORTERM`). With no explicit config theme, the detected
+    /// terminal/system light/dark scheme picks the default — catppuccin
+    /// frappe (dark) or catppuccin latte (light). If neither applies, the
+    /// terminal-following default (Reset-based neutral) stays.
     pub fn load_theme_config(&mut self) {
         self.themes.load_user_dir();
         self.config = Config::load();
@@ -836,6 +841,17 @@ impl App {
             && terminal_supports_color()
         {
             self.theme = theme.clone();
+        } else if self.config.theme.is_none() && terminal_supports_color() {
+            let name = match crate::theme::detect::detect_color_mode() {
+                Some(crate::theme::detect::ColorMode::Dark) => Some("catppuccin-frappe"),
+                Some(crate::theme::detect::ColorMode::Light) => Some("catppuccin-latte"),
+                None => None,
+            };
+            if let Some(name) = name
+                && let Some(theme) = self.themes.find(name)
+            {
+                self.theme = theme.clone();
+            }
         }
     }
 

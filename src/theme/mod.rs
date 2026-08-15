@@ -12,10 +12,14 @@
 //! bundled entries. The picker persists the choice to
 //! `$XDG_CONFIG_HOME/dsh-tui/config.toml` (`theme = "name"`).
 //!
-//! TODO: light/dark override (force a light variant on dark terminals and
-//! vice versa) — deferred.
+//! With no explicit theme, [`detect::detect_color_mode`] picks the startup
+//! default on truecolor terminals: catppuccin frappe for dark schemes,
+//! catppuccin latte for light ones (OSC 11 terminal query, then env
+//! signals, then desktop settings); detection failures keep the
+//! terminal-following neutral.
 
 pub mod bundled;
+pub mod detect;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
