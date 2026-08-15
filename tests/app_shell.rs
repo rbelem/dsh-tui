@@ -272,6 +272,13 @@ fn keymap_table() {
         app.focus = Focus::Sidebar;
         app.handle_key(key(KeyCode::Char('/')));
     }
+    fn prefix_armed(app: &mut App) {
+        app.pane_prefix = true;
+    }
+    fn prefix_from_sidebar(app: &mut App) {
+        app.focus = Focus::Sidebar;
+        app.pane_prefix = true;
+    }
     fn slash_popup(app: &mut App) {
         app.focus = Focus::Composer;
         app.composer.insert_char('/');
@@ -529,12 +536,70 @@ fn keymap_table() {
         (queue_popup, key(KeyCode::Down), Some(Action::None)),
         (queue_popup, key(KeyCode::Char('j')), Some(Action::None)),
         (queue_popup, key(KeyCode::Esc), Some(Action::None)),
+        // Ctrl+W arms the vim pane prefix; h/j/k/l then move focus
+        // (Sidebar/Chat/Composer), any other key disarms it. Boot focus is
+        // the composer, so j (→composer) is exercised from the sidebar.
+        (|_| {}, ctrl(KeyCode::Char('w')), Some(Action::None)),
+        (
+            prefix_armed,
+            key(KeyCode::Char('h')),
+            Some(Action::Focus(Focus::Sidebar)),
+        ),
+        (
+            prefix_armed,
+            key(KeyCode::Char('l')),
+            Some(Action::Focus(Focus::Chat)),
+        ),
+        (
+            prefix_armed,
+            key(KeyCode::Char('k')),
+            Some(Action::Focus(Focus::Chat)),
+        ),
+        (
+            prefix_from_sidebar,
+            key(KeyCode::Char('j')),
+            Some(Action::Focus(Focus::Composer)),
+        ),
+        (
+            prefix_from_sidebar,
+            key(KeyCode::Char('k')),
+            Some(Action::Focus(Focus::Chat)),
+        ),
+        (prefix_armed, key(KeyCode::Char('x')), Some(Action::None)),
+        (prefix_armed, key(KeyCode::Esc), Some(Action::None)),
     ];
     for (setup, event, expected) in cases {
         let mut app = App::default();
         setup(&mut app);
         assert_eq!(app.handle_key(event), expected, "key {event:?}");
     }
+}
+
+#[test]
+fn ctrl_w_prefix_disarms_and_moves_focus() {
+    let mut app = App::default();
+    // Boot focus is the composer; Ctrl+W arms the prefix.
+    assert_eq!(app.handle_key(ctrl(KeyCode::Char('w'))), Some(Action::None));
+    assert!(app.pane_prefix, "Ctrl+W armed the pane prefix");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('h'))),
+        Some(Action::Focus(Focus::Sidebar))
+    );
+    assert_eq!(app.focus, Focus::Sidebar);
+    assert!(!app.pane_prefix, "h disarmed the prefix");
+    // A non-directional key disarms without moving focus.
+    assert_eq!(app.handle_key(ctrl(KeyCode::Char('w'))), Some(Action::None));
+    assert_eq!(app.handle_key(key(KeyCode::Char('x'))), Some(Action::None));
+    assert_eq!(app.focus, Focus::Sidebar);
+    assert!(!app.pane_prefix);
+    // Moving to the surface already focused is a no-op.
+    app.pane_prefix = true;
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('h'))),
+        Some(Action::None),
+        "h from the sidebar is a no-op"
+    );
+    assert_eq!(app.focus, Focus::Sidebar);
 }
 
 // ---------------------------------------------------------------------------

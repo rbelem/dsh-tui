@@ -292,6 +292,10 @@ pub struct App {
     pub archived_expanded: bool,
     /// Which surface holds the keyboard focus.
     pub focus: Focus,
+    /// Ctrl+W vim pane-prefix armed: the next h/j/k/l key moves focus,
+    /// any other key disarms it (no timeout — the prefix survives until
+    /// a plain key or Esc).
+    pub pane_prefix: bool,
     pub composer: Composer,
     pub sidebar: SidebarState,
     /// The attached gateway client (submit dispatch); `None` in keyless tests.
@@ -392,6 +396,9 @@ impl Default for App {
             archived_session_ids: Vec::new(),
             archived_expanded: false,
             focus: Focus::Composer,
+            /// Ctrl+W vim pane-prefix armed: the next h/j/k/l key moves
+            /// focus, any other key disarms it.
+            pane_prefix: false,
             composer: Composer::new(),
             sidebar: SidebarState::default(),
             client: None,
@@ -624,9 +631,10 @@ impl App {
     /// idle — in a takeover it stays the quit panic-button (blocking frames
     /// must not be cancelled silently); `Ctrl+Q` quits in every mode. Then a
     /// takeover swallows ALL keys, `Ctrl+T` toggles the theme picker, an
-    /// open picker swallows keys until Enter/Esc, `Tab` cycles focus, and
-    /// the focused surface gets the key. Returns the resulting [`Action`];
-    /// `Quit` is not applied here — the run loop stops.
+    /// open picker swallows keys until Enter/Esc, `Ctrl+W` arms the vim pane
+    /// prefix (h/j/k/l move focus, any other key disarms), `Tab` cycles
+    /// focus, and the focused surface gets the key. Returns the resulting
+    /// [`Action`]; `Quit` is not applied here — the run loop stops.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -713,6 +721,22 @@ impl App {
         if self.sidebar_search.is_some() {
             return Some(self.handle_sidebar_search_key(key));
         }
+        // Ctrl+W arms the vim pane prefix; the next h/j/k/l moves focus
+        // (Sidebar/Chat/Composer), any other key disarms it.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
+            self.pane_prefix = true;
+            return Some(Action::None);
+        }
+        if self.pane_prefix {
+            self.pane_prefix = false;
+            return match key.code {
+                KeyCode::Char('h') => Some(self.move_focus(Focus::Sidebar)),
+                KeyCode::Char('l') => Some(self.move_focus(Focus::Chat)),
+                KeyCode::Char('j') => Some(self.move_focus(Focus::Composer)),
+                KeyCode::Char('k') => Some(self.move_focus(Focus::Chat)),
+                _ => Some(Action::None),
+            };
+        }
         if key.code == KeyCode::Tab {
             let next = self.focus.next();
             self.focus = next;
@@ -723,6 +747,16 @@ impl App {
             Focus::Composer => Some(self.handle_composer_key(key)),
             Focus::Sidebar => self.handle_sidebar_key(key),
         }
+    }
+
+    /// Move keyboard focus to a surface (Ctrl+W h/j/k/l pane navigation);
+    /// a no-op when it's already there.
+    fn move_focus(&mut self, focus: Focus) -> Action {
+        if self.focus == focus {
+            return Action::None;
+        }
+        self.focus = focus;
+        Action::Focus(focus)
     }
 
     /// Ctrl+L: cycle the UI locale, persist it to the config, and force a
