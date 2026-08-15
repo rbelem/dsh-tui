@@ -86,9 +86,9 @@ async fn ctrl_comma_opens_two_pane_view_and_esc_closes() {
     let (tx, task) = spawn_run(app, term).await;
     open_settings(&tx).await;
 
-    // Esc closes; then Ctrl+Q quits the loop.
+    // Esc closes; then Ctrl+Q quits the loop (events are processed in
+    // channel order, so the mode change is deterministic before the quit).
     tx.send(AppEvent::Key(key(KeyCode::Esc))).unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('q')))).unwrap();
     let (app, term) = join_run(task).await;
 

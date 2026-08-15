@@ -507,17 +507,20 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
         )))
         .expect("frame");
     }
-    // Let a tick draw the accumulated state: follow clamps to the bottom
-    // (5 rows; layout: chat 2 + composer 2 + status 1 → offset 3).
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Deterministic follow clamp: the loop draws IMMEDIATELY on every key,
+    // so an inert key after the frames forces the clamp draw (follow still
+    // on) before any scroll — no tick timing involved (this was a
+    // sleep-based flake under parallel load: a delayed tick left the
+    // offset unclamped when 'j' scrolled).
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
     tx.send(AppEvent::Key(key(KeyCode::Char('j')))).expect("j");
-    tokio::time::sleep(Duration::from_millis(20)).await;
     tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
     let (result, app) = run_task.await.expect("run task");
     result.expect("run");
 
     assert!(!app.view.follow, "manual scroll disables follow");
-    // Followed bottom was offset 3; j moves one row past it.
+    // The clamp draw above pinned the bottom at offset 3 (5 rows; layout:
+    // chat 2 + composer 2 + status 1); j moves one row past it.
     assert_eq!(app.view.offset, 4);
 }
 
@@ -609,14 +612,15 @@ async fn resize_invalidates_and_rerenders() {
         let result = app.run(&mut term, &mut channel).await;
         (result, app)
     });
-    // Duplicate seq: ignored by the store, still triggers a draw.
+    // Duplicate seq: ignored by the store, still triggers a draw. The
+    // inert key below draws immediately (the loop draws on every key), so
+    // the re-wrap render happens deterministically — no tick timing.
     tx.send(AppEvent::Frame(frame(
         "s1",
         ev(1, "user/message", user_msg("m1", long_text)),
     )))
     .expect("frame");
-    // Let a tick draw the re-wrapped state.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
     tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
     let (result, app) = run_task.await.expect("run task");
     result.expect("run");
@@ -798,14 +802,17 @@ async fn loop_stays_live_while_respond_in_flight() {
     tx.send(AppEvent::Key(key(KeyCode::Char('y')))).expect("y");
     tx.send(AppEvent::Key(key(KeyCode::Char('y'))))
         .expect("y dup");
-    // A mux frame arrives while the respond is still in flight (200ms).
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Deterministic: wait until the respond POST reached the mock, then
+    // send the frame — the mock's Delayed handler keeps the respond in
+    // flight for 200ms from capture, a hard guarantee the frame arrives
+    // mid-flight (no scheduler timing involved).
+    mock.wait_for_posts("/api/respond", 1).await;
     tx.send(AppEvent::Frame(frame(
         "s1",
         ev(1, "user/message", user_msg("m1", "hi")),
     )))
     .expect("frame");
-    // Quit before the respond completes (~100ms < 200ms).
+    // Quit before the respond completes (~100ms < the 200ms mock delay).
     tokio::time::sleep(Duration::from_millis(50)).await;
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
         .expect("quit");
@@ -861,8 +868,11 @@ async fn prompt_error_surfaces_toast() {
         (result, app, term)
     });
     tx.send(AppEvent::Key(key(KeyCode::Enter))).expect("submit");
-    // Let the spawned prompt round-trip and its PromptDone land.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Deterministic on the request side (the POST reached the mock); the
+    // short tail covers the response-processing hop (the run-loop state is
+    // not observable from the test).
+    mock.wait_for_posts("/api/session.prompt", 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
         .expect("quit");
     let (result, mut app, _term) = run_task.await.expect("run task");
@@ -902,7 +912,8 @@ async fn answer_failure_keeps_takeover_and_retry_succeeds() {
         (result, app, term)
     });
     tx.send(AppEvent::Key(key(KeyCode::Char('y')))).expect("y");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    mock.wait_for_posts("/api/respond", 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
         .expect("quit");
     let (result, mut app, mut term) = run_task.await.expect("run task");
@@ -936,7 +947,8 @@ async fn answer_failure_keeps_takeover_and_retry_succeeds() {
     });
     tx.send(AppEvent::Key(key(KeyCode::Char('y'))))
         .expect("y retry");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    mock.wait_for_posts("/api/respond", 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
         .expect("quit");
     let (result, app, _term) = run_task.await.expect("run task");

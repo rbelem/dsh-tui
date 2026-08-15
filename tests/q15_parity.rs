@@ -157,15 +157,16 @@ async fn cancel_running_posts_cancel_and_toasts() {
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
         .expect("cancel");
     // The loop stays alive: a frame arriving while the cancel is in flight
-    // is ingested.
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    // is ingested. Deterministic on the request side; the mock's Ok
+    // handler answers immediately, so the frame lands mid-flight.
+    mock.wait_for_posts("/api/session.cancel", 1).await;
     tx.send(AppEvent::Frame(frame(
         "s1",
         ev(1, "user/message", user_msg("m1", "hi")),
     )))
     .expect("frame");
-    // Let the CancelDone land and toast.
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Tail for the CancelDone landing (response-processing hop only).
+    tokio::time::sleep(Duration::from_millis(100)).await;
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('q'))))
         .expect("quit");
     let app = join_run(task).await;
@@ -304,14 +305,17 @@ async fn cancel_failure_toasts_and_loop_lives() {
 
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('c'))))
         .expect("cancel");
-    tokio::time::sleep(Duration::from_millis(150)).await;
-    // Still alive after the failure: the frame is ingested.
+    mock.wait_for_posts("/api/session.cancel", 1).await;
+    // Tail for the CancelDone landing (response-processing hop only).
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Still alive after the failure: the frame is ingested (events are
+    // processed in channel order, so the ingest is deterministic before
+    // the quit below).
     tx.send(AppEvent::Frame(frame(
         "s1",
         ev(1, "user/message", user_msg("m1", "hi")),
     )))
     .expect("frame");
-    tokio::time::sleep(Duration::from_millis(30)).await;
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('q'))))
         .expect("quit");
     let app = join_run(task).await;
@@ -392,7 +396,10 @@ async fn history_loads_on_sidebar_switch() {
         .expect("move");
     // Right after Enter, the hint is up and the load is in flight.
     tx.send(AppEvent::Key(key(KeyCode::Enter))).expect("switch");
-    tokio::time::sleep(Duration::from_millis(30)).await;
+    // Deterministic on the request side, then a tail for the history page
+    // landing in the run loop (response-processing hop only).
+    mock.wait_for_posts("/api/session.history", 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('q'))))
         .expect("quit");
     let app = join_run(task).await;
@@ -437,15 +444,16 @@ async fn history_hint_shows_while_in_flight() {
     tx.send(AppEvent::Key(key(KeyCode::Char('j'))))
         .expect("move");
     tx.send(AppEvent::Key(key(KeyCode::Enter))).expect("switch");
-    // Immediately after the Enter is processed: hint up, load in flight.
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // Deterministic on the request side; the tail covers the history page
+    // landing (response-processing hop only). The hint may clear before
+    // the Esc — the end-state assertions are the contract.
+    mock.wait_for_posts("/api/session.history", 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     tx.send(AppEvent::Key(key(KeyCode::Esc)))
         .expect("back to chat");
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('q'))))
         .expect("quit");
     let app = join_run(task).await;
-    // The 20ms sleep is shorter than the round trip (loopback ~1ms) — the
-    // hint may already have cleared; assert the end state is clean instead.
     assert_eq!(app.history_loading, None);
     assert_eq!(app.hint, None);
     mock.stop().await;
@@ -482,7 +490,10 @@ async fn stale_history_result_is_dropped() {
         .expect("move to A");
     tx.send(AppEvent::Key(key(KeyCode::Enter)))
         .expect("switch back to A");
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Both history POSTs must round trip; the tail covers the second
+    // response landing (response-processing hop only).
+    mock.wait_for_posts("/api/session.history", 2).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
     tx.send(AppEvent::Key(ctrl(KeyCode::Char('q'))))
         .expect("quit");
     let app = join_run(task).await;

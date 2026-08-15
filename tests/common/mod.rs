@@ -228,6 +228,33 @@ impl MockGateway {
         self.requests.lock().await.clone()
     }
 
+    /// Wait until at least `count` POSTs to `path` are captured, with an
+    /// absolute deadline (10s). Deterministic on the REQUEST side of a
+    /// back-channel round trip; the response-processing tail (the done
+    /// event landing in the run loop) has no test-side observable — tests
+    /// that need it keep a short bounded wait after this.
+    pub async fn wait_for_posts(&self, path: &str, count: usize) -> Vec<serde_json::Value> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let posts = self
+                .requests()
+                .await
+                .iter()
+                .filter(|request| request.path == path)
+                .filter_map(|request| serde_json::from_str(&request.body).ok())
+                .collect::<Vec<_>>();
+            if posts.len() >= count {
+                return posts;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{path} POST never arrived (wanted {count}, got {})",
+                posts.len()
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     pub async fn stop(self) {
         if let Some(tx) = self.shutdown {
             let _ = tx.send(());
