@@ -9,7 +9,8 @@
     "arm64"
   ],
   "files": [
-    "bin/",
+    "bin/dsh-tui",
+    "bin/SHA256SUMS",
     "README.md"
   ],
   "engines": {

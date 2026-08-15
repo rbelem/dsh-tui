@@ -1,0 +1,91 @@
+# Publish the dsh-tui npm packages (entry bundle + 4 platform prebuilds)
+# from the artifacts the release workflow built — no rebuild here, so the
+# published bytes are exactly the byte-pinned dist binaries the release
+# workflow verified and uploaded.
+#
+# Manual dispatch only (workflow_dispatch). It does NOT auto-publish on tag
+# push: the `release` workflow owns building + GitHub release assets; this
+# job consumes that run's artifacts.
+#
+# Inputs:
+#   dry_run (default true)  — run `publish.sh` without --publish
+#   run_id (optional)       — the release workflow run to take artifacts
+#                             from; default: the latest successful run
+#
+# Required secrets:
+#   NPM_TOKEN — an npm registry automation token for @rbelem scope
+#               (publish.sh refuses to publish unauthenticated)
+#
+# Real publish: dispatch with dry_run = false (publish.sh gets --publish).
+name: publish npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry-run only (pack + publish --dry-run, no registry mutation)'
+        type: boolean
+        default: true
+      run_id:
+        description: 'Release workflow run id to take artifacts from (default: latest successful)'
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+
+      - name: Resolve release run id
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ inputs.run_id }}" ]]; then
+            run_id="${{ inputs.run_id }}"
+          else
+            run_id="$(gh run list --workflow release.yml --status success --limit 1 \
+              --json databaseId --jq '.[0].databaseId')"
+          fi
+          [[ -n "$run_id" && "$run_id" != "null" ]] || {
+            echo "publish: no successful release.yml run found (or invalid run_id) — run the release workflow first" >&2
+            exit 1
+          }
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Download release artifacts (the same dist bytes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh run download "${{ steps.resolve.outputs.run_id }}" \
+            --pattern 'dsh-tui-*' \
+            --dir dist
+
+      - name: Assemble prebuild packages from the downloaded dists
+        run: |
+          set -euo pipefail
+          ls -la dist
+          bash scripts/release/prebuild-packages.sh
+
+      - name: Publish (dry-run or real, per input)
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ "${{ inputs.dry_run }}" == "false" ]]; then
+            bash scripts/release/publish.sh --publish
+          else
+            bash scripts/release/publish.sh
+          fi
