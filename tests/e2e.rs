@@ -64,7 +64,20 @@ impl AppUnderTest {
             let mut chunk = [0u8; 4096];
             loop {
                 match reader.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    // macOS pty masters are nonblocking (BSD) and the dup'd
+                    // reader inherits O_NONBLOCK: EAGAIN is a retry, not EOF.
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(ref e) => {
+                        // Record the death so failed waits self-diagnose.
+                        buffer
+                            .lock()
+                            .expect("output lock")
+                            .extend_from_slice(format!("\n[pty-reader died: {e}]").as_bytes());
+                        break;
+                    }
                     Ok(n) => buffer
                         .lock()
                         .expect("output lock")
@@ -577,7 +590,20 @@ async fn missing_dsh_port_exits_with_a_hint() {
         let mut chunk = [0u8; 4096];
         loop {
             match reader.read(&mut chunk) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                // macOS pty masters are nonblocking (BSD) and the dup'd
+                // reader inherits O_NONBLOCK: EAGAIN is a retry, not EOF.
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(ref e) => {
+                    // Record the death so failed waits self-diagnose.
+                    buffer
+                        .lock()
+                        .expect("output lock")
+                        .extend_from_slice(format!("\n[pty-reader died: {e}]").as_bytes());
+                    break;
+                }
                 Ok(n) => buffer
                     .lock()
                     .expect("output lock")
