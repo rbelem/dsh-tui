@@ -1,0 +1,101 @@
+# Release the dsh-tui prebuilds (Q4/Q6): a matrix build over the four
+# prebuild targets (linux on ubuntu, darwin on macOS runners — the Apple
+# SDK lives there), byte-pinned per target (dist/<target>/SHA256SUMS), then
+# a follow-up job assembles the per-platform packages and uploads them as
+# release assets with the `gh` CLI (present on runners; no extra action).
+#
+# The npm publish flow (entry bundle + four platform packages) is a manual
+# step — see scripts/release/ and the bundle README. This workflow produces
+# the artifacts and the GitHub release; publishing from the same tarballs is
+# the documented TODO.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Version gate: the tag must be v<version> of the bundle, and
+      # build.sh asserts crate == bundle before producing anything.
+      - name: Assert release version
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./bundle/package.json').version")"
+          [ "${{ github.ref_name }}" = "v$version" ] || {
+            echo "tag ${{ github.ref_name }} != bundle v$version" >&2
+            exit 1
+          }
+
+      - name: Build, stage and checksum
+        run: bash scripts/release/build.sh --target ${{ matrix.target }}
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-tui-${{ matrix.target }}
+          path: dist/dsh-tui-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Assemble and upload release assets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download prebuild artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dsh-tui-*
+          path: dist
+
+      # Each dist/<target>/ is already byte-pinned; the release job does
+      # not rebuild (the matrix legs are the builders of record).
+      - name: Verify checksums
+        run: |
+          set -euo pipefail
+          for dir in dist/dsh-tui-*; do
+            [ -f "$dir/dsh-tui" ] || { echo "missing binary in $dir" >&2; exit 1; }
+            scripts/release/sha256.sh --verify "$dir"
+          done
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          assets=()
+          for dir in dist/dsh-tui-*; do
+            for f in "$dir"/dsh-tui "$dir"/SHA256SUMS; do
+              assets+=("$f")
+            done
+          done
+          gh release upload "${{ github.ref_name }}" "${assets[@]}" --clobber

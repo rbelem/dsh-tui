@@ -14,6 +14,8 @@
 
 import { createRequire } from 'node:module'
 import { spawn } from 'node:child_process'
+import { dirname, join } from 'node:path'
+import fs from 'node:fs'
 
 const require = createRequire(import.meta.url)
 
@@ -23,14 +25,46 @@ export const name = 'tui-runtime'
 /** Services required before the TUI can be spawned. */
 export const inject = ['tuiStartup', 'webServer']
 
-/** Resolve the TUI binary path: config override, else the package's own bin. */
-function resolveBinary(config) {
+/**
+ * The per-platform prebuild package for this host (npm's `os`/`cpu` fields
+ * make installers fetch only the matching one): linux-x64, linux-arm64,
+ * darwin-x64, darwin-arm64. Windows has no prebuild in v1 — the fallback
+ * below (the bundle's own bin) carries the source-build story.
+ */
+const PLATFORM_PACKAGE = `@rbelem/dsh-tui-${process.platform}-${process.arch}`
+
+/**
+ * Resolve the TUI binary path. Resolution order:
+ *
+ *   1. `config.binary` — explicit override, always wins.
+ *   2. The per-platform prebuild package (`@rbelem/dsh-tui-<platform>-<arch>`,
+ *      an optional dependency of this bundle): resolved via `require.resolve`
+ *      of its `package.json`, like the harness's landlock-run loader. When
+ *      the package is installed but its binary is missing (partial install),
+ *      fall through — the source-build bin is the meaningful fallback.
+ *   3. The bundle's own `bin/dsh-tui` — the source-build fallback: the
+ *      placeholder that fails loud with a build hint, or a locally built
+ *      binary copied there (`cargo build --release && cp target/release/dsh-tui
+ *      bundle/bin/`). Windows users build from source via this path.
+ *
+ * Throws when neither the platform package nor the local bin resolves
+ * (broken package layout).
+ */
+export function resolveBinary(config) {
   if (config.binary) return config.binary
+  try {
+    const pkg = require.resolve(`${PLATFORM_PACKAGE}/package.json`)
+    const binary = join(dirname(pkg), 'bin', 'dsh-tui')
+    if (fs.existsSync(binary)) return binary
+  } catch {
+    // No such package for this host, or not installed — the local bin is
+    // the fallback (the placeholder or a source-built copy).
+  }
   try {
     return require.resolve('../bin/dsh-tui')
   } catch {
     /* v8 ignore next 2 -- reachable only on a broken package layout */
-    throw new Error('tui: cannot resolve the TUI binary (bundle/bin/dsh-tui missing); build with `cargo build --release` and copy the binary into bundle/bin/ (see bundle/README.md)')
+    throw new Error('tui: cannot resolve the TUI binary (no prebuild package and bundle/bin/dsh-tui missing); build with `cargo build --release` and copy the binary into bundle/bin/ (see bundle/README.md)')
   }
 }
 

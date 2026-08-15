@@ -1,0 +1,19 @@
+{
+  "name": "@rbelem/dsh-tui-linux-x64",
+  "version": "0.1.0",
+  "description": "Prebuilt dsh-tui binary for linux x64 — resolved as a file path by @rbelem/dsh-tui, never imported",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}

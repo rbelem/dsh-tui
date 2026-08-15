@@ -48,20 +48,37 @@ dsh-tui --port <port>
 
 ## Prebuild contract
 
-`bundle/bin/dsh-tui` is the layout contract for prebuilt binaries. v1 ships a
-placeholder that fails loud with a build hint. The release pipeline (a later
-task, mirroring the harness's `native/landlock-run` precedent) replaces it
-with platform binaries shipped as per-platform optional-dependency packages
-(`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`; Windows builds
-from source), loaded via `require.resolve`, with no lifecycle install
-scripts.
+`bundle/bin/dsh-tui` is the layout contract for prebuilt binaries. The
+release pipeline (mirroring the harness's `native/landlock-run` precedent)
+ships platform binaries as per-platform optional-dependency packages
+(`@rbelem/dsh-tui-linux-x64`, `-linux-arm64`, `-darwin-x64`,
+`-darwin-arm64`), selected by npm through their `os`/`cpu` fields, loaded
+via `require.resolve`, with no lifecycle install scripts. Each package
+carries its binary byte-pinned by a `SHA256SUMS` next to it. Windows has
+no prebuild in v1 — builds from source (below).
 
-Until a prebuild matches, build and copy:
+The runtime glue resolves the binary in this order:
+
+1. `config.binary` — explicit override.
+2. The per-platform prebuild package for this host (installed as an
+   optional dependency; a missing or skipped install falls through).
+3. The bundle's own `bin/dsh-tui` — the source-build fallback: the v1
+   placeholder (fails loud with a build hint) or a locally built copy.
+
+Build from source (any host, including Windows):
 
 ```sh
 cargo build --release
 cp target/release/dsh-tui bundle/bin/
 ```
+
+Release artifacts: `scripts/release/build.sh --target <triple>` produces
+`dist/dsh-tui-<target>/` (binary + `SHA256SUMS`); darwin targets build on
+macOS runners (Apple SDK). `scripts/release/prebuild-packages.sh` stages
+the four `prebuilds/<platform>/` packages from the dist artifacts; each
+directory is `npm pack`-able. The `v*` tag workflow
+(`.github/workflows/release.yml`) builds the matrix and uploads the
+byte-pinned artifacts as release assets.
 
 ## Not yet
 

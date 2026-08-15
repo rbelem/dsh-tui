@@ -29,6 +29,12 @@
   "dependencies": {
     "commander": "^15.0.0"
   },
+  "optionalDependencies": {
+    "@rbelem/dsh-tui-darwin-arm64": "0.1.0",
+    "@rbelem/dsh-tui-darwin-x64": "0.1.0",
+    "@rbelem/dsh-tui-linux-arm64": "0.1.0",
+    "@rbelem/dsh-tui-linux-x64": "0.1.0"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "workspace:^",
     "@deepseek-ai/dsh-cmdline": "workspace:^",
