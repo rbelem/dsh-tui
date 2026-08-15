@@ -15,6 +15,7 @@
 
 pub mod attach;
 pub mod event;
+pub mod light;
 pub mod run;
 
 pub use attach::attach;

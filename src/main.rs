@@ -7,6 +7,12 @@ use dsh_tui::app::{App, AppError, EventChannel, attach, event, run};
 use dsh_tui::client::WireClient;
 
 fn main() -> Result<(), AppError> {
+    // The `--light` worker lane dispatches before the TUI path (which stays
+    // byte-identical below).
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--light") {
+        return dsh_tui::app::light::main_light(&args);
+    }
     let client = match WireClient::attach_from_env()? {
         Some(client) => client,
         None => {
