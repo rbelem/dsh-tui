@@ -11,6 +11,12 @@
 //! is the last line: `dsh-worker: done` on success, `dsh-worker: error:
 //! <reason>` on failure. Exit codes: 0 success · 1 RPC/stream error ·
 //! 2 usage / no gateway.
+//!
+//! herdr lifecycle reporting (T2): when running inside a herdr pane
+//! (`HERDR_PANE_ID` set and a herdr binary reachable via `HERDR_BIN_PATH`
+//! or `PATH`), the worker reports `working` / `idle` / `blocked` state
+//! transitions through `herdr pane report-agent`; otherwise it runs with
+//! zero herdr interaction (silent, never a failure).
 
 use std::collections::HashSet;
 use std::io::{IsTerminal, Read, Write};
@@ -50,6 +56,65 @@ pub enum TaskSource {
     File(String),
     /// Piped stdin (the caller reports whether stdin is a pipe).
     Stdin,
+}
+
+/// Report messages are truncated to ~80 chars (the herdr contract).
+const MAX_REPORT_MESSAGE: usize = 80;
+
+/// herdr lifecycle reporter for the `--light` worker. [`HerdrReporter::from_env`]
+/// returns `None` when not running inside a herdr pane or herdr is
+/// unreachable; the worker then runs without any herdr interaction.
+pub struct HerdrReporter {
+    pub pane: String,
+    pub bin: String,
+}
+
+impl HerdrReporter {
+    /// Resolve the reporter from the environment: `HERDR_PANE_ID` (the pane
+    /// to report into) plus the herdr binary — `HERDR_BIN_PATH` when set,
+    /// otherwise `herdr` found by walking the `PATH` entries. Either
+    /// missing → `None`.
+    pub fn from_env() -> Option<Self> {
+        let pane = std::env::var("HERDR_PANE_ID").ok()?;
+        let bin = match std::env::var("HERDR_BIN_PATH") {
+            Ok(bin) => bin,
+            Err(_) => find_in_path("herdr")?,
+        };
+        Some(HerdrReporter { pane, bin })
+    }
+
+    /// Report a state transition via `herdr pane report-agent`. Fire-and-
+    /// forget: a failed spawn (dead herdr) is swallowed — reporting must
+    /// never break the worker. The message is truncated to ~80 chars.
+    pub fn report(&self, state: &str, message: &str) {
+        let message: String = message.chars().take(MAX_REPORT_MESSAGE).collect();
+        let _ = std::process::Command::new(&self.bin)
+            .arg("pane")
+            .arg("report-agent")
+            .arg(&self.pane)
+            .arg("--source")
+            .arg("dsh-tui")
+            .arg("--agent")
+            .arg("dsh-worker")
+            .arg("--state")
+            .arg(state)
+            .arg("--message")
+            .arg(message)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
+}
+
+/// Find `name` in the `PATH` entries — an existence walk, so a bare
+/// unqualified name is never relied on (the spawn would resolve it, but
+/// `from_env` must decide without spawning).
+fn find_in_path(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| candidate.to_string_lossy().into_owned())
 }
 
 /// Parse the `--light` args: `--task TEXT`, `--file PATH`, or piped stdin
@@ -139,12 +204,25 @@ pub fn main_light(args: &[String]) -> Result<(), AppError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
+    // The worker is committed (task resolved, gateway attached): report the
+    // run to herdr when inside a pane. Reporting is fire-and-forget — a
+    // missing/dead herdr never affects the worker.
+    let reporter = HerdrReporter::from_env();
+    if let Some(reporter) = &reporter {
+        reporter.report("working", &task);
+    }
     match runtime.block_on(run_light(client, task)) {
         Ok(()) => {
+            if let Some(reporter) = &reporter {
+                reporter.report("idle", "exit 0");
+            }
             println!("dsh-worker: done");
             std::process::exit(0);
         }
         Err(error) => {
+            if let Some(reporter) = &reporter {
+                reporter.report("blocked", &error.to_string());
+            }
             println!("dsh-worker: error: {error}");
             std::process::exit(1);
         }

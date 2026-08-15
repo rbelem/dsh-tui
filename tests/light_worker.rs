@@ -1,15 +1,19 @@
 //! `--light` worker tests (T1): CLI parsing, task resolution (verbatim
 //! file/stdin reads), the mock-gateway turn flow (in-process `run_light` and
-//! real-binary subprocess runs), and the sentinel / exit-code contract
-//! (0 success · 1 RPC/stream error · 2 usage / no gateway).
+//! real-binary subprocess runs), the sentinel / exit-code contract
+//! (0 success · 1 RPC/stream error · 2 usage / no gateway), and herdr
+//! lifecycle reporting (T2: working / idle / blocked via a stub herdr).
 
 mod common;
 
 use std::io::Read;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use dsh_tui::app::light::{LightError, TaskSource, light_task, parse_light_args, run_light};
+use dsh_tui::app::light::{
+    HerdrReporter, LightError, TaskSource, light_task, parse_light_args, run_light,
+};
 use dsh_tui::client::WireClient;
 
 use common::{MockAction, MockGateway};
@@ -331,10 +335,23 @@ async fn run_light_reports_turn_error() {
 // 3. real-binary subprocess runs: sentinel + exit codes
 // ---------------------------------------------------------------------------
 
-/// Run the real binary as a worker: `port` None = no DSH_PORT env. Returns
-/// (exit code, stdout, stderr). The child is killed if it outlives the
-/// deadline (a hung worker must fail the test, not hang it).
+/// Run the real binary as a worker: `port` None = no DSH_PORT env. The
+/// herdr env vars are REMOVED for the child (the test process may itself
+/// run inside a herdr pane — the worker must not see it). Returns (exit
+/// code, stdout, stderr). The child is killed if it outlives the deadline
+/// (a hung worker must fail the test, not hang it).
 fn run_worker(port: Option<u16>, args: &[&str]) -> (Option<i32>, String, String) {
+    run_worker_with_herdr(port, args, None)
+}
+
+/// [`run_worker`] with an explicit herdr environment: `herdr` Some((pane,
+/// bin)) sets `HERDR_PANE_ID` + `HERDR_BIN_PATH` for the child, None removes
+/// both.
+fn run_worker_with_herdr(
+    port: Option<u16>,
+    args: &[&str],
+    herdr: Option<(&str, &str)>,
+) -> (Option<i32>, String, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dsh-tui"));
     match port {
         Some(port) => {
@@ -342,6 +359,14 @@ fn run_worker(port: Option<u16>, args: &[&str]) -> (Option<i32>, String, String)
         }
         None => {
             cmd.env_remove("DSH_PORT");
+        }
+    }
+    match herdr {
+        Some((pane, bin)) => {
+            cmd.env("HERDR_PANE_ID", pane).env("HERDR_BIN_PATH", bin);
+        }
+        None => {
+            cmd.env_remove("HERDR_PANE_ID").env_remove("HERDR_BIN_PATH");
         }
     }
     cmd.args(args)
@@ -467,4 +492,209 @@ async fn worker_usage_and_no_gateway_exit_2() {
         stderr.contains("unknown argument `--bogus`"),
         "usage on stderr: {stderr}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 4. herdr lifecycle reporting (T2)
+// ---------------------------------------------------------------------------
+
+/// The env vars are process-global: env-touching tests serialize on this
+/// (poison-tolerant).
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Set an env var for the duration of the closure and restore it after
+/// (edition 2024: `set_var` is unsafe; single-threaded test usage only).
+fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce()) {
+    let previous = std::env::var(key).ok();
+    // SAFETY: tests that call this do not read the variable concurrently,
+    // and the value is restored before the test returns.
+    match value {
+        Some(value) => unsafe { std::env::set_var(key, value) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+    f();
+    match previous {
+        Some(previous) => unsafe { std::env::set_var(key, previous) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+}
+
+/// A unique temp dir for herdr stub fixtures (cleaned on drop).
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!("dsh-tui-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temp dir");
+        TempDir(path)
+    }
+
+    fn path(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A stub `herdr` binary that appends its args to the fixture's log file.
+/// Returns (bin path, log path).
+fn herdr_stub(dir: &TempDir) -> (String, PathBuf) {
+    let bin = dir.path().join("herdr");
+    let log = dir.path().join("reports.log");
+    std::fs::write(
+        &bin,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n", log.display()),
+    )
+    .expect("write stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&bin).expect("stub meta").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).expect("chmod stub");
+    }
+    (bin.to_string_lossy().into_owned(), log)
+}
+
+/// Poll the stub log until `needle` appears (the reporter is fire-and-
+/// forget — the stub child writes asynchronously) or the deadline passes.
+fn stub_log_contains(log: &PathBuf, needle: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(log) {
+            if text.contains(needle) {
+                return true;
+            }
+        }
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn herdr_reporter_from_env_resolves_pane_and_bin() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = TempDir::new("herdr-env");
+    let (bin, _log) = herdr_stub(&dir);
+
+    // Pane + explicit bin path.
+    with_env_var("HERDR_PANE_ID", Some("wT:p1"), || {
+        with_env_var("HERDR_BIN_PATH", Some(&bin), || {
+            let reporter = HerdrReporter::from_env().expect("reporter");
+            assert_eq!(reporter.pane, "wT:p1");
+            assert_eq!(reporter.bin, bin);
+        });
+        // Pane without an explicit bin: the PATH walk finds `herdr`.
+        with_env_var("HERDR_BIN_PATH", None, || {
+            with_env_var("PATH", Some(dir.path().to_str().unwrap()), || {
+                let reporter = HerdrReporter::from_env().expect("reporter via PATH");
+                assert_eq!(reporter.bin, bin);
+            });
+        });
+    });
+    // No pane → None regardless of the binary.
+    with_env_var("HERDR_PANE_ID", None, || {
+        with_env_var("HERDR_BIN_PATH", Some(&bin), || {
+            assert!(HerdrReporter::from_env().is_none());
+        });
+    });
+    // Pane but herdr nowhere in PATH → None.
+    let empty = dir.path().join("empty");
+    std::fs::create_dir_all(&empty).expect("empty dir");
+    with_env_var("HERDR_PANE_ID", Some("wT:p1"), || {
+        with_env_var("HERDR_BIN_PATH", None, || {
+            with_env_var("PATH", Some(empty.to_str().unwrap()), || {
+                assert!(HerdrReporter::from_env().is_none());
+            });
+        });
+    });
+}
+
+#[test]
+fn herdr_reporter_reports_state_args() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = TempDir::new("herdr-args");
+    let (bin, log) = herdr_stub(&dir);
+
+    with_env_var("HERDR_PANE_ID", Some("wT:p1"), || {
+        with_env_var("HERDR_BIN_PATH", Some(&bin), || {
+            let reporter = HerdrReporter::from_env().expect("reporter");
+            reporter.report("working", "task");
+            reporter.report("idle", "exit 0");
+            reporter.report("blocked", &"x".repeat(200));
+        });
+    });
+
+    assert!(
+        stub_log_contains(
+            &log,
+            "pane report-agent wT:p1 --source dsh-tui --agent dsh-worker --state working --message task"
+        ),
+        "working report recorded: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    assert!(
+        stub_log_contains(&log, "--state idle --message exit 0"),
+        "idle report recorded"
+    );
+    // The blocked report's message is truncated to ~80 chars (the stub
+    // child writes asynchronously — poll for the truncated line first).
+    assert!(
+        stub_log_contains(&log, &"x".repeat(80)),
+        "truncated message recorded: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    let log_text = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !log_text.contains(&"x".repeat(81)),
+        "message truncated to ~80 chars (no 81-char run)"
+    );
+}
+
+#[test]
+fn herdr_reporter_swallows_spawn_failures() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_env_var("HERDR_PANE_ID", Some("wT:p1"), || {
+        with_env_var("HERDR_BIN_PATH", Some("/nonexistent/herdr-stub"), || {
+            let reporter = HerdrReporter::from_env().expect("reporter (bin not probed)");
+            reporter.report("working", "task");
+            reporter.report("blocked", "boom");
+        });
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn worker_reports_lifecycle_with_herdr_env() {
+    let dir = TempDir::new("herdr-worker");
+    let (bin, log) = herdr_stub(&dir);
+    let mock = mock_happy_turn().await;
+    let (status, stdout, stderr) = run_worker_with_herdr(
+        Some(mock.port()),
+        &["--light", "--task", "hello worker"],
+        Some(("wT:p9", &bin)),
+    );
+    assert_eq!(status, Some(0), "exit 0 on success; stderr: {stderr}");
+    assert!(
+        stdout.trim_end().ends_with("dsh-worker: done"),
+        "sentinel is the last line: {stdout}"
+    );
+    // The stub recorded the working report (task as the message) and the
+    // idle report (exit 0).
+    assert!(
+        stub_log_contains(&log, "--state working --message hello worker"),
+        "working report: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    assert!(
+        stub_log_contains(&log, "--state idle --message exit 0"),
+        "idle report"
+    );
+    mock.stop().await;
 }
