@@ -121,7 +121,10 @@ impl AppUnderTest {
     /// Clean shutdown: Ctrl+Q, then kill + reap on timeout. Returns the exit
     /// status when the child exited.
     fn quit(&mut self, timeout: Duration) -> Option<i32> {
-        self.send(b"\x11");
+        // The child may already be gone (its exit closes the slave, so a
+        // write then fails with EIO) — the status poll below decides.
+        let _ = self.writer.write_all(b"\x11");
+        let _ = self.writer.flush();
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             if let Ok(Some(status)) = self.child.try_wait() {
@@ -566,7 +569,12 @@ async fn ctrl_q_exits_cleanly() {
     );
 
     let status = app.quit(Duration::from_secs(10));
-    assert_eq!(status, Some(0), "clean exit status");
+    assert_eq!(
+        status,
+        Some(0),
+        "clean exit status; output: {:?}",
+        app.output()
+    );
     assert!(
         !app.output().contains("panicked"),
         "no panic text: {}",
