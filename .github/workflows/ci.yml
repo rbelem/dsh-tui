@@ -17,6 +17,10 @@ jobs:
         with:
           components: rustfmt, clippy, llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
+      # mold linker (see .cargo/config.toml) — the rust job also installs
+      # llvm-tools-preview, which ships lld as a fallback if apt mold fails.
+      - name: install mold
+        run: sudo apt-get install -y mold
       - name: fmt
         run: cargo fmt --check
       - name: clippy
@@ -48,6 +52,10 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
+      # mold linker (see .cargo/config.toml); llvm-tools-preview ships lld
+      # as a fallback if apt mold fails.
+      - name: install mold
+        run: sudo apt-get install -y mold
       # Report-only artifact + a fail-under gate ONE POINT BELOW the last
       # measured number (94.5% lines at the coverage push; the gate is at
       # 93 to absorb normal drift without blocking regressions above the

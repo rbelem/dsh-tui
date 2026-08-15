@@ -37,3 +37,10 @@ dirs = "6"
 [dev-dependencies]
 insta = "1"
 portable-pty = "0.8"
+
+# Faster dev builds: line tables keep backtraces working while dropping full
+# DWARF, and packed debuginfo keeps macOS links snappy (harmless on Linux).
+# Tests don't need full debug info, so CI is unaffected.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "packed"

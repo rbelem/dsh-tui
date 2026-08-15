@@ -1,0 +1,8 @@
+# Faster dev links: mold is provided by devbox.json on Linux (CI installs it
+# via apt in .github/workflows/ci.yml). Target-scoped so the macOS leg keeps
+# its default linker. Note: `-fuse-ld=mold` hard-fails at link time if mold is
+# not on PATH — devbox (or CI's apt mold) is the supported way to get it; the
+# documented fallback is lld (ships with rustup's llvm-tools-preview, which
+# the CI rust job already installs). See issue #13.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

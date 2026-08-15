@@ -5,6 +5,54 @@
       "last_modified": "2026-08-08T22:24:59Z",
       "resolved": "github:NixOS/nixpkgs/fe6deff5fad4a42d0e08d2bab3f2d6c7c88f3fe5?lastModified=1786227899&narHash=sha256-OhQlRgshGOrfGwtq15FR3CuIwNzsJt0ejbpWOPDVYfY%3D"
     },
+    "mold@latest": {
+      "last_modified": "2026-08-01T16:34:20Z",
+      "resolved": "github:NixOS/nixpkgs/a5cbcfe954791221bfffe2307f7d1a1bf61a871e#mold",
+      "source": "devbox-search",
+      "version": "2.41.0",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/w4vmpyybnpzcr7ws85jvfvsn6bpdz5il-mold-unwrapped-wrapper-2.41.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/w4vmpyybnpzcr7ws85jvfvsn6bpdz5il-mold-unwrapped-wrapper-2.41.0"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/mfasvapgvilwjxnpc4g1cnj39j0nfl64-mold-unwrapped-wrapper-2.41.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/mfasvapgvilwjxnpc4g1cnj39j0nfl64-mold-unwrapped-wrapper-2.41.0"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/662x8wpd1i8hbb3hpgl0ww8563scf86z-mold-unwrapped-wrapper-2.41.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/662x8wpd1i8hbb3hpgl0ww8563scf86z-mold-unwrapped-wrapper-2.41.0"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/cdzar65srqax4kb0nkm3mrp0midmcd2v-mold-unwrapped-wrapper-2.41.0",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/cdzar65srqax4kb0nkm3mrp0midmcd2v-mold-unwrapped-wrapper-2.41.0"
+        }
+      }
+    },
     "rustup@latest": {
       "last_modified": "2026-08-01T16:34:20Z",
       "plugin_version": "0.0.1",

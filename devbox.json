@@ -1,7 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/jetify-com/devbox/main/.schema/devbox.schema.json",
   "packages": [
-    "rustup@latest"
+    "rustup@latest",
+    "mold@latest"
   ],
   "shell": {
     "init_hook": [
