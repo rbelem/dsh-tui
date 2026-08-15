@@ -451,7 +451,9 @@ fn keymap_table() {
             key(KeyCode::Esc),
             Some(Action::Focus(Focus::Chat)),
         ),
-        (composer_focus, ctrl(KeyCode::Char('d')), Some(Action::None)),
+        // Ctrl+D in composer quits (shell EOF); in chat focus it keeps the
+        // scroll-half-page binding (see the chat cases above).
+        (composer_focus, ctrl(KeyCode::Char('d')), Some(Action::Quit)),
         // composer with the seed popup open: arrows navigate, Enter accepts,
         // Esc closes
         (slash_popup, key(KeyCode::Up), Some(Action::Input)),

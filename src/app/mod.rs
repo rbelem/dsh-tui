@@ -1503,12 +1503,18 @@ impl App {
 
     /// Composer bindings: chars edit the buffer; `Enter` submits,
     /// `Shift+Enter` inserts a newline (web parity, Q14); arrows/Home/End
-    /// move the caret; `Esc` returns focus to the chat. While a seed popup
-    /// is open, `Up`/`Down` navigate it, `Enter` accepts, `Esc` closes it.
+    /// move the caret; `Ctrl+D` quits (shell EOF convention — in chat focus
+    /// it keeps the vim-style scroll-half-page binding); `Esc` returns
+    /// focus to the chat. While a seed popup is open, `Up`/`Down` navigate
+    /// it, `Enter` accepts, `Esc` closes it.
     fn handle_composer_key(&mut self, key: KeyEvent) -> Action {
         use crossterm::event::{KeyCode, KeyModifiers};
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        if control && key.code == KeyCode::Char('d') {
+            return Action::Quit;
+        }
 
         if self.composer.popup().is_some() {
             // Esc always dismisses the popup — never hijacked by the
