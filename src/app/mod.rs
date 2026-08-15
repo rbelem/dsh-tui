@@ -119,6 +119,18 @@ pub enum Action {
     Select,
     /// Sidebar Enter switched the active session.
     SwitchSession(SessionId),
+    /// Sidebar `r` committed: rename the session (the run loop spawns
+    /// `session.rename`; the result lands as [`AppEvent::RenameDone`]).
+    RenameSession {
+        session_id: SessionId,
+        title: String,
+    },
+    /// Sidebar `f`: fork the session (spawned `session.fork`; the result
+    /// lands as [`AppEvent::ForkDone`]).
+    ForkSession(SessionId),
+    /// Sidebar `a`: archive the session (spawned `workspace.archiveSession`;
+    /// the result lands as [`AppEvent::ArchiveDone`]).
+    ArchiveSession(SessionId),
     /// Approval takeover answered with this outcome; the run loop posts the
     /// respond and resolves the takeover.
     AnswerApproval(ApprovalResponseOutcome),
@@ -270,6 +282,14 @@ pub struct App {
     /// The inline editor for the focused queue item's text (reuses the
     /// composer's buffer/caret primitives).
     pub queue_editor: Option<Composer>,
+    /// The inline rename editor for the selected sidebar session (`r`):
+    /// the target session id plus a Composer seeded with the current
+    /// title; Enter commits (spawned `session.rename`), Esc cancels, and
+    /// all navigation is inert while it's open.
+    pub rename_editor: Option<(SessionId, Composer)>,
+    /// A sidebar action (rename/fork/archive) is in flight — further
+    /// actions are inert (mirrors `queue_action_sending`).
+    pub sidebar_action_sending: bool,
     /// The cached `@`-catalog (skill.list result), fetched once on first
     /// open; a failed fetch is not cached so the next open retries.
     pub at_catalog: Option<AtCatalog>,
@@ -341,6 +361,8 @@ impl Default for App {
             queue_scroll: 0,
             queue_action_sending: false,
             queue_editor: None,
+            rename_editor: None,
+            sidebar_action_sending: false,
             at_catalog: None,
             launcher: None,
             pending_attachments: HashSet::new(),
@@ -1496,6 +1518,36 @@ impl App {
     /// sessions are unreachable.
     fn handle_sidebar_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::KeyCode;
+        // Inline rename editor (`r`): typing edits, Enter commits, Esc
+        // cancels, and every other key is inert while it's open (mirrors
+        // the queue editor).
+        if self.rename_editor.is_some() {
+            match key.code {
+                KeyCode::Char(c) => {
+                    if let Some((_, editor)) = &mut self.rename_editor {
+                        editor.insert_char(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some((_, editor)) = &mut self.rename_editor {
+                        editor.backspace();
+                    }
+                }
+                KeyCode::Enter => {
+                    let Some((session_id, mut editor)) = self.rename_editor.take() else {
+                        return Some(Action::None);
+                    };
+                    let title = editor.take();
+                    if title.trim().is_empty() {
+                        return Some(Action::None); // empty rename: cancel (queue parity)
+                    }
+                    return Some(Action::RenameSession { session_id, title });
+                }
+                KeyCode::Esc => self.rename_editor = None,
+                _ => {}
+            }
+            return Some(Action::None);
+        }
         let len = crate::ui::sidebar::SidebarGroup::visible_len(&self.sidebar_groups());
         match key.code {
             KeyCode::Char('q') => Some(Action::Quit),
@@ -1516,12 +1568,75 @@ impl App {
                 Some(Action::Select)
             }
             KeyCode::Enter => Some(self.switch_to_selected()),
+            // Sidebar session actions (rename/fork/archive): require a
+            // visible selection and one in-flight action at a time.
+            KeyCode::Char('r') => {
+                if self.sidebar_action_sending {
+                    return Some(Action::None);
+                }
+                self.open_rename_editor();
+                Some(Action::None)
+            }
+            KeyCode::Char('f') => {
+                if self.sidebar_action_sending {
+                    return Some(Action::None);
+                }
+                let Some(index) = crate::ui::sidebar::SidebarGroup::visible_session(
+                    &self.sidebar_groups(),
+                    self.sidebar.selected,
+                ) else {
+                    return Some(Action::None);
+                };
+                Some(Action::ForkSession(self.sessions[index].session_id.clone()))
+            }
+            KeyCode::Char('a') => {
+                if self.sidebar_action_sending {
+                    return Some(Action::None);
+                }
+                let Some(index) = crate::ui::sidebar::SidebarGroup::visible_session(
+                    &self.sidebar_groups(),
+                    self.sidebar.selected,
+                ) else {
+                    return Some(Action::None);
+                };
+                Some(Action::ArchiveSession(
+                    self.sessions[index].session_id.clone(),
+                ))
+            }
             KeyCode::Esc => {
                 self.focus = Focus::Chat;
                 Some(Action::Focus(Focus::Chat))
             }
             _ => None,
         }
+    }
+
+    /// Open the inline rename editor for the selected sidebar session,
+    /// seeded with its displayed title (the `title` projection, falling
+    /// back to the session id — the sidebar's label rule).
+    fn open_rename_editor(&mut self) {
+        let Some(index) = crate::ui::sidebar::SidebarGroup::visible_session(
+            &self.sidebar_groups(),
+            self.sidebar.selected,
+        ) else {
+            return;
+        };
+        let summary = &self.sessions[index];
+        let title = summary
+            .projections
+            .as_ref()
+            .and_then(|block| block.values.get("title"))
+            .and_then(|value| {
+                value
+                    .as_str()
+                    .or_else(|| value.get("title").and_then(|v| v.as_str()))
+            })
+            .unwrap_or(&summary.session_id.0);
+        let mut editor = Composer::new();
+        for c in title.chars() {
+            editor.insert_char(c);
+        }
+        self.rename_editor = Some((summary.session_id.clone(), editor));
     }
 
     /// Enter in the composer: no-op on an empty buffer; a blocked no-op with

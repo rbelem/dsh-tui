@@ -113,6 +113,15 @@ impl App {
                                 Some(Action::RequestCatalog) => {
                                     self.request_catalog(event_tx.clone())
                                 }
+                                Some(Action::RenameSession { session_id, title }) => {
+                                    self.rename_session(session_id, title, event_tx.clone())
+                                }
+                                Some(Action::ForkSession(session_id)) => {
+                                    self.fork_session(session_id, event_tx.clone())
+                                }
+                                Some(Action::ArchiveSession(session_id)) => {
+                                    self.archive_session(session_id, event_tx.clone())
+                                }
                                 _ => {}
                             }
                             self.needs_draw = true;
@@ -132,6 +141,21 @@ impl App {
                         }
                         Some(AppEvent::AttachmentDone { attachment_id, result }) => {
                             self.on_attachment_done(attachment_id, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::RenameDone { session_id, result }) => {
+                            self.on_rename_done(session_id, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::ForkDone { result }) => {
+                            self.on_fork_done(result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::ArchiveDone { session_id, result }) => {
+                            self.on_archive_done(session_id, result);
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
@@ -428,6 +452,7 @@ impl App {
                         active: self.active_session.as_ref(),
                         selected: self.sidebar.selected,
                         focused: self.focus == Focus::Sidebar,
+                        editor: self.rename_editor.as_ref().map(|(_, editor)| editor),
                         theme: &self.theme,
                         locale: self.locale,
                     },
@@ -611,6 +636,152 @@ impl App {
     /// after store-changing events only — a failed fetch must not
     /// self-trigger (the caption-only row stays until the next store
     /// change re-encounters it, and each encounter retries once).
+    /// Spawn `session.rename` for the sidebar `r` editor (the loop keeps
+    /// pumping; the result lands as [`AppEvent::RenameDone`]). One sidebar
+    /// action in flight at a time (`sidebar_action_sending`, mirroring the
+    /// queue actions); without a client the action is dropped silently.
+    fn rename_session(
+        &mut self,
+        session_id: SessionId,
+        title: String,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self.sidebar_action_sending {
+            return;
+        }
+        self.sidebar_action_sending = true;
+        self.rename_editor = None; // a commit closes the editor
+        tokio::spawn(async move {
+            let result = client.session_rename(session_id.clone(), title).await;
+            let _ = event_tx.send(AppEvent::RenameDone { session_id, result });
+        });
+    }
+
+    /// Spawn `session.fork` for the sidebar `f` key (the child appears via
+    /// `host/session-added`; the result lands as [`AppEvent::ForkDone`]).
+    fn fork_session(&mut self, session_id: SessionId, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self.sidebar_action_sending {
+            return;
+        }
+        self.sidebar_action_sending = true;
+        tokio::spawn(async move {
+            let result = client.session_fork(session_id, None).await;
+            let _ = event_tx.send(AppEvent::ForkDone { result });
+        });
+    }
+
+    /// Spawn `workspace.archiveSession` for the sidebar `a` key; the value
+    /// is the FULL updated archive set, swapped in on completion.
+    fn archive_session(
+        &mut self,
+        session_id: SessionId,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self.sidebar_action_sending {
+            return;
+        }
+        self.sidebar_action_sending = true;
+        tokio::spawn(async move {
+            let result = client.workspace_archive_session(session_id.clone()).await;
+            let _ = event_tx.send(AppEvent::ArchiveDone { session_id, result });
+        });
+    }
+
+    /// Apply a finished rename: update the session row's `title` projection
+    /// in place (the sidebar label reads it) and toast; a failure toasts
+    /// with the guard re-armed and no state change.
+    fn on_rename_done(
+        &mut self,
+        session_id: SessionId,
+        result: Result<crate::wire::session::SessionRenameValue, ClientError>,
+    ) {
+        self.sidebar_action_sending = false;
+        match result {
+            Ok(value) => {
+                if let Some(summary) = self
+                    .sessions
+                    .iter_mut()
+                    .find(|summary| summary.session_id == session_id)
+                {
+                    let projections = summary.projections.get_or_insert_with(|| {
+                        crate::wire::session::SessionProjectionsBlock {
+                            as_of_seq: value.seq,
+                            values: Default::default(),
+                        }
+                    });
+                    projections
+                        .values
+                        .insert("title".into(), serde_json::json!(value.title));
+                }
+                self.set_toast(crate::i18n::tr(self.locale, "toast.renamed"));
+            }
+            Err(error) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.sidebar_action_failed",
+                &[&error.to_string()],
+            )),
+        }
+    }
+
+    /// Apply a finished fork: toast the new session id (the row itself
+    /// arrives via `host/session-added`).
+    fn on_fork_done(
+        &mut self,
+        result: Result<crate::wire::session::SessionForkValue, ClientError>,
+    ) {
+        self.sidebar_action_sending = false;
+        match result {
+            Ok(value) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.forked",
+                &[&value.session_id.0],
+            )),
+            Err(error) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.sidebar_action_failed",
+                &[&error.to_string()],
+            )),
+        }
+    }
+
+    /// Apply a finished archive: swap in the host's full archive set and
+    /// clamp the sidebar selection (archived-beats-membership re-renders
+    /// the group). The active session, if archived, keeps its chat content
+    /// but becomes unreachable by nav — the host frame path behaves the
+    /// same (ids + clamp only).
+    fn on_archive_done(
+        &mut self,
+        session_id: SessionId,
+        result: Result<crate::wire::workspace::WorkspaceArchiveSessionValue, ClientError>,
+    ) {
+        self.sidebar_action_sending = false;
+        match result {
+            Ok(value) => {
+                self.archived_session_ids = value.archived_session_ids;
+                self.sidebar
+                    .clamp(crate::ui::sidebar::SidebarGroup::visible_len(
+                        &self.sidebar_groups(),
+                    ));
+                self.set_toast(crate::i18n::tr(self.locale, "toast.archived"));
+                let _ = session_id;
+            }
+            Err(error) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.sidebar_action_failed",
+                &[&error.to_string()],
+            )),
+        }
+    }
+
     fn drain_attachment_needs(&mut self, event_tx: mpsc::UnboundedSender<AppEvent>) {
         let (Some(client), Some(session_id)) = (self.client.clone(), self.active_session.clone())
         else {

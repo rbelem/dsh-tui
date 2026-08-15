@@ -26,6 +26,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Widget};
 
 use crate::i18n::{Locale, tr, trf};
+use crate::ui::composer::Composer;
 use crate::ui::style;
 use crate::wire::session::{SessionId, SessionSummary, WorkspaceId};
 use crate::wire::workspace::WorkspaceView;
@@ -228,6 +229,9 @@ pub struct SidebarView<'a> {
     pub active: Option<&'a SessionId>,
     pub selected: usize,
     pub focused: bool,
+    /// The inline rename editor (`r`): while open it replaces the selected
+    /// session row with an editable line (mirrors the queue editor).
+    pub editor: Option<&'a Composer>,
     pub theme: &'a crate::theme::Theme,
     pub locale: Locale,
 }
@@ -322,6 +326,35 @@ impl Widget for SidebarView<'_> {
                 }
                 DisplayRow::Session { index, ordinal } => {
                     let summary = &self.sessions[*index];
+                    // The rename editor replaces the selected row while
+                    // open (mirrors the queue editor's inline line).
+                    if let Some(editor) = self.editor
+                        && self.focused
+                        && *ordinal == self.selected
+                    {
+                        if editor.buffer().is_empty() {
+                            buf.set_line(
+                                inner.x,
+                                y,
+                                &Line::styled(
+                                    format!(" > {}", tr(self.locale, "sidebar.rename_hint")),
+                                    style::hint(self.theme),
+                                ),
+                                inner.width,
+                            );
+                        } else {
+                            let line = Line::from(vec![
+                                Span::styled(" > ", style::active(self.theme)),
+                                Span::styled(
+                                    editor.buffer().to_string(),
+                                    style::active(self.theme),
+                                ),
+                                Span::styled("|", style::hint(self.theme)),
+                            ]);
+                            buf.set_line(inner.x, y, &line, inner.width);
+                        }
+                        continue;
+                    }
                     if self.focused && *ordinal == self.selected {
                         buf.set_style(
                             Rect::new(inner.x, y, inner.width, 1),

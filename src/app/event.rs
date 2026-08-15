@@ -17,11 +17,13 @@ use crate::wire::approvals::ApprovalRequestId;
 use crate::wire::events::{HostFrame, MuxFrame};
 use crate::wire::rpc::{RpcId, RpcReceipt};
 use crate::wire::session::{
-    AttachmentId, SessionAttachmentValue, SessionCancelValue, SessionHistoryValue, SessionId,
-    SessionPromptValue, SessionUpdateQueueValue,
+    AttachmentId, SessionAttachmentValue, SessionCancelValue, SessionForkValue,
+    SessionHistoryValue, SessionId, SessionPromptValue, SessionRenameValue,
+    SessionUpdateQueueValue,
 };
 use crate::wire::settings::{SettingsDescribeValue, SettingsWriteValue};
 use crate::wire::skills::SkillListValue;
+use crate::wire::workspace::WorkspaceArchiveSessionValue;
 
 /// One event for the main loop.
 #[derive(Debug)]
@@ -65,6 +67,20 @@ pub enum AppEvent {
     QueueActionDone {
         kind: QueueActionKind,
         result: Result<SessionUpdateQueueValue, ClientError>,
+    },
+    /// A spawned sidebar `session.rename` finished (`r`).
+    RenameDone {
+        session_id: SessionId,
+        result: Result<SessionRenameValue, ClientError>,
+    },
+    /// A spawned sidebar `session.fork` finished (`f`).
+    ForkDone {
+        result: Result<SessionForkValue, ClientError>,
+    },
+    /// A spawned sidebar `workspace.archiveSession` finished (`a`).
+    ArchiveDone {
+        session_id: SessionId,
+        result: Result<WorkspaceArchiveSessionValue, ClientError>,
     },
     /// The `@` catalog fetch (`skill.list`) finished.
     CatalogLoaded {
