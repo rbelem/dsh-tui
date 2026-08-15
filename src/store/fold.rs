@@ -249,7 +249,9 @@ impl Fold {
                 let Some(index) = non_negative(*index) else {
                     return;
                 };
-                grow_to(&mut assistant.blocks, index);
+                if !grow_to(&mut assistant.blocks, index) {
+                    return;
+                }
                 let block = match assistant.blocks[index].take() {
                     Some(AssistantBlock::Text { text: previous }) => AssistantBlock::Text {
                         text: format!("{previous}{text}"),
@@ -262,7 +264,9 @@ impl Fold {
                 let Some(index) = non_negative(*index) else {
                     return;
                 };
-                grow_to(&mut assistant.blocks, index);
+                if !grow_to(&mut assistant.blocks, index) {
+                    return;
+                }
                 let block = match assistant.blocks[index].take() {
                     Some(AssistantBlock::Reasoning { text: previous }) => {
                         AssistantBlock::Reasoning {
@@ -282,7 +286,9 @@ impl Fold {
                 let Some(index) = non_negative(*index) else {
                     return;
                 };
-                grow_to(&mut assistant.blocks, index);
+                if !grow_to(&mut assistant.blocks, index) {
+                    return;
+                }
                 let block = match assistant.blocks[index].take() {
                     Some(AssistantBlock::ToolCall {
                         call_id,
@@ -785,10 +791,18 @@ fn non_negative(index: i64) -> Option<usize> {
     usize::try_from(index).ok()
 }
 
-fn grow_to(blocks: &mut Vec<Option<AssistantBlock>>, index: usize) {
+/// Upper bound on assistant blocks per turn: guards the grow_to allocation
+/// against hostile stream chunk indices (i64::MAX would otherwise OOM).
+const MAX_ASSISTANT_BLOCKS: usize = 1024;
+
+fn grow_to(blocks: &mut Vec<Option<AssistantBlock>>, index: usize) -> bool {
+    if index >= MAX_ASSISTANT_BLOCKS {
+        return false;
+    }
     if blocks.len() <= index {
         blocks.resize_with(index + 1, || None);
     }
+    true
 }
 
 fn set_block(
@@ -796,8 +810,9 @@ fn set_block(
     index: usize,
     block: Option<AssistantBlock>,
 ) {
-    grow_to(blocks, index);
-    blocks[index] = block;
+    if grow_to(blocks, index) {
+        blocks[index] = block;
+    }
 }
 
 fn compact_blocks(blocks: &[Option<AssistantBlock>]) -> Vec<AssistantBlock> {

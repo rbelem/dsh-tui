@@ -1582,3 +1582,51 @@ fn finish_chunk_object_reason_failure_and_other_shapes() {
         "aborted finish without failure must be rejected"
     );
 }
+
+#[test]
+fn hostile_chunk_index_is_dropped_not_allocated() {
+    let mut store = SessionStore::new();
+    let s = "s1";
+    ingest_all(
+        &mut store,
+        s,
+        vec![
+            ev(1, "user/message", user_msg("m1", "hi", user_source())),
+            ev(2, "step/start", json!({"turn": 1, "step": 1})),
+            ev(
+                3,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "text-delta", "index": 999_999_999, "text": "x"}),
+                ),
+            ),
+            ev(
+                4,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "block-start", "index": 2_147_483_647, "blockType": "text"}),
+                ),
+            ),
+            ev(
+                5,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "reasoning-delta", "index": 1_000_000_000, "text": "y"}),
+                ),
+            ),
+        ],
+    );
+    let nodes = nodes(&store, s);
+    assert_eq!(
+        nodes.len(),
+        1,
+        "hostile chunks must not materialize an assistant node"
+    );
+    assert_eq!(nodes[0].key, "m1", "the user message survives untouched");
+}
