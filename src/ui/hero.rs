@@ -8,6 +8,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
@@ -32,10 +33,24 @@ impl Widget for HeroView<'_> {
         let x = area.x + 2;
         let width = area.width.saturating_sub(2);
 
+        // #11 two-tone wordmark: `dsh` in bold accent, `-tui` in bold text.
         buf.set_line(
             x,
             top,
-            &Line::styled("dsh-tui", style::header(self.theme)),
+            &Line::from(vec![
+                Span::styled(
+                    "dsh",
+                    Style::new()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(self.theme.accent),
+                ),
+                Span::styled(
+                    "-tui",
+                    Style::new()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(self.theme.text),
+                ),
+            ]),
             width,
         );
         buf.set_line(

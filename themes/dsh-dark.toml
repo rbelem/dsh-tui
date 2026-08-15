@@ -1,0 +1,13 @@
+# dsh-dark (issue #11): the new default theme — a warm-stepped dark,
+# modeled on the modern-TUI reference palette (no pure black).
+name = "dsh-dark"
+accent = "#fab283"
+muted = "#808080"
+error = "#e06c75"
+warning = "#f5a742"
+success = "#7fd88f"
+code = "#9d7cd8"
+bg = "#0a0a0a"
+panel_bg = "#141414"
+text = "#eeeeee"
+border = "#3c3c3c"

@@ -625,24 +625,32 @@ fn row_cache_width_change_invalidates_all() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn markdown_code_fence_highlights_with_syntect() {
-    let lines = render_markdown(
+fn markdown_code_fence_uses_the_code_token_with_spacing() {
+    let (lines, code_ranges) = render_markdown(
         "before\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\nafter",
         Default::default(),
         &Theme::default(),
     );
     let fence_lines: Vec<String> = lines.iter().map(ToString::to_string).collect();
     assert!(
-        fence_lines.iter().any(|line| line.starts_with("│ ")),
-        "code fence lines carry the │ prefix: {fence_lines:?}"
+        fence_lines.iter().any(|line| line.contains("fn main()")),
+        "code body renders: {fence_lines:?}"
     );
-    assert!(fence_lines.iter().any(|line| line.contains("fn main()")));
+    assert!(
+        !fence_lines.iter().any(|line| line.starts_with("│ ")),
+        "no indent prefix (#11): {fence_lines:?}"
+    );
+    // The whole fenced body is one contiguous range, bracketed by blanks.
+    assert_eq!(code_ranges, vec![(2, 5)], "code lines: {fence_lines:?}");
+    assert!(fence_lines[1].trim().is_empty(), "blank before");
+    assert!(fence_lines[5].trim().is_empty(), "blank after");
     assert!(fence_lines.iter().any(|line| line == "before"));
+    assert!(fence_lines.iter().any(|line| line == "after"));
 }
 
 #[test]
 fn markdown_table_renders_joined_rows() {
-    let lines = render_markdown(
+    let (lines, _code) = render_markdown(
         "| a | b |\n|---|---|\n| 1 | 2 |",
         Default::default(),
         &Theme::default(),
@@ -661,7 +669,7 @@ fn markdown_table_renders_joined_rows() {
 #[test]
 fn markdown_strikethrough_sets_modifier() {
     use ratatui::style::Modifier;
-    let lines = render_markdown("~~gone~~ here", Default::default(), &Theme::default());
+    let (lines, _code) = render_markdown("~~gone~~ here", Default::default(), &Theme::default());
     assert_eq!(lines.len(), 1);
     let crossed = lines[0]
         .spans
@@ -679,7 +687,7 @@ fn markdown_strikethrough_sets_modifier() {
 fn markdown_cjk_renders_and_wraps_by_width() {
     // CJK text renders without panic and wraps at narrow widths.
     let text = "日本語のテキストが続きますここで折り返されるはずです";
-    let lines = render_markdown(text, Default::default(), &Theme::default());
+    let (lines, _code) = render_markdown(text, Default::default(), &Theme::default());
     assert_eq!(lines.len(), 1);
     let mut store = SessionStore::new();
     store

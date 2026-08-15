@@ -118,7 +118,7 @@ fn markdown_surface_covers_every_sink_branch() {
         "\n",
         "| head | short |\n|---|---|\n| long-cell | x |\n| missing |\n", // table
     );
-    let lines = render_markdown(md, Style::default().fg(theme.text), &theme);
+    let (lines, _code) = render_markdown(md, Style::default().fg(theme.text), &theme);
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
 
     // Heading is bold; quote lines carry the │ prefix.
@@ -162,11 +162,10 @@ fn markdown_surface_covers_every_sink_branch() {
     let code = lines
         .iter()
         .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "code"));
-    assert!(code.is_some_and(|l| {
-        l.spans
-            .iter()
-            .any(|s| s.style.has_modifier(Modifier::REVERSED))
-    }));
+    assert!(
+        code.is_some_and(|l| l.spans.iter().any(|s| s.style.fg == Some(theme.code))),
+        "#11: inline code is the theme's code token (REVERSED is gone)"
+    );
     // Soft break joins with a space; hard break splits lines.
     assert!(
         rendered.iter().any(|l| l.starts_with("soft break")),
@@ -193,26 +192,39 @@ fn markdown_surface_covers_every_sink_branch() {
 }
 
 #[test]
-fn fenced_code_highlights_with_syntect() {
+fn fenced_code_uses_the_code_token_with_panel_fill_range() {
     let theme = Theme::default();
-    let lines = render_markdown(
-        "```rs\nfn main() { println!(\"hi\"); }\n```",
+    let (lines, code_ranges) = render_markdown(
+        "before\n```rs\nfn main() { println!(\"hi\"); }\n```\nafter",
         Style::default().fg(theme.text),
         &theme,
     );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    // #11: no box, no `│` indent — the code lines are bare.
     assert!(
-        rendered.iter().any(|l| l.starts_with("│ ")),
-        "fenced lines: {rendered:?}"
+        rendered.iter().any(|l| l.contains("fn main()")),
+        "code body rendered: {rendered:?}"
     );
-    // Syntect styles map onto ratatui modifiers/colors for the tokens.
-    let spans: Vec<_> = lines.iter().flat_map(|l| l.spans.iter()).collect();
     assert!(
-        spans
-            .iter()
-            .any(|s| !s.style.fg.is_none() || s.style != Style::default()),
-        "syntect styles applied: {rendered:?}"
+        !rendered.iter().any(|l| l.starts_with("│ ")),
+        "no indent prefix: {rendered:?}"
     );
+    // The body is the theme's code token; the row cache gets the range.
+    assert_eq!(
+        code_ranges,
+        vec![(2, 3)],
+        "code lines: index of `fn main...` + the 1-blank-row spacing"
+    );
+    let code_span = lines[2]
+        .spans
+        .iter()
+        .find(|s| s.content.as_ref() == "fn main() { println!(\"hi\"); }")
+        .expect("code span");
+    assert_eq!(code_span.style.fg, Some(theme.code), "code token color");
+    // 1 blank row around the block.
+    assert!(rendered[1].trim().is_empty(), "blank before: {rendered:?}");
+    assert!(rendered[3].trim().is_empty(), "blank after: {rendered:?}");
+    assert_eq!(rendered[4], "after", "content follows: {rendered:?}");
 }
 
 #[test]

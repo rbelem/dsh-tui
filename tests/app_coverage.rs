@@ -766,6 +766,64 @@ async fn malformed_history_page_sets_last_error() {
 // 7. status line + store misc
 // ---------------------------------------------------------------------------
 
+/// The composer top-rule row after one forced draw (acceptance 11 helper).
+async fn composer_rule_row(app: &mut App) -> u16 {
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        app,
+        &mut term,
+        vec![
+            AppEvent::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+            AppEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL)),
+        ],
+    )
+    .await;
+    let buffer = term.backend().buffer();
+    for y in (0..24u16).rev() {
+        if buffer
+            .cell((40, y))
+            .is_some_and(|cell| cell.symbol() == "─")
+        {
+            return y;
+        }
+    }
+    panic!("composer rule not found");
+}
+
+/// Acceptance 11: the queue strip is zero-height when the queue is empty —
+/// no double gap between the chat and the composer. The composer's top rule
+/// must sit at the same row with and without a queue.
+#[tokio::test]
+async fn empty_queue_strip_renders_zero_height() {
+    // Empty queue: chat 21 + composer 2 + status 1 at 80x24 — rule at 21.
+    let mut app = app_with_session();
+    let empty = composer_rule_row(&mut app).await;
+    assert_eq!(empty, 21, "no strip, no double gap");
+
+    // One queued item: the strip docks at row 20; the composer stays put.
+    let mut app = app_with_session();
+    app.store
+        .ingest(MuxFrame::SessionQueue {
+            session_id: SessionId("s1".into()),
+            items: vec![QueueItem {
+                id: MessageId("m1".into()),
+                placement: QueuePlacement::Queued,
+                message: QueueMessage {
+                    id: MessageId("m1".into()),
+                    role: MessageRole::User,
+                    content: vec![],
+                    source: QueueMessageSource {
+                        kind: "user".into(),
+                    },
+                },
+            }],
+        })
+        .expect("queue frame");
+    let with_queue = composer_rule_row(&mut app).await;
+    assert_eq!(with_queue, 21, "composer anchored below the strip");
+}
+
 #[tokio::test]
 async fn status_line_shows_the_truncated_marker() {
     let mut app = app_with_session();
@@ -781,7 +839,10 @@ async fn status_line_shows_the_truncated_marker() {
     let mut term = Terminal::new(backend).unwrap();
     draw_and_quit(&mut app, &mut term, Vec::new()).await;
     let view = format!("{}", term.backend());
-    assert!(view.contains("truncated"), "status marker: {view}");
+    assert!(
+        view.contains("△"),
+        "#11: the truncated state is the △ warning indicator: {view}"
+    );
     assert!(view.contains("seq 2"), "seq line: {view}");
 }
 

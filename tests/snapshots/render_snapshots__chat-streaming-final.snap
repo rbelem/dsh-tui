@@ -1,11 +1,12 @@
 ---
 source: tests/render_snapshots.rs
+assertion_line: 388
 expression: snapshot
 ---
-"hello                                                                                                                   "
-"Hello world                                                                                                             "
 "                                                                                                                        "
+"  hello                                                                                                                 "
 "                                                                                                                        "
+"  Hello world                                                                                                           "
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "

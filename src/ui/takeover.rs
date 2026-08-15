@@ -205,10 +205,17 @@ impl Widget for ApprovalView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered()
             .border_style(style::border(self.theme))
+            .title_style(
+                ratatui::style::Style::new()
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+                    .fg(self.theme.accent),
+            )
             .title(tr(self.locale, "takeover.approval"))
             .padding(ratatui::widgets::Padding::horizontal(1));
         let inner = block.inner(area);
         block.render(area, buf);
+        // #11 popup treatment: panel_bg interior fill.
+        buf.set_style(inner, style::panel_fill(self.theme));
 
         let takeover = self.takeover;
         let mut lines: Vec<Line> = vec![
@@ -270,10 +277,17 @@ impl Widget for QuestionView<'_> {
         };
         let block = Block::bordered()
             .border_style(style::border(self.theme))
+            .title_style(
+                ratatui::style::Style::new()
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+                    .fg(self.theme.accent),
+            )
             .title(title)
             .padding(ratatui::widgets::Padding::horizontal(1));
         let inner = block.inner(area);
         block.render(area, buf);
+        // #11 popup treatment: panel_bg interior fill.
+        buf.set_style(inner, style::panel_fill(self.theme));
 
         let takeover = self.takeover;
         let many = takeover.questions.len() > 1;
@@ -309,7 +323,9 @@ impl Widget for QuestionView<'_> {
                         "[ ] "
                     }
                 } else if focused && row == question.cursor {
-                    "› "
+                    // #11: the cursor row's stripe (the row is bold via
+                    // style::selection below).
+                    "▎ "
                 } else {
                     "  "
                 };

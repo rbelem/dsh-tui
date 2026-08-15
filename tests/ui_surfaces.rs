@@ -137,7 +137,9 @@ async fn sidebar_empty_60x15() {
 
     let view = format!("{}", term.backend());
     assert!(view.contains("no sessions yet"), "empty state: {view}");
-    assert!(view.contains("they'll appear here"), "hint: {view}");
+    // The hint is 20 chars; the 22-col pane's 2/2 padding leaves 18 content
+    // columns, so at the minimum sidebar width it truncates (#11).
+    assert!(view.contains("they'll appear"), "hint: {view}");
 }
 
 #[tokio::test]
@@ -153,6 +155,199 @@ async fn sidebar_collapses_below_60_columns() {
         !view.contains("Sessions"),
         "sidebar hidden at 50 cols: {view}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #11 acceptance: pane gap, selection stripe, status alignment
+// ---------------------------------------------------------------------------
+
+/// Acceptance 8: at 80 columns the sidebar and the chat are separated by a
+/// 1-cell gap column showing the main bg — no rule character.
+#[tokio::test]
+async fn sidebar_chat_gap_column_at_80x24() {
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    draw_and_quit(
+        &mut app,
+        &mut term,
+        vec![AppEvent::Frame(frame(
+            "s1",
+            ev(1, "user/message", user_msg("m1", "chat body")),
+        ))],
+    )
+    .await;
+
+    let buffer = term.backend().buffer();
+    // Sidebar = cols 0..22, gap = col 22, chat starts at 23. The gap cell
+    // must be a plain space (bg contrast), never a border glyph.
+    let gap = buffer.cell((22, 2)).expect("gap cell at the header row");
+    assert_eq!(gap.symbol(), " ", "gap shows bg, not a rule: {gap:?}");
+    let header = buffer.cell((2, 0)).expect("sidebar header start");
+    assert_eq!(
+        header.symbol(),
+        "S",
+        "2/2 padding: header at col 2: {header:?}"
+    );
+    let edge = buffer.cell((21, 2)).expect("sidebar edge cell");
+    assert_eq!(
+        edge.symbol(),
+        " ",
+        "sidebar edge is padding, not a border glyph: {edge:?}"
+    );
+    let chat = buffer.cell((23, 2)).expect("chat cell");
+    assert_eq!(chat.symbol(), " ", "chat starts after the gap: {chat:?}");
+}
+
+/// Acceptance 9: below 80 columns the gap drops to 0 — the chat starts
+/// immediately after the 22-col sidebar, exactly as before #11.
+#[tokio::test]
+async fn sidebar_chat_gap_drops_below_80() {
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    let backend = TestBackend::new(79, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    draw_and_quit(
+        &mut app,
+        &mut term,
+        vec![AppEvent::Frame(frame(
+            "s1",
+            ev(1, "user/message", user_msg("m1", "chat body")),
+        ))],
+    )
+    .await;
+    let buffer = term.backend().buffer();
+    let chat_edge = buffer.cell((22, 2)).expect("chat starts at col 22");
+    assert_eq!(chat_edge.symbol(), " ", "no gap column: {chat_edge:?}");
+}
+
+/// Acceptance 4: the sidebar's selected row is identifiable by glyph +
+/// weight — the accent `▎` stripe — never color alone.
+#[tokio::test]
+async fn sidebar_selected_row_carries_the_stripe() {
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false), summary("s2", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Sidebar;
+    let backend = TestBackend::new(80, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    // No Esc: it would drop focus back to the chat before the final draw
+    // (the selection only renders while the sidebar has focus). F(1) forces
+    // a draw with the sidebar focused; Ctrl+Q quits without redrawing.
+    let mut events = vec![AppEvent::Key(key(KeyCode::F(1)))];
+    events.push(AppEvent::Key(ctrl(KeyCode::Char('q'))));
+    run_with(&mut app, &mut term, events).await;
+
+    let view = format!("{}", term.backend());
+    assert!(view.contains("▎"), "selection stripe: {view}");
+    assert!(view.contains("▎● s1"), "stripe + active marker: {view}");
+    assert!(
+        view.contains("   s2"),
+        "unselected row keeps the spacer column: {view}"
+    );
+}
+
+/// Acceptance 10: the status indicator stays right-aligned (and the left
+/// cluster absorbs the truncation) down to width 40.
+#[tokio::test]
+async fn status_indicator_right_aligned_at_width_40() {
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(40, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    draw_and_quit(
+        &mut app,
+        &mut term,
+        vec![AppEvent::Frame(frame(
+            "s1",
+            ev(1, "user/message", user_msg("m1", "chat body")),
+        ))],
+    )
+    .await;
+
+    let view = format!("{}", term.backend());
+    // Height 15: chat 12 + composer 2 + status 1 — the status is row 14.
+    // buffer_view wraps each row in quotes; strip them before trimming.
+    let status = view
+        .lines()
+        .nth(14)
+        .expect("status row")
+        .trim_matches('"')
+        .trim_end();
+    assert!(
+        status.ends_with('●'),
+        "idle indicator right-aligned at 40 cols: {status:?}"
+    );
+    assert!(view.contains("session s1"), "left context: {view}");
+}
+
+/// Acceptance 5: the status indicators carry their semantic colors — the
+/// braille spinner in accent (running), `●` success (idle), `✕` error.
+#[tokio::test]
+async fn status_indicators_carry_semantic_colors() {
+    let dark = dsh_tui::theme::Theme::from_toml_str(include_str!("../themes/dsh-dark.toml"))
+        .expect("dsh-dark");
+    // Drive one app instance to a draw and read its status-row indicator.
+    async fn indicator_cell(app: &mut App) -> (String, ratatui::style::Color) {
+        let backend = TestBackend::new(100, 15);
+        let mut term = Terminal::new(backend).unwrap();
+        // F(1) forces the draw; Ctrl+Q quits without redrawing.
+        run_with(
+            app,
+            &mut term,
+            vec![
+                AppEvent::Key(key(KeyCode::F(1))),
+                AppEvent::Key(ctrl(KeyCode::Char('q'))),
+            ],
+        )
+        .await;
+        let buffer = term.backend().buffer();
+        let y = 14u16; // status row (chat 12 + composer 2 + status 1)
+        for x in 0..100u16 {
+            if let Some(cell) = buffer.cell((x, y))
+                && matches!(cell.symbol(), "●" | "⠋" | "✕" | "△")
+            {
+                return (cell.symbol().to_string(), cell.fg);
+            }
+        }
+        panic!("no indicator glyph on the status row");
+    }
+
+    // Idle: ● in success.
+    let mut app = App::default();
+    app.theme = dark.clone();
+    app.sessions = vec![summary("s1", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    let (glyph, fg) = indicator_cell(&mut app).await;
+    assert_eq!(glyph, "●");
+    assert_eq!(fg, dark.success, "idle indicator = success");
+
+    // Running: ⠋ in accent.
+    let mut app = App::default();
+    app.theme = dark.clone();
+    app.sessions = vec![summary("s1", true)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    let (glyph, fg) = indicator_cell(&mut app).await;
+    assert_eq!(glyph, "⠋");
+    assert_eq!(fg, dark.accent, "running indicator = accent");
+
+    // Error: ✕ in error (beats the running spinner).
+    let mut app = App::default();
+    app.theme = dark;
+    app.sessions = vec![summary("s1", true)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.last_error = Some("boom".into());
+    app.focus = Focus::Chat;
+    let (glyph, fg) = indicator_cell(&mut app).await;
+    assert_eq!(glyph, "✕");
+    assert_eq!(fg, app.theme.error, "error indicator = error");
 }
 
 // ---------------------------------------------------------------------------

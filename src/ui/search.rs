@@ -10,6 +10,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Widget};
 
@@ -53,9 +54,16 @@ impl Widget for SidebarSearchPopup<'_> {
         Clear.render(area, buf);
         let block = Block::bordered()
             .border_style(style::border(self.theme))
+            .title_style(
+                Style::new()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(self.theme.accent),
+            )
             .title(tr(self.locale, "search.title"));
         let inner = block.inner(area);
         block.render(area, buf);
+        // #11 popup treatment: panel_bg fill after Clear, inside the border.
+        buf.set_style(inner, style::panel_fill(self.theme));
         let mut y = inner.y;
 
         // The query line: the typed text, or the placeholder while empty.

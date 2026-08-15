@@ -217,7 +217,10 @@ async fn attach_history_draw_end_to_end() {
         view.contains("from history"),
         "user text from the history page"
     );
-    assert!(view.contains("│ fn main()"), "code fence from history");
+    assert!(
+        view.contains("fn main()"),
+        "code fence from history (#11: no │ indent)"
+    );
     assert!(
         view.contains("streamed hello"),
         "streamed assistant text via mux"
@@ -657,12 +660,13 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
     result.expect("run");
 
     assert!(!app.view.follow, "manual scroll disables follow");
-    // The clamp draw above pinned the bottom at offset 3 (5 rows; layout:
-    // chat 2 + composer 2 + status 1); j at the bottom-lock is a no-op —
-    // the offset NEVER passes the last content line (the old assertion
-    // `offset == 4` encoded the unclamped overscroll that blanked the
-    // viewport below the tail).
-    assert_eq!(app.view.offset, 3, "j is bottom-locked");
+    // The clamp draw above pinned the bottom at offset 8 (9 rendered lines:
+    // 5 messages + 4 #11 inter-message blanks; chat content rows 1: the
+    // pane is 2 tall and ChatView reserves 1 blank top row; composer 2 +
+    // status 1); j at the bottom-lock is a no-op — the offset NEVER passes
+    // the last content line (the old assertion `offset == 4` encoded the
+    // unclamped overscroll that blanked the viewport below the tail).
+    assert_eq!(app.view.offset, 8, "j is bottom-locked");
 }
 
 // ---------------------------------------------------------------------------
@@ -672,7 +676,10 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
 #[tokio::test]
 async fn scroll_past_end_locks_the_tail_at_the_bottom() {
     // Thirty one-line messages at 100x30: chat pane = 27 rows (100x30 minus
-    // composer 2 + status 1), so the bottom-locked max offset is 30 - 27 = 3.
+    // composer 2 + status 1), content rows 26 (ChatView reserves 1 blank top
+    // row), and each message carries one #11 inter-message blank, so the
+    // rendered total is 30 + 29 = 59 lines and the bottom-locked max offset
+    // is 59 - 26 = 33.
 
     // Phase 1: hammer j far past the end, then a half-page Ctrl+d. The
     // offset must STOP at the bottom-lock (unclamped it would read 200+13).
@@ -709,7 +716,7 @@ async fn scroll_past_end_locks_the_tail_at_the_bottom() {
 
     // Bottom-locked: 200 j's + a half-page down never pass the last line.
     assert_eq!(
-        app.view.offset, 3,
+        app.view.offset, 33,
         "scroll stops at total - chat_height, not past it"
     );
     assert!(!app.view.follow, "manual scroll disabled follow");
@@ -721,10 +728,12 @@ async fn scroll_past_end_locks_the_tail_at_the_bottom() {
         rows.get(26).is_some_and(|row| row.contains("text-30")),
         "tail at the bottom row: {view}"
     );
-    // The window starts at line 3: the head is gone, the middle is intact.
+    // The window starts at line 33 (the inter-message blank under text-17,
+    // ChatView's blank top row aside): the head is gone, the middle intact.
+    // Buffer row 2: row 0 is the sidebar header, row 1 its blank spacer.
     assert!(
-        rows.first().is_some_and(|row| row.contains("text-4")),
-        "window start at the top row: {view}"
+        rows.get(2).is_some_and(|row| row.contains("text-18")),
+        "window start just below the top: {view}"
     );
     assert!(
         !view.contains("text-1 ") && !view.contains("text-2 ") && !view.contains("text-3 "),
@@ -732,7 +741,8 @@ async fn scroll_past_end_locks_the_tail_at_the_bottom() {
     );
     assert!(view.contains("text-29"), "second-to-last visible: {view}");
 
-    // Phase 2: scrolling UP still works from the lock (Ctrl+u from 3 → 0).
+    // Phase 2: scrolling UP still works from the lock (three half-page
+    // Ctrl+u's from 33 climb back to the top: 33 → 20 → 7 → 0).
     let mut app = App::default();
     app.focus = Focus::Chat; // j/ctrl-u/'q' are chat keys (boot is Composer)
     app.active_session = Some(SessionId("s1".into()));
@@ -758,8 +768,10 @@ async fn scroll_past_end_locks_the_tail_at_the_bottom() {
     for _ in 0..10 {
         tx.send(AppEvent::Key(key(KeyCode::Char('j')))).expect("j");
     }
-    tx.send(AppEvent::Key(ctrl(KeyCode::Char('u'))))
-        .expect("ctrl-u");
+    for _ in 0..3 {
+        tx.send(AppEvent::Key(ctrl(KeyCode::Char('u'))))
+            .expect("ctrl-u");
+    }
     tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
     let (result, app) = run_task.await.expect("run task");
     result.expect("run");

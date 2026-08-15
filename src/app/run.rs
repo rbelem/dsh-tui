@@ -11,11 +11,12 @@ use std::time::Instant;
 
 use ratatui::Terminal;
 use ratatui::backend::Backend;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Margin, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::event::{AnswerTag, AppEvent, EventChannel, QueueActionKind};
 use crate::app::{Action, App, AppError, AtCatalog, DRAW_INTERVAL, Focus};
@@ -371,9 +372,22 @@ impl App {
         let size = term.size()?;
         let full = Rect::new(0, 0, size.width, size.height);
         let sidebar_width = sidebar_width(size.width);
-        let [sidebar_area, right] =
-            Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Fill(1)])
-                .areas(full);
+        // #11 pane construction: an explicit 1-cell gap column between the
+        // sidebar and the main pane — the frame-wide `bg` fill (drawn first
+        // in the closure) shows through it, so the panes are separated by
+        // background contrast, not a rule character. Dropped below 80
+        // columns so narrow terminals keep every column (the doubled-gap
+        // risk around a Length(0) strip can't occur: the sidebar only
+        // collapses below 60, where the gap is already 0).
+        let gap = if size.width >= 80 { 1 } else { 0 };
+        // The spacing is applied INSIDE the solver (ratatui 0.30): split
+        // yields one rect per constraint, and the 1-cell gap lands between
+        // them — the sidebar keeps its exact `Length`, the right pane
+        // starts after the gap, and the gap column shows the frame `bg`.
+        let panes = Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Fill(1)])
+            .spacing(gap)
+            .split(full);
+        let (sidebar_area, right) = (panes[0], panes[1]);
         // The queue strip docks between the chat and the composer while the
         // active session has queue items; an emptied queue closes the popup.
         let queue_empty = self.active_queue().is_empty();
@@ -390,9 +404,14 @@ impl App {
         ])
         .areas(right);
 
-        self.view.viewport_height = chat_area.height;
-        let chat_height = chat_area.height;
-        let width = chat_area.width;
+        // ChatView reserves 1 blank top row, so the visible content rows are
+        // one fewer than the pane height; follow/clamp math uses the content
+        // height so the tail always lands on the bottom row.
+        let chat_height = chat_area.height.saturating_sub(1);
+        self.view.viewport_height = chat_height;
+        // The chat's 2/2 content margin lives inside ChatView; the row cache
+        // wraps at the same content width so cached lines always fit.
+        let width = crate::render::chat_view::content_width(chat_area.width);
 
         let sidebar_groups = self.sidebar_groups();
         self.sidebar
@@ -430,7 +449,16 @@ impl App {
                 self.view.offset = total.saturating_sub(chat_height as usize);
             }
         }
-        let status = self.status_line(&self.theme);
+        // #11 status line: two clusters — left context (session · seq ·
+        // mode, muted separators), right state indicator. The right chunk is
+        // sized to its content so it never wraps; the left absorbs all
+        // truncation.
+        let (status_left, status_right) = self.status_line(&self.theme);
+        let status_width = status_right
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()) as u16)
+            .sum::<u16>()
+            .max(1);
         let offset = self.view.offset;
         // Field-level chain (not `self.active_queue()`) so the borrow stays
         // disjoint from `&mut self.row_cache` inside the closure.
@@ -491,6 +519,15 @@ impl App {
             .unwrap_or_default();
 
         term.draw(|frame| {
+            // #11: frame-wide `bg` fill first — the chat/status/queue paint
+            // over it, the sidebar's `panel_bg` fill covers its own pane,
+            // and the 1-cell gap column shows the main `bg`. With the Reset
+            // default theme the fill is a no-op (non-truecolor terminals
+            // skip bg fills entirely).
+            let area = frame.area();
+            frame
+                .buffer_mut()
+                .set_style(area, Style::new().bg(self.theme.bg));
             if sidebar_width > 0 {
                 frame.render_widget(
                     SidebarView {
@@ -547,7 +584,21 @@ impl App {
                 },
                 composer_area,
             );
-            frame.render_widget(Paragraph::new(status), status_area);
+            // #11 status line: [Fill(1) left, Length(indicator) right] —
+            // a single Line can't right-align; the right cluster never
+            // wraps, the left truncates first. 1/1 horizontal inset.
+            let status_area = status_area.inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            });
+            let [status_left_area, status_right_area] =
+                Layout::horizontal([Constraint::Fill(1), Constraint::Length(status_width)])
+                    .areas(status_area);
+            frame.render_widget(Paragraph::new(Line::from(status_left)), status_left_area);
+            frame.render_widget(
+                Paragraph::new(Line::from(status_right)).right_aligned(),
+                status_right_area,
+            );
 
             // The queue popup docks above the strip (view-only v1).
             if self.queue_popup_open {
@@ -575,12 +626,13 @@ impl App {
                 }
             }
 
-            // The real terminal cursor marks the focused composer.
+            // The real terminal cursor marks the focused composer. The
+            // inner rect mirrors ComposerView's top rule + 2/2 padding.
             if self.focus == Focus::Composer {
                 let inner = Rect {
-                    x: composer_area.x,
+                    x: composer_area.x + 2,
                     y: composer_area.y + 1,
-                    width: composer_area.width,
+                    width: composer_area.width.saturating_sub(4),
                     height: composer_area.height.saturating_sub(1),
                 };
                 let (row, col, _) = self.composer.caret_layout(inner.width);
@@ -1505,75 +1557,72 @@ impl App {
         }
     }
 
-    /// The one-line status: session id · last seq · truncated flag · running
-    /// · focused surface · transient hint · toast · error.
-    fn status_line(&self, theme: &Theme) -> Line<'static> {
-        let mut parts: Vec<Line<'static>> = Vec::new();
+    /// The two status-line clusters (#11): left = session · seq · mode with
+    /// muted `·` separators (plus the transient hint/toast/error text),
+    /// right = one colored state indicator — `⠋` accent spinner (running),
+    /// `●` success (idle), `△` warning (truncated history), `✕` error.
+    fn status_line(&self, theme: &Theme) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
         let body = |text: String| Span::styled(text, Style::default().fg(theme.text));
+        let mut parts: Vec<Span<'static>> = Vec::new();
         match &self.active_session {
-            Some(session_id) => parts.push(Line::from(body(crate::i18n::trf(
+            Some(session_id) => parts.push(body(crate::i18n::trf(
                 self.locale,
                 "status.session",
                 &[session_id.as_ref()],
-            )))),
-            None => parts.push(Line::from(body(
-                crate::i18n::tr(self.locale, "status.no_session").into(),
             ))),
+            None => parts.push(body(
+                crate::i18n::tr(self.locale, "status.no_session").into(),
+            )),
         }
+        let mut truncated = false;
         if let Some(state) = self
             .active_session
             .as_ref()
             .and_then(|session_id| self.store.session(session_id))
         {
-            parts.push(Line::from(body(crate::i18n::trf(
+            parts.push(body(crate::i18n::trf(
                 self.locale,
                 "status.seq",
                 &[&state.last_seq.to_string()],
-            ))));
-            if state.truncated {
-                parts.push(Line::from(body(
-                    crate::i18n::tr(self.locale, "status.truncated").into(),
-                )));
-            }
-        }
-        if self.session_running() {
-            parts.push(Line::from(body(
-                crate::i18n::tr(self.locale, "status.running").into(),
             )));
+            truncated = state.truncated;
         }
-        parts.push(Line::from(body(crate::i18n::trf(
+        parts.push(body(crate::i18n::trf(
             self.locale,
             "status.focus",
             &[self.focus.label(self.locale)],
-        ))));
+        )));
         if let Some(hint) = &self.hint {
-            parts.push(Line::from(Span::styled(hint.clone(), style::hint(theme))));
+            parts.push(Span::styled(hint.clone(), style::hint(theme)));
         }
         if let Some((toast, _)) = &self.toast {
-            parts.push(Line::from(Span::styled(toast.clone(), style::hint(theme))));
+            parts.push(Span::styled(toast.clone(), style::hint(theme)));
         }
         if let Some(error) = &self.last_error {
-            parts.push(Line::from(Span::styled(
+            parts.push(Span::styled(
                 crate::i18n::trf(self.locale, "status.error", &[error]),
                 Style::default().fg(theme.error),
-            )));
+            ));
         }
-        Line::from(
-            parts
-                .into_iter()
-                .enumerate()
-                .flat_map(|(i, line)| {
-                    let mut spans = line.spans;
-                    if i > 0 {
-                        let mut joined = vec![Span::raw(" · ")];
-                        joined.append(&mut spans);
-                        joined
-                    } else {
-                        spans
-                    }
-                })
-                .collect::<Vec<_>>(),
-        )
+        // Muted ` · ` separators between the left-cluster parts.
+        let mut left = Vec::with_capacity(parts.len() * 2 - 1);
+        for (i, span) in parts.into_iter().enumerate() {
+            if i > 0 {
+                left.push(Span::styled(" · ", style::hint(theme)));
+            }
+            left.push(span);
+        }
+        let indicator = if self.last_error.is_some() {
+            ("✕", Style::default().fg(theme.error))
+        } else if self.session_running() {
+            ("⠋", style::active(theme))
+        } else if truncated {
+            ("△", style::warning(theme))
+        } else {
+            ("●", Style::default().fg(theme.success))
+        };
+        let right = vec![Span::styled(indicator.0, indicator.1)];
+        (left, right)
     }
 }
 

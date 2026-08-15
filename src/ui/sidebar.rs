@@ -1,20 +1,27 @@
 //! The sidebar: the session list from the gateway, grouped by workspace.
 //!
-//! Layout: a full-height left pane separated from the chat by a single
-//! vertical rule (no box). The first line is the "Sessions" header; groups
-//! follow: one per workspace (header = workspace title, sessions nested
-//! under it), then an "ungrouped" group for sessions no workspace claims,
-//! then the archived group at the foot — collapsed to a "archived (N)"
-//! header by default (its sessions are listed but hidden — out of j/k
-//! navigation); `e` in the sidebar expands it for the app lifetime (no
-//! persistence) and its sessions render as rows. With no workspaces and
-//! no archived sessions the list renders FLAT (no group headers) —
-//! exactly the pre-grouping look.
+//! Layout (#11): a full-height left pane with NO box — it is separated from
+//! the chat by the `panel_bg` fill vs the main `bg` (plus the top-level
+//! 1-cell spacing gap). Content: the "Sessions" header, one blank row, the
+//! groups (header = workspace title, sessions nested under it), then an
+//! "ungrouped" group for sessions no workspace claims, then the archived
+//! group at the foot — collapsed to a "archived (N)" header by default (its
+//! sessions are listed but hidden — out of j/k navigation); `e` in the
+//! sidebar expands it for the app lifetime (no persistence) and its sessions
+//! render as rows. With no workspaces and no archived sessions the list
+//! renders FLAT (no group headers) — exactly the pre-grouping look. A muted
+//! `dsh-tui` footer line anchors the bottom.
 //!
 //! Rows: the active session carries a bold `●` marker at all times; the
-//! selection row is reversed, but only while the sidebar has focus (an
-//! unfocused sidebar shows no selection — there is nothing to operate on).
-//! Running sessions get a dim `· running` suffix.
+//! selection row is bold with an accent `▎` stripe, but only while the
+//! sidebar has focus (an unfocused sidebar shows no selection — there is
+//! nothing to operate on). Running sessions get a dim `· running` suffix.
+//!
+//! The list is the attach flow's `session.list` + `workspace.list`
+//! snapshots plus live host-stream updates (`App::handle_host_frame`).
+//! Selection is session-space: `SidebarState::selected` counts only
+//! visible session rows (group headers are never selectable, and j/k
+//! crosses group boundaries as if they weren't there).
 //!
 //! The list is the attach flow's `session.list` + `workspace.list`
 //! snapshots plus live host-stream updates (`App::handle_host_frame`).
@@ -23,9 +30,10 @@
 //! crosses group boundaries as if they weren't there).
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Margin, Rect};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Widget};
+use ratatui::widgets::Widget;
 
 use crate::i18n::{Locale, tr, trf};
 use crate::ui::composer::Composer;
@@ -243,22 +251,25 @@ pub struct SidebarView<'a> {
 
 impl Widget for SidebarView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let block = Block::new()
-            .borders(Borders::RIGHT)
-            .border_style(if self.focused {
-                style::border_focused(self.theme)
-            } else {
-                style::border(self.theme)
-            });
-        let inner = block.inner(area);
-        block.render(area, buf);
-        if inner.height == 0 || inner.width == 0 {
+        if area.height == 0 || area.width == 0 {
             return;
         }
+        // No block (#11): the pane is separated by background contrast and
+        // the top-level spacing gap; the `panel_bg` fill marks the surface.
+        // With the Reset default theme the fill is a no-op.
+        buf.set_style(area, style::panel_fill(self.theme));
+        let inner = area.inner(Margin {
+            horizontal: 2,
+            vertical: 0,
+        });
+        if inner.width == 0 {
+            return;
+        }
+        // The "Sessions" header, then 1 blank row; rows start at inner.y+2.
         buf.set_line(
             inner.x,
             inner.y,
-            &Line::styled(tr(self.locale, "sidebar.header"), style::header(self.theme)),
+            &Line::styled(tr(self.locale, "sidebar.header"), style::hint(self.theme)),
             inner.width,
         );
 
@@ -283,6 +294,7 @@ impl Widget for SidebarView<'_> {
                     inner.width,
                 );
             }
+            self.render_footer(inner, buf);
             return;
         }
 
@@ -310,14 +322,16 @@ impl Widget for SidebarView<'_> {
             }
         }
 
-        let visible = inner.height.saturating_sub(1) as usize;
+        // Rows share the pane with the header row, the blank row under it,
+        // and the footer line.
+        let visible = inner.height.saturating_sub(3) as usize;
         // Keep the selected row visible (scrolls so it sits at the edge).
         let start = selected_display.saturating_sub(visible.saturating_sub(1));
         let grouped = self.groups.iter().any(|group| group.title.is_some());
         for (row_index, row) in rows.iter().enumerate().skip(start) {
-            let line_index = row_index - start + 1;
-            if line_index as u16 >= inner.height {
-                break;
+            let line_index = row_index - start + 2;
+            if line_index as u16 >= inner.height.saturating_sub(1) {
+                break; // the footer row is reserved
             }
             let y = inner.y + line_index as u16;
             match row {
@@ -325,42 +339,37 @@ impl Widget for SidebarView<'_> {
                     buf.set_line(
                         inner.x,
                         y,
-                        &Line::styled(title.as_str(), style::header(self.theme)),
+                        &Line::styled(title.as_str(), style::hint(self.theme)),
                         inner.width,
                     );
                 }
                 DisplayRow::Session { index, ordinal } => {
                     let summary = &self.sessions[*index];
+                    let selected = self.focused && *ordinal == self.selected;
                     // The rename editor replaces the selected row while
                     // open (mirrors the queue editor's inline line).
                     if let Some(editor) = self.editor
-                        && self.focused
-                        && *ordinal == self.selected
+                        && selected
                     {
-                        if editor.buffer().is_empty() {
-                            buf.set_line(
-                                inner.x,
-                                y,
-                                &Line::styled(
-                                    format!(" > {}", tr(self.locale, "sidebar.rename_hint")),
-                                    style::hint(self.theme),
-                                ),
-                                inner.width,
-                            );
-                        } else {
-                            let line = Line::from(vec![
-                                Span::styled(" > ", style::active(self.theme)),
-                                Span::styled(
-                                    editor.buffer().to_string(),
-                                    style::active(self.theme),
-                                ),
-                                Span::styled("|", style::hint(self.theme)),
-                            ]);
-                            buf.set_line(inner.x, y, &line, inner.width);
-                        }
+                        let line = Line::from(vec![
+                            Span::styled("▎", style::selection_stripe(self.theme)),
+                            Span::styled(" > ", style::active(self.theme)),
+                            Span::styled(
+                                if editor.buffer().is_empty() {
+                                    tr(self.locale, "sidebar.rename_hint").to_string()
+                                } else {
+                                    editor.buffer().to_string()
+                                },
+                                style::active(self.theme),
+                            ),
+                            Span::styled("|", style::hint(self.theme)),
+                        ]);
+                        buf.set_line(inner.x, y, &line, inner.width);
                         continue;
                     }
-                    if self.focused && *ordinal == self.selected {
+                    if selected {
+                        // #11: bold + accent `▎` stripe (no REVERSED) —
+                        // state carried by glyph shape + weight.
                         buf.set_style(
                             Rect::new(inner.x, y, inner.width, 1),
                             style::selection(self.theme),
@@ -368,15 +377,36 @@ impl Widget for SidebarView<'_> {
                     }
                     let is_active = self.active == Some(&summary.session_id);
                     // Grouped sessions nest one space under their header;
-                    // flat mode keeps the pre-grouping column exactly.
+                    // flat mode keeps the pre-grouping column exactly. The
+                    // selection stripe occupies the leading cell, keeping
+                    // the label column aligned across rows.
                     let marker = match (grouped, is_active) {
                         (true, true) => " ● ",
                         (true, false) => "   ",
                         (false, true) => "● ",
                         (false, false) => "  ",
                     };
-                    let mut spans = vec![Span::styled(marker, style::active(self.theme))];
-                    spans.push(Span::raw(label(summary)));
+                    let mut spans = vec![if selected {
+                        Span::styled("▎", style::selection_stripe(self.theme))
+                    } else {
+                        Span::raw(" ")
+                    }];
+                    spans.push(Span::styled(marker, style::active(self.theme)));
+                    // Session titles in text; session-ids muted; the active
+                    // session's title is bold (hierarchy by weight).
+                    let label_style = match title_of(summary) {
+                        Some(_) => {
+                            Style::default()
+                                .fg(self.theme.text)
+                                .add_modifier(if is_active {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                })
+                        }
+                        None => style::hint(self.theme),
+                    };
+                    spans.push(Span::styled(label(summary), label_style));
                     if summary.running {
                         spans.push(Span::styled(
                             tr(self.locale, "sidebar.running"),
@@ -387,11 +417,27 @@ impl Widget for SidebarView<'_> {
                 }
             }
         }
+        self.render_footer(inner, buf);
     }
 }
 
-/// Row label: the session title projection when present, else the id.
-fn label(summary: &SessionSummary) -> String {
+impl SidebarView<'_> {
+    /// The muted `dsh-tui` footer anchoring the bottom of the pane.
+    fn render_footer(&self, inner: Rect, buf: &mut Buffer) {
+        if inner.height >= 1 {
+            buf.set_line(
+                inner.x,
+                inner.bottom() - 1,
+                &Line::styled("dsh-tui", style::hint(self.theme)),
+                inner.width,
+            );
+        }
+    }
+}
+
+/// The session title projection, when present (non-blank); `None` when the
+/// row falls back to the session id.
+fn title_of(summary: &SessionSummary) -> Option<String> {
     let title = summary
         .projections
         .as_ref()
@@ -403,9 +449,16 @@ fn label(summary: &SessionSummary) -> String {
                 .as_str()
                 .or_else(|| value.get("title").and_then(|v| v.as_str()))
         });
-    match title {
-        Some(title) if !title.trim().is_empty() => title.to_string(),
-        _ => summary.session_id.0.clone(),
+    title
+        .filter(|title| !title.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// Row label: the session title projection when present, else the id.
+fn label(summary: &SessionSummary) -> String {
+    match title_of(summary) {
+        Some(title) => title,
+        None => summary.session_id.0.clone(),
     }
 }
 

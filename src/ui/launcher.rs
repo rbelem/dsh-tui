@@ -222,9 +222,16 @@ impl Widget for LauncherPopup<'_> {
         Clear.render(area, buf);
         let block = Block::bordered()
             .border_style(crate::ui::style::border(self.theme))
+            .title_style(
+                ratatui::style::Style::new()
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+                    .fg(self.theme.accent),
+            )
             .title(crate::i18n::tr(self.locale, "launcher.title"));
         let inner = block.inner(area);
         block.render(area, buf);
+        // #11 popup treatment: panel_bg fill after Clear, inside the border.
+        buf.set_style(inner, crate::ui::style::panel_fill(self.theme));
         let mut y = inner.y;
 
         // The search line: the typed text, or the placeholder while empty.

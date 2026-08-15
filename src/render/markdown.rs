@@ -5,42 +5,42 @@
 //! rows; caching happens at the [`crate::render::row_cache::RowCache`] level
 //! (idle nodes cached, dirty nodes re-parsed).
 //!
-//! Markdown surface: CommonMark + tables + strikethrough via pulldown-cmark,
-//! syntect-highlighted code fences, `[image]` placeholder captions that
-//! upgrade to inline images when the [`crate::render::image`] pipeline has
-//! decoded bytes for the attachment ([`render_node_full`] reports the filler
-//! segments; v1 has no fetch path, so captions are what renders). Semantic
-//! styling only — no hardcoded colors: dim/bold/italic/crossed-out/reversed
-//! modifiers; colors come from the theme registry lane later. Code fences
-//! are the one sanctioned color source (syntect's fixed default theme).
+//! Markdown surface (#11): CommonMark + tables + strikethrough via
+//! pulldown-cmark, `[image]` placeholder captions that upgrade to inline
+//! images when the [`crate::render::image`] pipeline has decoded bytes for
+//! the attachment ([`render_node_full`] reports the filler segments; v1 has
+//! no fetch path, so captions are what renders). Semantic styling only —
+//! no hardcoded colors: dim/bold/italic/crossed-out modifiers; colors come
+//! from the theme tokens. Code (inline + fenced blocks) is the theme's
+//! `code` token; fenced blocks additionally report their line range so the
+//! row cache can paint the `panel_bg` fill at full content width (no box,
+//! no indent). One blank row around code blocks and before headings; links
+//! are the accent token.
 
-use std::sync::OnceLock;
-
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{FontStyle, ThemeSet};
-use syntect::parsing::SyntaxSet;
 use unicode_width::UnicodeWidthStr;
 
 use crate::i18n::{Locale, tr, trf};
 use crate::render::image::{ImageCache, ImageRow};
 use crate::store::event_data::ContentBlock;
-use crate::store::node::{AssistantBlock, ChatNode, NodeData, UserNodeKind};
+use crate::store::node::{AssistantBlock, ChatNode, NodeData};
 use crate::theme::Theme;
 
-/// Inline code uses reversed video for background emphasis (no colors).
-const CODE_MODIFIER: Modifier = Modifier::REVERSED;
 /// Maximum width of a tool-arguments preview on the call line.
 const ARGS_PREVIEW_MAX: usize = 100;
 
 /// [`render_node_full`] output: the display lines plus the inline-image
-/// segments. Segment `line_index` values are PRE-wrap indices into `lines`;
-/// the row cache re-bases them after wrapping (filler lines never split, so
-/// the re-base is exact).
+/// segments and the code-block line ranges. Segment/range line indices are
+/// PRE-wrap indices into `lines`; the row cache re-bases them after wrapping
+/// (filler lines never split, so the re-base is exact).
 pub struct NodeRender {
     pub lines: Vec<Line<'static>>,
     pub images: Vec<ImageRow>,
+    /// Half-open line ranges (into `lines`, pre-wrap) that are fenced code:
+    /// the row cache paints them with the theme's `panel_bg` fill at full
+    /// content width.
+    pub code_ranges: Vec<(usize, usize)>,
 }
 
 /// Render one chat node to (unwrapped) display lines. `collapsed` is the
@@ -86,16 +86,29 @@ pub fn render_node_full(
         width,
     };
     let mut image_rows = Vec::new();
+    let mut code_ranges = Vec::new();
     let lines = match &node.data {
-        NodeData::User { kind, content, .. } => {
-            render_user_node(*kind, content, theme, locale, &plan, &mut image_rows)
+        NodeData::User { content, .. } => {
+            let (lines, ranges) =
+                render_content_blocks(content, theme, locale, &plan, &mut image_rows);
+            code_ranges = ranges;
+            lines
         }
         NodeData::Assistant {
             blocks,
             interrupted,
             ..
         } => {
-            let mut lines = render_assistant_blocks(blocks, theme, locale);
+            let mut lines = Vec::new();
+            for block in blocks {
+                let (block_lines, block_ranges) = render_assistant_block(block, theme, locale);
+                code_ranges.extend(
+                    block_ranges
+                        .into_iter()
+                        .map(|(start, end)| (start + lines.len(), end + lines.len())),
+                );
+                lines.extend(block_lines);
+            }
             if *interrupted {
                 lines.push(Line::styled(
                     tr(locale, "marker.interrupted"),
@@ -104,15 +117,19 @@ pub fn render_node_full(
             }
             lines
         }
-        NodeData::Tool { call, result, .. } => render_tool_node(
-            call.as_ref(),
-            result.as_deref(),
-            collapsed,
-            theme,
-            locale,
-            &plan,
-            &mut image_rows,
-        ),
+        NodeData::Tool { call, result, .. } => {
+            let (lines, ranges) = render_tool_node(
+                call.as_ref(),
+                result.as_deref(),
+                collapsed,
+                theme,
+                locale,
+                &plan,
+                &mut image_rows,
+            );
+            code_ranges = ranges;
+            lines
+        }
         NodeData::Compaction {
             shadowed_item_count,
             ..
@@ -142,12 +159,19 @@ pub fn render_node_full(
     NodeRender {
         lines,
         images: image_rows,
+        code_ranges,
     }
 }
 
 /// Render the markdown `text` with `base_style` into display lines. `theme`
-/// supplies the fence colors (`│ ` prefix = muted; unfenced code = code).
-pub fn render_markdown(text: &str, base_style: Style, theme: &Theme) -> Vec<Line<'static>> {
+/// supplies the token colors (text/muted/code/accent). Returns the lines
+/// plus the half-open line ranges (into the returned vec) that are fenced
+/// code — the `panel_bg` fill targets.
+pub fn render_markdown(
+    text: &str,
+    base_style: Style,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let mut options = pulldown_cmark::Options::empty();
     // ENABLE_HEADINGS / ENABLE_BOLD_ITALIC were removed in pulldown-cmark
     // 0.12+ (headings and bold/italic are always enabled); tables and
@@ -159,73 +183,59 @@ pub fn render_markdown(text: &str, base_style: Style, theme: &Theme) -> Vec<Line
     for event in parser {
         sink.push_event(event);
     }
-    sink.finish()
+    sink.finish();
+    (sink.lines, sink.code_ranges)
 }
 
 // ---------------------------------------------------------------------------
 // node renderers
 // ---------------------------------------------------------------------------
 
-fn render_user_node(
-    kind: UserNodeKind,
-    content: &[ContentBlock],
+/// Render one assistant block into lines; the returned code ranges index
+/// into the returned vec. (Assistant blocks have no image content, so the
+/// image plan is not threaded here.)
+fn render_assistant_block(
+    block: &AssistantBlock,
     theme: &Theme,
     locale: Locale,
-    plan: &InlinePlan<'_>,
-    image_rows: &mut Vec<ImageRow>,
-) -> Vec<Line<'static>> {
-    // The Steering distinction is a store TODO (v1 renders by source kind);
-    // user and context rows render their content identically.
-    let _ = kind;
-    render_content_blocks(content, theme, locale, plan, image_rows)
-}
-
-fn render_assistant_blocks(
-    blocks: &[AssistantBlock],
-    theme: &Theme,
-    locale: Locale,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    for block in blocks {
-        match block {
-            AssistantBlock::Text { text } => lines.extend(render_markdown(
-                text,
-                Style::default().fg(theme.text),
-                theme,
-            )),
-            AssistantBlock::Reasoning { text } => lines.extend(render_markdown(
-                text,
-                Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
-                theme,
-            )),
-            AssistantBlock::ToolCall { name, args_raw, .. } => {
-                lines.push(tool_call_line(name, args_raw, theme, locale));
-            }
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    match block {
+        AssistantBlock::Text { text } => {
+            render_markdown(text, Style::default().fg(theme.text), theme)
         }
+        AssistantBlock::Reasoning { text } => render_markdown(
+            text,
+            Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
+            theme,
+        ),
+        AssistantBlock::ToolCall { name, args_raw, .. } => (
+            vec![tool_call_line(name, args_raw, theme, locale)],
+            Vec::new(),
+        ),
     }
-    lines
 }
 
+/// Render content blocks into lines; the returned code ranges index into
+/// the returned vec.
 fn render_content_blocks(
     content: &[ContentBlock],
     theme: &Theme,
     locale: Locale,
     plan: &InlinePlan<'_>,
     image_rows: &mut Vec<ImageRow>,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let mut lines = Vec::new();
+    let mut code_ranges = Vec::new();
     for block in content {
-        match block {
-            ContentBlock::Text { text } => lines.extend(render_markdown(
-                text,
-                Style::default().fg(theme.text),
-                theme,
-            )),
-            ContentBlock::Reasoning { text } => lines.extend(render_markdown(
+        let (block_lines, block_ranges) = match block {
+            ContentBlock::Text { text } => {
+                render_markdown(text, Style::default().fg(theme.text), theme)
+            }
+            ContentBlock::Reasoning { text } => render_markdown(
                 text,
                 Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
                 theme,
-            )),
+            ),
             ContentBlock::Image { attachment } => {
                 let name = attachment
                     .name
@@ -233,10 +243,10 @@ fn render_content_blocks(
                     .unwrap_or_else(|| tr(locale, "marker.image_default"));
                 // The caption is the placeholder tier AND the inline image's
                 // label — always emitted, byte-identical either way.
-                lines.push(Line::styled(
+                let mut caption_lines = vec![Line::styled(
                     trf(locale, "marker.image", &[name]),
                     Style::default().fg(theme.muted),
-                ));
+                )];
                 // Inline tier: decoded bytes in the cache → reserve `rows`
                 // blank filler lines below the caption; the draw loop paints
                 // the image widget over them. v1's cache is always empty
@@ -244,40 +254,54 @@ fn render_content_blocks(
                 if let Some(loaded) = plan.cache.get(&attachment.attachment_id) {
                     let rows = ImageCache::inline_rows(&loaded.source, plan.width);
                     image_rows.push(ImageRow {
-                        line_index: lines.len(),
+                        line_index: lines.len() + caption_lines.len(),
                         attachment_id: attachment.attachment_id.clone(),
                         rows,
                     });
-                    lines.extend((0..rows).map(|_| Line::raw("")));
+                    caption_lines.extend((0..rows).map(|_| Line::raw("")));
                 }
+                (caption_lines, Vec::new())
             }
-            ContentBlock::ToolCall { name, .. } => {
-                lines.push(Line::styled(
+            ContentBlock::ToolCall { name, .. } => (
+                vec![Line::styled(
                     format!("{} {name}", tr(locale, "marker.tool")),
                     Style::default().fg(theme.text),
-                ));
-            }
+                )],
+                Vec::new(),
+            ),
             ContentBlock::ToolResult { is_error, .. } => {
                 let suffix = if *is_error == Some(true) {
                     tr(locale, "marker.failed_suffix")
                 } else {
                     ""
                 };
-                lines.push(Line::styled(
-                    format!("{}{suffix}", tr(locale, "marker.tool_result")),
-                    Style::default().fg(theme.muted),
-                ));
+                (
+                    vec![Line::styled(
+                        format!("{}{suffix}", tr(locale, "marker.tool_result")),
+                        Style::default().fg(theme.muted),
+                    )],
+                    Vec::new(),
+                )
             }
             ContentBlock::Raw(value) => {
                 let block_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("?");
-                lines.push(Line::styled(
-                    trf(locale, "marker.block", &[block_type]),
-                    Style::default().fg(theme.muted),
-                ));
+                (
+                    vec![Line::styled(
+                        trf(locale, "marker.block", &[block_type]),
+                        Style::default().fg(theme.muted),
+                    )],
+                    Vec::new(),
+                )
             }
-        }
+        };
+        code_ranges.extend(
+            block_ranges
+                .into_iter()
+                .map(|(start, end)| (start + lines.len(), end + lines.len())),
+        );
+        lines.extend(block_lines);
     }
-    lines
+    (lines, code_ranges)
 }
 
 fn render_tool_node(
@@ -288,7 +312,7 @@ fn render_tool_node(
     locale: Locale,
     plan: &InlinePlan<'_>,
     image_rows: &mut Vec<ImageRow>,
-) -> Vec<Line<'static>> {
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let name = call
         .map(|c| c.name.as_str())
         .or_else(|| result.and_then(|r| r.call.as_ref().map(|c| c.name.as_str())))
@@ -308,21 +332,26 @@ fn render_tool_node(
         } else {
             Style::default().fg(theme.text)
         };
-        return vec![Line::styled(
-            format!("{} {name}{suffix}", tr(locale, "marker.tool")),
-            style,
-        )];
+        return (
+            vec![Line::styled(
+                format!("{} {name}{suffix}", tr(locale, "marker.tool")),
+                style,
+            )],
+            Vec::new(),
+        );
     }
 
     let mut lines = vec![tool_call_line(name, args_raw, theme, locale)];
+    let mut code_ranges = Vec::new();
     if let Some(result) = result {
-        lines.extend(render_content_blocks(
-            &result.content,
-            theme,
-            locale,
-            plan,
-            image_rows,
-        ));
+        let (result_lines, result_ranges) =
+            render_content_blocks(&result.content, theme, locale, plan, image_rows);
+        code_ranges.extend(
+            result_ranges
+                .into_iter()
+                .map(|(start, end)| (start + lines.len(), end + lines.len())),
+        );
+        lines.extend(result_lines);
         if result.is_error {
             let code = result
                 .error
@@ -335,7 +364,7 @@ fn render_tool_node(
             ));
         }
     }
-    lines
+    (lines, code_ranges)
 }
 
 fn tool_call_line(name: &str, args_raw: &str, theme: &Theme, locale: Locale) -> Line<'static> {
@@ -400,6 +429,12 @@ struct Sink {
     base: Style,
     theme: Theme,
     lines: Vec<Line<'static>>,
+    /// Half-open line ranges (into `lines`) that are fenced code — the
+    /// `panel_bg` fill targets.
+    code_ranges: Vec<(usize, usize)>,
+    /// Inside a link: the accent color applies (span-level, so nested
+    /// emphasis still works).
+    link: bool,
     /// The line being assembled (blockquote/list markers prepended on flush).
     current: Vec<Span<'static>>,
     /// Open emphasis/strong/strikethrough/heading modifiers.
@@ -417,6 +452,8 @@ impl Sink {
             base,
             theme: theme.clone(),
             lines: Vec::new(),
+            code_ranges: Vec::new(),
+            link: false,
             current: Vec::new(),
             modifiers: Vec::new(),
             quote_depth: 0,
@@ -427,9 +464,8 @@ impl Sink {
         }
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish(&mut self) {
         self.flush_line();
-        self.lines
     }
 
     fn push_event(&mut self, event: pulldown_cmark::Event<'_>) {
@@ -444,9 +480,11 @@ impl Sink {
                 }
             }
             pulldown_cmark::Event::Code(code) => {
+                // #11: inline code is the theme's `code` token (violet),
+                // not reversed video.
                 self.push_span(Span::styled(
                     code.to_string(),
-                    self.style().add_modifier(CODE_MODIFIER),
+                    self.style().fg(self.theme.code),
                 ));
             }
             pulldown_cmark::Event::SoftBreak => self.push_span(Span::raw(" ")),
@@ -471,6 +509,9 @@ impl Sink {
             pulldown_cmark::Tag::Paragraph => {}
             pulldown_cmark::Tag::Heading { .. } => {
                 self.flush_line();
+                // #11: 1 blank row before headings (skipped at the very top
+                // of a message, where the blank would dangle).
+                self.blank_row();
                 self.modifiers.push(Modifier::BOLD);
             }
             pulldown_cmark::Tag::BlockQuote(_) => {
@@ -479,6 +520,9 @@ impl Sink {
             }
             pulldown_cmark::Tag::CodeBlock(kind) => {
                 self.flush_line();
+                // #11: 1 blank row before the block (the trailing one is
+                // emitted at TagEnd::CodeBlock).
+                self.blank_row();
                 let language = match kind {
                     pulldown_cmark::CodeBlockKind::Fenced(info) => {
                         info.split_whitespace().next().map(str::to_string)
@@ -522,7 +566,11 @@ impl Sink {
                 self.in_cell = true;
                 self.current.clear();
             }
-            pulldown_cmark::Tag::Link { .. } | pulldown_cmark::Tag::Image { .. } => {}
+            pulldown_cmark::Tag::Link { .. } => {
+                // #11: links are the accent token.
+                self.link = true;
+            }
+            pulldown_cmark::Tag::Image { .. } => {}
             _ => {}
         }
     }
@@ -540,11 +588,18 @@ impl Sink {
             }
             pulldown_cmark::TagEnd::CodeBlock => {
                 if let Some(code) = self.in_code.take() {
-                    self.lines.extend(highlight_code(
+                    let start = self.lines.len();
+                    self.lines.extend(code_block_lines(
                         &code.text,
                         code.language.as_deref(),
                         &self.theme,
                     ));
+                    let end = self.lines.len();
+                    if end > start {
+                        self.code_ranges.push((start, end));
+                    }
+                    // #11: 1 blank row after the block.
+                    self.lines.push(Line::raw(""));
                 }
             }
             pulldown_cmark::TagEnd::List(_) => {
@@ -578,7 +633,10 @@ impl Sink {
                 }
                 self.in_cell = false;
             }
-            pulldown_cmark::TagEnd::Link | pulldown_cmark::TagEnd::Image => {}
+            pulldown_cmark::TagEnd::Link => {
+                self.link = false;
+            }
+            pulldown_cmark::TagEnd::Image => {}
             _ => {}
         }
     }
@@ -589,10 +647,26 @@ impl Sink {
 
     fn style(&self) -> Style {
         let mut style = self.base;
+        if self.link {
+            style = style.fg(self.theme.accent);
+        }
         for modifier in &self.modifiers {
             style = style.add_modifier(*modifier);
         }
         style
+    }
+
+    /// Push one blank row — but not at the very top of the message (a
+    /// dangling leading blank) and never two in a row.
+    fn blank_row(&mut self) {
+        let has_content = !self.lines.is_empty() || !self.current.is_empty();
+        let last_is_blank = self
+            .lines
+            .last()
+            .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()));
+        if has_content && !last_is_blank {
+            self.lines.push(Line::raw(""));
+        }
     }
 
     fn flush_line(&mut self) {
@@ -663,80 +737,28 @@ fn cell_width(cell: &[Span<'_>]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// code fences (syntect)
+// code fences (#11)
 // ---------------------------------------------------------------------------
 
-/// Syntax set and theme set are process-wide and expensive; load once.
-fn syntaxes() -> &'static SyntaxSet {
-    static SYNTAXES: OnceLock<SyntaxSet> = OnceLock::new();
-    SYNTAXES.get_or_init(SyntaxSet::load_defaults_newlines)
-}
-
-fn themes() -> &'static ThemeSet {
-    static THEMES: OnceLock<ThemeSet> = OnceLock::new();
-    THEMES.get_or_init(ThemeSet::load_defaults)
-}
-
-/// Highlight one code block; one line per source line, `│ `-prefixed. The
-/// prefix is the theme's muted token; unfenced/unknown-language code is
-/// colored with the theme's code token; fenced code keeps syntect's fixed
-/// per-language colors (per-theme mapping is a TODO).
-fn highlight_code(code: &str, language: Option<&str>, app_theme: &Theme) -> Vec<Line<'static>> {
-    let resolved = language.and_then(|lang| {
-        syntaxes()
-            .find_syntax_by_name(lang)
-            .or_else(|| syntaxes().find_syntax_by_extension(lang))
-    });
-    let plain = resolved.is_none();
-    let syntax = resolved.unwrap_or_else(|| syntaxes().find_syntax_plain_text());
-    let theme = themes().themes.get("base16-ocean.dark").unwrap_or_else(|| {
-        themes()
-            .themes
-            .values()
-            .next()
-            .expect("default themes non-empty")
-    });
-    let mut highlighter = HighlightLines::new(syntax, theme);
-    code.split('\n')
+/// One line per source line, all in the theme's `code` token (violet) — no
+/// box, no `│` prefix, no indent: the block body carries a `panel_bg` fill
+/// painted by the row cache at full content width. Per-language syntax
+/// highlighting was dropped with #11 (the single violet token is the design
+/// contract; `language` is kept for the signature). The style rides on the
+/// SPAN, not the line: the row cache's wrap pass only carries span styles.
+/// The final newline's empty split artifact is dropped.
+fn code_block_lines(code: &str, _language: Option<&str>, app_theme: &Theme) -> Vec<Line<'static>> {
+    let mut source: Vec<&str> = code.split('\n').collect();
+    if source.last().is_some_and(|line| line.is_empty()) {
+        source.pop();
+    }
+    source
+        .into_iter()
         .map(|line| {
-            let ranges = highlighter
-                .highlight_line(line, syntaxes())
-                .unwrap_or_default();
-            let mut spans = vec![Span::styled("│ ", Style::default().fg(app_theme.muted))];
-            if plain {
-                spans.push(Span::styled(
-                    line.to_string(),
-                    Style::default().fg(app_theme.code),
-                ));
-            } else {
-                for (syntect_style, text) in ranges {
-                    spans.push(Span::styled(
-                        text.to_string(),
-                        syntect_style_to_ratatui(&syntect_style),
-                    ));
-                }
-            }
-            Line::from(spans)
+            Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(app_theme.code),
+            ))
         })
         .collect()
-}
-
-/// Map a syntect style to a ratatui style. This is the one sanctioned color
-/// source in the renderer (the fixed default theme).
-fn syntect_style_to_ratatui(style: &syntect::highlighting::Style) -> Style {
-    let mut ratatui_style = Style::default();
-    if style.foreground.a != 0 {
-        let fg = style.foreground;
-        ratatui_style = ratatui_style.fg(Color::Rgb(fg.r, fg.g, fg.b));
-    }
-    if style.font_style.contains(FontStyle::BOLD) {
-        ratatui_style = ratatui_style.add_modifier(Modifier::BOLD);
-    }
-    if style.font_style.contains(FontStyle::ITALIC) {
-        ratatui_style = ratatui_style.add_modifier(Modifier::ITALIC);
-    }
-    if style.font_style.contains(FontStyle::UNDERLINE) {
-        ratatui_style = ratatui_style.add_modifier(Modifier::UNDERLINED);
-    }
-    ratatui_style
 }

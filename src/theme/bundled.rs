@@ -1,6 +1,8 @@
 //! The bundled theme set: `themes/*.toml` embedded at compile time. Fifteen
 //! well-known palettes (design contract): catppuccin ×4, kanagawa, tokyonight
-//! ×3, gruvbox, dracula, solarized, nord, rose-pine, one-dark, everforest.
+//! ×3, gruvbox, dracula, solarized, nord, rose-pine, one-dark, everforest —
+//! plus the two #11 house themes `dsh-dark` (the startup default) and
+//! `dsh-light`.
 
 /// (name, embedded TOML) pairs; names match each file's `name` field.
 pub const BUNDLED: &[(&str, &str)] = &[
@@ -41,6 +43,8 @@ pub const BUNDLED: &[(&str, &str)] = &[
         include_str!("../../themes/gruvbox-dark.toml"),
     ),
     ("dracula", include_str!("../../themes/dracula.toml")),
+    ("dsh-dark", include_str!("../../themes/dsh-dark.toml")),
+    ("dsh-light", include_str!("../../themes/dsh-light.toml")),
     (
         "solarized-dark",
         include_str!("../../themes/solarized-dark.toml"),

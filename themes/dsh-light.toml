@@ -1,0 +1,12 @@
+# dsh-light (issue #11): the light companion to dsh-dark.
+name = "dsh-light"
+accent = "#a85128"
+muted = "#6a6a6a"
+error = "#c2454e"
+warning = "#a86412"
+success = "#2e7d43"
+code = "#6d4fc2"
+bg = "#faf8f5"
+panel_bg = "#f0ede8"
+text = "#1a1a1a"
+border = "#d8d4cc"

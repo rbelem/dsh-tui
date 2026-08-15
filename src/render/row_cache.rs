@@ -32,10 +32,19 @@ pub struct CachedRow {
     pub anchor_seq: i64,
     /// Rendered lines for this node — may be more than one (wrapped/multi-line
     /// markdown, code fences, tables). An inline image's filler lines are
-    /// blank here; the widget paints over them at draw time.
+    /// blank here; the widget paints over them at draw time. Every row but
+    /// the last carries a trailing blank (the #11 between-messages spacing,
+    /// maintained by [`RowCache::ensure_inter_message_blank`]).
     pub lines: Vec<Line<'static>>,
     /// Inline image segments (indices are post-wrap, into `lines`).
     pub images: Vec<ImageRow>,
+    /// Half-open line ranges (post-wrap, into `lines`) that are fenced
+    /// code — the widget paints them with the `code_fill` background at
+    /// full content width.
+    pub code_ranges: Vec<(usize, usize)>,
+    /// The fill color for the code ranges (the theme's `panel_bg` at render
+    /// time; rows are re-rendered on theme change, so it stays current).
+    pub code_fill: ratatui::style::Color,
     /// Rendered-relevant state at render time (change detection).
     signature: u64,
 }
@@ -109,13 +118,14 @@ impl RowCache {
                     reordered.push(row);
                 }
                 None => {
-                    let (lines, row_images) =
-                        render_row(node, collapsed, width, theme, locale, images);
+                    let rendered = render_row(node, collapsed, width, theme, locale, images);
                     reordered.push(CachedRow {
                         node_key: node.key.clone(),
                         anchor_seq: node.anchor_seq,
-                        lines,
-                        images: row_images,
+                        lines: rendered.lines,
+                        images: rendered.images,
+                        code_ranges: rendered.code_ranges,
+                        code_fill: rendered.code_fill,
                         signature,
                     });
                     changed = true;
@@ -124,7 +134,29 @@ impl RowCache {
         }
         // Rows whose nodes vanished were never re-collected — dropped.
         self.rows = reordered;
+        // #11: 1 blank row between messages — every row but the last.
+        Self::ensure_inter_message_blank(&mut self.rows);
         changed || self.rows.len() != old_len || !self.dirty.is_empty()
+    }
+
+    /// #11 spacing: exactly one blank row between messages — attached to
+    /// every row except the last. A row ending in a code block already
+    /// carries its trailing blank (markdown-level), so it is not doubled.
+    /// Idempotent: safe to run over the whole array on every pass.
+    fn ensure_inter_message_blank(rows: &mut [CachedRow]) {
+        let last = rows.len().saturating_sub(1);
+        for (i, row) in rows.iter_mut().enumerate() {
+            if i == last {
+                continue;
+            }
+            let ends_blank = row
+                .lines
+                .last()
+                .is_some_and(|line| line.spans.iter().all(|span| span.content.is_empty()));
+            if !ends_blank {
+                row.lines.push(Line::raw(""));
+            }
+        }
     }
 
     /// Re-render exactly the dirty nodes (markdown re-parse per chunk, Q5)
@@ -146,11 +178,15 @@ impl RowCache {
                 continue;
             };
             let collapsed = store.fold_state(session_id, &key).collapsed;
-            let (lines, row_images) = render_row(node, collapsed, width, theme, locale, images);
+            let rendered = render_row(node, collapsed, width, theme, locale, images);
             if let Some(row) = self.rows.iter_mut().find(|row| row.node_key == key) {
-                row.lines = lines;
-                row.images = row_images;
+                row.lines = rendered.lines;
+                row.images = rendered.images;
+                row.code_ranges = rendered.code_ranges;
+                row.code_fill = rendered.code_fill;
             }
+            // Dirty re-render dropped the inter-message blank; restore it.
+            Self::ensure_inter_message_blank(&mut self.rows);
         }
     }
 
@@ -202,9 +238,20 @@ impl RowCache {
     }
 }
 
-/// Render one node and wrap at `width`, re-basing the image segments'
-/// pre-wrap line indices onto the wrapped line array (filler lines never
-/// split, so each marked input line maps to exactly one output index).
+/// The wrapped render of one node ([`render_row`]'s output).
+struct WrappedRender {
+    lines: Vec<Line<'static>>,
+    images: Vec<ImageRow>,
+    code_ranges: Vec<(usize, usize)>,
+    code_fill: ratatui::style::Color,
+}
+
+/// Render one node, wrap at `width`, and re-base the image segments' and
+/// code ranges' pre-wrap indices onto the wrapped line array (filler lines
+/// never split, so each marked input line maps to exactly one output start).
+/// The #11 1-blank-row spacing between messages is maintained by
+/// [`RowCache::ensure_inter_message_blank`], not here (a trailing blank on
+/// the LAST row would break the follow-mode bottom clamp).
 fn render_row(
     node: &ChatNode,
     collapsed: bool,
@@ -212,47 +259,66 @@ fn render_row(
     theme: &Theme,
     locale: Locale,
     images: &ImageCache,
-) -> (Vec<Line<'static>>, Vec<ImageRow>) {
+) -> WrappedRender {
     let render = render_node_full(node, collapsed, theme, locale, images, width);
     let marks: Vec<usize> = render.images.iter().map(|seg| seg.line_index).collect();
-    let (lines, rebased) = wrap_lines_marked(render.lines, width, &marks);
+    let (lines, rebased_images, code_ranges) =
+        wrap_lines_marked(render.lines, width, &marks, &render.code_ranges);
     let images = render
         .images
         .into_iter()
-        .zip(rebased)
+        .zip(rebased_images)
         .map(|(mut seg, base)| {
             seg.line_index = base;
             seg
         })
         .collect();
-    (lines, images)
+    WrappedRender {
+        lines,
+        images,
+        code_ranges,
+        code_fill: theme.panel_bg,
+    }
 }
 
 /// Wrap each line at `width`, unicode-width-aware (ratatui 0.30 removed
 /// `Text::wrap`; the reflow machinery lives inside widget internals, so the
 /// cache hand-rolls the split). A single grapheme wider than the width is
-/// kept whole (the buffer truncates it visually). `marks` are input line
-/// indices whose OUTPUT start indices are returned (in mark order).
+/// kept whole (the buffer truncates it visually). `image_marks` are input
+/// line indices whose OUTPUT start indices are returned (in mark order).
+/// `code_ranges` are half-open input line ranges, returned re-based to
+/// output line ranges (code input lines are contiguous, so their output
+/// lines form a contiguous run).
 fn wrap_lines_marked(
     lines: Vec<Line<'static>>,
     width: u16,
-    marks: &[usize],
-) -> (Vec<Line<'static>>, Vec<usize>) {
+    image_marks: &[usize],
+    code_ranges: &[(usize, usize)],
+) -> (Vec<Line<'static>>, Vec<usize>, Vec<(usize, usize)>) {
     if width == 0 {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     }
     let width = width as usize;
     let mut wrapped = Vec::new();
-    let mut rebased = Vec::with_capacity(marks.len());
-    let mut next_mark = marks.iter().peekable();
+    let mut rebased = Vec::with_capacity(image_marks.len());
+    let mut next_mark = image_marks.iter().peekable();
+    // Output line count before each input line — maps input ranges to
+    // output ranges.
+    let mut out_before = Vec::with_capacity(lines.len() + 1);
     for (index, line) in lines.into_iter().enumerate() {
+        out_before.push(wrapped.len());
         if next_mark.peek() == Some(&&index) {
             rebased.push(wrapped.len());
             next_mark.next();
         }
         wrapped.extend(wrap_line(line, width));
     }
-    (wrapped, rebased)
+    out_before.push(wrapped.len());
+    let code_ranges = code_ranges
+        .iter()
+        .map(|(start, end)| (out_before[*start], out_before[*end]))
+        .collect();
+    (wrapped, rebased, code_ranges)
 }
 
 fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {

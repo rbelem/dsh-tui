@@ -181,7 +181,11 @@ fn with_home_override(_base: &std::path::Path, f: impl FnOnce()) {
 #[test]
 fn bundled_themes_all_parse_with_unique_names() {
     let registry = ThemeRegistry::bundled();
-    assert_eq!(registry.themes.len(), 15, "design contract ≈15 themes");
+    assert_eq!(
+        registry.themes.len(),
+        17,
+        "15 palettes + dsh-dark + dsh-light"
+    );
     // Every embedded TOML parses standalone.
     for (name, toml) in bundled::BUNDLED {
         let theme = Theme::from_toml_str(toml)
@@ -193,6 +197,15 @@ fn bundled_themes_all_parse_with_unique_names() {
     names.sort_unstable();
     names.dedup();
     assert_eq!(names.len(), registry.themes.len(), "unique theme names");
+    // The #11 tokens are present on every bundled theme.
+    for theme in &registry.themes {
+        assert!(
+            theme.panel_bg != Color::Reset,
+            "{}: panel_bg set",
+            theme.name
+        );
+        assert!(theme.border != Color::Reset, "{}: border set", theme.name);
+    }
 }
 
 #[test]
@@ -209,6 +222,39 @@ fn known_palette_hexes_parse_to_rgb() {
     assert_eq!(mocha.error, Color::Rgb(0xf3, 0x8b, 0xa8));
     assert_eq!(mocha.warning, Color::Rgb(0xf9, 0xe2, 0xaf));
     assert_eq!(mocha.success, Color::Rgb(0xa6, 0xe3, 0xa1));
+    // #11 tokens: bundled themes carry explicit panel_bg/border values.
+    assert_eq!(mocha.panel_bg, Color::Rgb(0x1e, 0x1e, 0x2e), "bg-derived");
+    assert_eq!(mocha.border, Color::Rgb(0x58, 0x5b, 0x70), "muted-derived");
+}
+
+#[test]
+fn dsh_house_themes_parse_with_exact_palettes() {
+    let dark = Theme::from_toml_str(include_str!("../themes/dsh-dark.toml")).unwrap();
+    assert_eq!(dark.name, "dsh-dark");
+    assert_eq!(dark.accent, Color::Rgb(0xfa, 0xb2, 0x83));
+    assert_eq!(dark.muted, Color::Rgb(0x80, 0x80, 0x80));
+    assert_eq!(dark.error, Color::Rgb(0xe0, 0x6c, 0x75));
+    assert_eq!(dark.warning, Color::Rgb(0xf5, 0xa7, 0x42));
+    assert_eq!(dark.success, Color::Rgb(0x7f, 0xd8, 0x8f));
+    assert_eq!(dark.code, Color::Rgb(0x9d, 0x7c, 0xd8));
+    assert_eq!(dark.bg, Color::Rgb(0x0a, 0x0a, 0x0a));
+    assert_eq!(dark.panel_bg, Color::Rgb(0x14, 0x14, 0x14));
+    assert_eq!(dark.text, Color::Rgb(0xee, 0xee, 0xee));
+    assert_eq!(dark.border, Color::Rgb(0x3c, 0x3c, 0x3c));
+    assert_ne!(dark.bg, Color::Rgb(0, 0, 0), "no pure black (issue #11)");
+
+    let light = Theme::from_toml_str(include_str!("../themes/dsh-light.toml")).unwrap();
+    assert_eq!(light.name, "dsh-light");
+    assert_eq!(light.accent, Color::Rgb(0xa8, 0x51, 0x28));
+    assert_eq!(light.muted, Color::Rgb(0x6a, 0x6a, 0x6a));
+    assert_eq!(light.error, Color::Rgb(0xc2, 0x45, 0x4e));
+    assert_eq!(light.warning, Color::Rgb(0xa8, 0x64, 0x12));
+    assert_eq!(light.success, Color::Rgb(0x2e, 0x7d, 0x43));
+    assert_eq!(light.code, Color::Rgb(0x6d, 0x4f, 0xc2));
+    assert_eq!(light.bg, Color::Rgb(0xfa, 0xf8, 0xf5));
+    assert_eq!(light.panel_bg, Color::Rgb(0xf0, 0xed, 0xe8));
+    assert_eq!(light.text, Color::Rgb(0x1a, 0x1a, 0x1a));
+    assert_eq!(light.border, Color::Rgb(0xd8, 0xd4, 0xcc));
 }
 
 #[test]
@@ -239,6 +285,36 @@ text = "#112233"
 }
 
 #[test]
+fn new_tokens_default_from_bg_and_muted() {
+    // A user theme WITHOUT the #11 fields keeps parsing; panel_bg falls
+    // back to bg, border to muted (backward-compatible migration).
+    let bare = r##"
+name = "bare"
+accent = "#112233"
+muted = "#445566"
+error = "#112233"
+warning = "#112233"
+success = "#112233"
+code = "#112233"
+bg = "#778899"
+text = "#aabbcc"
+"##;
+    let theme = Theme::from_toml_str(bare).expect("bare theme parses");
+    assert_eq!(
+        theme.panel_bg,
+        Color::Rgb(0x77, 0x88, 0x99),
+        "panel_bg ← bg"
+    );
+    assert_eq!(theme.border, Color::Rgb(0x44, 0x55, 0x66), "border ← muted");
+    // A bad explicit panel_bg is still rejected.
+    let broken = bare.replace("bg = \"#778899\"", "bg = \"#778899\"\npanel_bg = \"nope\"");
+    assert!(
+        matches!(Theme::from_toml_str(&broken), Err(ThemeError::Invalid(_))),
+        "bad panel_bg rejected"
+    );
+}
+
+#[test]
 fn default_theme_is_reset_based() {
     let default = Theme::default();
     assert_eq!(default.name, "default");
@@ -251,6 +327,8 @@ fn default_theme_is_reset_based() {
         default.code,
         default.bg,
         default.text,
+        default.panel_bg,
+        default.border,
     ] {
         assert_eq!(token, Color::Reset);
     }
@@ -299,37 +377,38 @@ fn theme_colors_reach_rendered_cells() {
         .unwrap();
 
     let buffer = terminal.backend().buffer();
-    let mut found_prefix = false;
     let mut found_code = false;
     let mut found_text = false;
+    let mut found_fill = false;
     for y in 0..30u16 {
         for x in 0..120u16 {
             let Some(cell) = buffer.cell((x, y)) else {
                 continue;
             };
             let ch = cell.symbol();
-            if ch == "│" {
-                assert_eq!(cell.fg, mocha.muted, "fence prefix = theme.muted");
-                found_prefix = true;
-            } else if cell.fg == mocha.code {
-                // The unfenced code line's text (fn main() {}) = theme.code.
+            if cell.fg == mocha.code && ch != " " {
+                // The unfenced code block's text (fn main() {}) = theme.code.
                 found_code = true;
             } else if cell.fg == mocha.text {
                 // The user paragraph text = theme.text.
                 found_text = true;
             }
+            if cell.bg == mocha.panel_bg {
+                // The code-block body carries the panel_bg fill (#11).
+                found_fill = true;
+            }
         }
     }
-    assert!(found_prefix, "the │ prefix cell was rendered");
     assert!(found_code, "unfenced code text carries theme.code");
     assert!(found_text, "user text carries theme.text");
+    assert!(found_fill, "code block rows carry the panel_bg fill");
 }
 
 #[test]
 fn default_theme_render_is_unchanged() {
     // With the Reset default, no cell carries an explicit color.
     let view = render_with_theme(&Theme::default(), 120, 30);
-    assert!(view.contains("│ fn main()"), "code fence renders: {view}");
+    assert!(view.contains("fn main()"), "code fence renders: {view}");
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +465,9 @@ text = "#161718"
         );
         let mine = registry.find("mine").expect("new user theme loaded");
         assert_eq!(mine.text, Color::Rgb(0x16, 0x17, 0x18));
+        // A user theme without the #11 fields keeps the bg/muted defaults.
+        assert_eq!(mine.panel_bg, Color::Rgb(0x13, 0x14, 0x15), "panel_bg ← bg");
+        assert_eq!(mine.border, Color::Rgb(0x04, 0x05, 0x06), "border ← muted");
         assert!(
             registry.find("broken").is_none(),
             "corrupt themes are skipped"
@@ -420,8 +502,10 @@ fn config_write_read_back_and_apply() {
 
         // Apply via the app startup path (needs a truecolor terminal).
         let mut app = App::default();
-        with_env_var("COLORTERM", Some("truecolor"), || {
-            app.load_theme_config();
+        with_env_var("DSH_THEME", None, || {
+            with_env_var("COLORTERM", Some("truecolor"), || {
+                app.load_theme_config();
+            });
         });
         assert_eq!(app.theme.name, "catppuccin-mocha");
         assert_eq!(app.config, config);
@@ -433,9 +517,11 @@ fn config_write_read_back_and_apply() {
         // Without truecolor, the config theme is not applied (terminal-
         // following default stays).
         let mut app = App::default();
-        with_env_var("COLORTERM", None, || {
-            assert!(!terminal_supports_color());
-            app.load_theme_config();
+        with_env_var("DSH_THEME", None, || {
+            with_env_var("COLORTERM", None, || {
+                assert!(!terminal_supports_color());
+                app.load_theme_config();
+            });
         });
         assert_eq!(
             app.theme.name, "default",
@@ -638,4 +724,7 @@ fn picker_marks_the_current_theme() {
         view.contains(" •") && view.contains(&current.name),
         "current theme marked: {view}"
     );
+    // #11: the selected row carries the accent `▎` stripe (glyph + weight,
+    // never color alone) — the picker stays identifiable in grayscale.
+    assert!(view.contains("▎"), "selection stripe: {view}");
 }

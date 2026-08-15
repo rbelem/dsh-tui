@@ -832,27 +832,39 @@ impl App {
 
     /// Startup theme resolution: load user themes, then apply the persisted
     /// config theme when the terminal can render palettes (truecolor
-    /// `COLORTERM`). With no explicit config theme, the detected
-    /// terminal/system light/dark scheme picks the default — catppuccin
-    /// frappe (dark) or catppuccin latte (light). If neither applies, the
-    /// terminal-following default (Reset-based neutral) stays.
+    /// `COLORTERM`). `DSH_THEME=<name>` beats the persisted config (the
+    /// tmux/herdr + testing escape hatch; an unknown name applies nothing —
+    /// same contract as a bad config theme).
+    ///
+    /// With no explicit theme, the detected terminal/system light/dark
+    /// scheme picks the default — `dsh-dark` (dark or detection failure)
+    /// or `dsh-light`. The all-`Reset` terminal-following default only
+    /// remains for non-truecolor terminals or an explicit `default` name
+    /// (the pre-#11 look, opt-in).
     pub fn load_theme_config(&mut self) {
         self.themes.load_user_dir();
         self.config = Config::load();
-        if let Some(name) = &self.config.theme
+        // `DSH_THEME` (when set and non-empty) beats config.toml; naming
+        // the unregistered `default` keeps the Reset-based neutral.
+        let explicit = std::env::var("DSH_THEME")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| self.config.theme.clone());
+        if let Some(name) = &explicit
             && let Some(theme) = self.themes.find(name)
             && terminal_supports_color()
         {
             self.theme = theme.clone();
-        } else if self.config.theme.is_none() && terminal_supports_color() {
+        } else if explicit.is_none() && terminal_supports_color() {
+            // No explicit theme: pick by the detected scheme. A failed
+            // detection on a truecolor terminal defaults to dsh-dark —
+            // never the all-Reset theme (issue #11: OSC 11 unanswered
+            // left the app monochrome).
             let name = match crate::theme::detect::detect_color_mode() {
-                Some(crate::theme::detect::ColorMode::Dark) => Some("catppuccin-frappe"),
-                Some(crate::theme::detect::ColorMode::Light) => Some("catppuccin-latte"),
-                None => None,
+                Some(crate::theme::detect::ColorMode::Light) => "dsh-light",
+                Some(crate::theme::detect::ColorMode::Dark) | None => "dsh-dark",
             };
-            if let Some(name) = name
-                && let Some(theme) = self.themes.find(name)
-            {
+            if let Some(theme) = self.themes.find(name) {
                 self.theme = theme.clone();
             }
         }

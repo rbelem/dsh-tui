@@ -2,9 +2,10 @@
 //! the Ctrl+T picker, and config persistence.
 //!
 //! Tokens (design contract): `accent`/`muted`/`error`/`warning`/`success`/
-//! `code`/`bg`/`text`. The default theme is terminal-following — every token
-//! is `Reset`, preserving the modifiers-only look; palette themes render only
-//! on terminals that report truecolor ([`terminal_supports_color`]).
+//! `code`/`bg`/`text`, plus the #11 additions `panel_bg`/`border`. The
+//! default theme is terminal-following — every token is `Reset`, preserving
+//! the modifiers-only look; palette themes render only on terminals that
+//! report truecolor ([`terminal_supports_color`]).
 //!
 //! Bundled themes live in `themes/*.toml` (embedded via `include_str!`); user
 //! themes live in `$XDG_CONFIG_HOME/dsh-tui/themes/*.toml` (or
@@ -13,10 +14,12 @@
 //! `$XDG_CONFIG_HOME/dsh-tui/config.toml` (`theme = "name"`).
 //!
 //! With no explicit theme, [`detect::detect_color_mode`] picks the startup
-//! default on truecolor terminals: catppuccin frappe for dark schemes,
-//! catppuccin latte for light ones (OSC 11 terminal query, then env
-//! signals, then desktop settings); detection failures keep the
-//! terminal-following neutral.
+//! default on truecolor terminals: `dsh-dark` for dark schemes (and for
+//! detection failures — issue #11: OSC 11 unanswered must never leave the
+//! app monochrome), `dsh-light` for light ones (OSC 11 terminal query, then
+//! env signals, then desktop settings). `DSH_THEME=<name>` beats the
+//! persisted config; the Reset-based neutral stays available opt-in
+//! (non-truecolor terminals, or an explicit `default` name).
 
 pub mod bundled;
 pub mod detect;
@@ -27,7 +30,7 @@ use std::path::PathBuf;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Widget};
 use serde::{Deserialize, Serialize};
@@ -44,6 +47,13 @@ pub struct Theme {
     pub code: Color,
     pub bg: Color,
     pub text: Color,
+    /// Panel/interior fill (sidebar, composer strip, popup interiors) —
+    /// a stepped shade of `bg` (#11). Reset in the terminal-following
+    /// default, so non-truecolor terminals skip bg fills entirely.
+    pub panel_bg: Color,
+    /// Subtle pane/box border color (#11). Distinct from `muted` so the
+    /// palette can tune rule visibility independently of text.
+    pub border: Color,
 }
 
 impl Default for Theme {
@@ -61,12 +71,17 @@ impl Default for Theme {
             code: Color::Reset,
             bg: Color::Reset,
             text: Color::Reset,
+            panel_bg: Color::Reset,
+            border: Color::Reset,
         }
     }
 }
 
 impl Theme {
     /// Parse a theme from its TOML text (`name` + eight `#rrggbb` hexes).
+    /// The #11 tokens `panel_bg`/`border` are optional: a user theme without
+    /// them falls back to its `bg`/`muted` (backward-compatible migration —
+    /// existing user configs keep parsing and render unchanged).
     pub fn from_toml_str(toml: &str) -> Result<Self, ThemeError> {
         let raw: ThemeToml = toml::from_str(toml)
             .map_err(|e| ThemeError::Invalid(format!("bad theme TOML: {e}")))?;
@@ -85,6 +100,14 @@ impl Theme {
             code: parse("code", &raw.code)?,
             bg: parse("bg", &raw.bg)?,
             text: parse("text", &raw.text)?,
+            panel_bg: match raw.panel_bg {
+                Some(value) => parse("panel_bg", &value)?,
+                None => parse("bg", &raw.bg)?,
+            },
+            border: match raw.border {
+                Some(value) => parse("border", &value)?,
+                None => parse("muted", &raw.muted)?,
+            },
         })
     }
 }
@@ -100,6 +123,8 @@ struct ThemeToml {
     code: String,
     bg: String,
     text: String,
+    panel_bg: Option<String>,
+    border: Option<String>,
 }
 
 /// Parse `#rrggbb` (the bundled themes' canonical form; 3-digit shorthands
@@ -492,9 +517,17 @@ impl Widget for ThemePopup<'_> {
         Clear.render(area, buf);
         let block = Block::bordered()
             .border_style(crate::ui::style::border(self.current))
+            .title_style(
+                Style::new()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(self.current.accent),
+            )
             .title(crate::i18n::tr(self.locale, "theme.picker_title"));
         let inner = block.inner(area);
         block.render(area, buf);
+        // The #11 popup treatment: panel_bg fill after Clear, inside the
+        // border (Clear resets to the terminal default, so fill after).
+        buf.set_style(inner, crate::ui::style::panel_fill(self.current));
         // More themes than rows: scroll so the selection stays visible
         // (it sits at the bottom edge while scrolling, like the sidebar).
         let visible = inner.height as usize;
@@ -505,7 +538,10 @@ impl Widget for ThemePopup<'_> {
                 break;
             }
             let y = inner.y + row as u16;
-            if i == self.selected {
+            let selected = i == self.selected;
+            if selected {
+                // #11: bold + accent `▎` stripe — state carried by glyph
+                // shape + weight, never color alone (REVERSED dropped).
                 buf.set_style(
                     Rect::new(inner.x, y, inner.width, 1),
                     crate::ui::style::selection(self.current),
@@ -517,7 +553,12 @@ impl Widget for ThemePopup<'_> {
                 "  "
             };
             let line = Line::from(vec![
-                Span::raw(format!(" {marker} ")),
+                if selected {
+                    Span::styled("▎", crate::ui::style::selection_stripe(self.current))
+                } else {
+                    Span::raw(" ")
+                },
+                Span::raw(format!("{marker} ")),
                 Span::styled(theme.name.clone(), crate::ui::style::hint(self.current)),
             ]);
             buf.set_line(inner.x, y, &line, inner.width);

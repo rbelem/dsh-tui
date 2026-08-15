@@ -225,34 +225,107 @@ fn config_theme_wins_over_detection() {
         std::fs::write(config_root.join("config.toml"), "theme = \"nord\"\n")
             .expect("write config");
         with_env_var("COLORTERM", Some("truecolor"), || {
-            with_env_var("GTK_THEME", Some("Adwaita:dark"), || {
-                let mut app = App::default();
-                app.load_theme_config();
-                assert_eq!(app.theme.name, "nord");
-                assert_eq!(app.config.theme.as_deref(), Some("nord"));
+            with_env_var("DSH_THEME", None, || {
+                with_env_var("GTK_THEME", Some("Adwaita:dark"), || {
+                    let mut app = App::default();
+                    app.load_theme_config();
+                    assert_eq!(app.theme.name, "nord");
+                    assert_eq!(app.config.theme.as_deref(), Some("nord"));
+                });
             });
         });
     });
 }
 
 #[test]
-fn detection_picks_frappe_for_dark() {
+fn detection_picks_the_dsh_house_themes() {
     let dir = TempDir::new("detect-dark");
 
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     with_config_root(dir.path(), |_config_root| {
         with_env_var("COLORTERM", Some("truecolor"), || {
-            // Dark scheme → catppuccin frappe.
-            with_env_var("GTK_THEME", Some("Adwaita:dark"), || {
-                let mut app = App::default();
-                app.load_theme_config();
-                assert_eq!(app.theme.name, "catppuccin-frappe");
+            with_env_var("DSH_THEME", None, || {
+                // Dark scheme → dsh-dark (the new default; #11).
+                with_env_var("GTK_THEME", Some("Adwaita:dark"), || {
+                    let mut app = App::default();
+                    app.load_theme_config();
+                    assert_eq!(app.theme.name, "dsh-dark");
+                });
+                // Light scheme → dsh-light.
+                with_env_var("GTK_THEME", Some("Adwaita:light"), || {
+                    let mut app = App::default();
+                    app.load_theme_config();
+                    assert_eq!(app.theme.name, "dsh-light");
+                });
             });
-            // Light scheme → catppuccin latte.
-            with_env_var("GTK_THEME", Some("Adwaita:light"), || {
+        });
+    });
+}
+
+#[test]
+fn failed_detection_defaults_to_dsh_dark_never_reset() {
+    let dir = TempDir::new("detect-none");
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_config_root(dir.path(), |_config_root| {
+        with_env_var("COLORTERM", Some("truecolor"), || {
+            // No env signal (GTK_THEME without a :dark/:light suffix,
+            // COLORFGBG unset; OSC 11 self-skips — stdin is not a tty in
+            // tests; the gsettings layer is absent on CI/dev boxes).
+            with_env_var("DSH_THEME", None, || {
+                with_env_var("GTK_THEME", Some("Adwaita"), || {
+                    with_env_var("COLORFGBG", None, || {
+                        let mut app = App::default();
+                        app.load_theme_config();
+                        assert_eq!(
+                            app.theme.name, "dsh-dark",
+                            "issue #11: detection failure must never leave the \
+                         all-Reset default on a truecolor terminal"
+                        );
+                        assert!(
+                            app.theme.panel_bg != ratatui::style::Color::Reset,
+                            "a palette is active"
+                        );
+                    });
+                });
+            });
+        });
+    });
+}
+
+#[test]
+fn dsh_theme_env_overrides_config() {
+    let dir = TempDir::new("dsh-theme-env");
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_config_root(dir.path(), |config_root| {
+        std::fs::create_dir_all(config_root).expect("config dir");
+        std::fs::write(config_root.join("config.toml"), "theme = \"nord\"\n")
+            .expect("write config");
+        with_env_var("COLORTERM", Some("truecolor"), || {
+            // DSH_THEME beats config.toml.
+            with_env_var("DSH_THEME", Some("catppuccin-mocha"), || {
                 let mut app = App::default();
                 app.load_theme_config();
-                assert_eq!(app.theme.name, "catppuccin-latte");
+                assert_eq!(app.theme.name, "catppuccin-mocha");
+                assert_eq!(
+                    app.config.theme.as_deref(),
+                    Some("nord"),
+                    "the persisted choice is untouched by the override"
+                );
+            });
+            // An unknown DSH_THEME name applies nothing (same contract as a
+            // bad config theme) — the Reset-based neutral stays; naming the
+            // unregistered `default` is the explicit opt-in for that mode.
+            with_env_var("DSH_THEME", Some("not-a-theme"), || {
+                let mut app = App::default();
+                app.load_theme_config();
+                assert_eq!(app.theme.name, "default");
+            });
+            with_env_var("DSH_THEME", Some("default"), || {
+                let mut app = App::default();
+                app.load_theme_config();
+                assert_eq!(app.theme.name, "default", "Reset mode opt-in");
             });
         });
     });

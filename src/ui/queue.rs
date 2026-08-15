@@ -134,9 +134,16 @@ impl Widget for QueuePopup<'_> {
         Clear.render(area, buf);
         let block = Block::bordered()
             .border_style(style::border(self.theme))
+            .title_style(
+                ratatui::style::Style::new()
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+                    .fg(self.theme.accent),
+            )
             .title(tr(self.locale, "queue.title"));
         let inner = block.inner(area);
         block.render(area, buf);
+        // #11 popup treatment: panel_bg fill after Clear, inside the border.
+        buf.set_style(inner, style::panel_fill(self.theme));
         for (row, item) in self.items.iter().skip(self.scroll).enumerate() {
             if row as u16 >= inner.height {
                 break;

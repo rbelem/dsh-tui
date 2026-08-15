@@ -419,10 +419,17 @@ impl Widget for SettingsView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let block = Block::bordered()
             .border_style(style::border(self.theme))
+            .title_style(
+                ratatui::style::Style::new()
+                    .add_modifier(ratatui::style::Modifier::BOLD)
+                    .fg(self.theme.accent),
+            )
             .title(tr(self.locale, "settings.title"))
             .padding(Padding::horizontal(1));
         let inner = block.inner(area);
         block.render(area, buf);
+        // #11 popup treatment: panel_bg interior fill.
+        buf.set_style(inner, style::panel_fill(self.theme));
 
         // Nav column: fixed, capped so narrow terminals keep a usable form.
         let nav_width = (inner.width / 3).clamp(16, 28);
@@ -441,14 +448,23 @@ impl Widget for SettingsView<'_> {
             } else {
                 format!("{label}{}", tr(self.locale, "settings.unexposed_mark"))
             };
-            let style = if row == self.state.selected {
+            let selected = row == self.state.selected;
+            let style = if selected {
                 style::selection(self.theme)
             } else if known {
                 style::header(self.theme)
             } else {
                 style::hint(self.theme)
             };
-            nav_lines.push(Line::styled(format!(" {label}"), style));
+            // #11: the selected nav row carries the accent `▎` stripe.
+            nav_lines.push(if selected {
+                Line::from(vec![
+                    Span::styled("▎", style::selection_stripe(self.theme)),
+                    Span::styled(format!(" {label}"), style),
+                ])
+            } else {
+                Line::styled(format!("  {label}"), style)
+            });
         }
         Paragraph::new(nav_lines).render(nav_area, buf);
 
@@ -477,7 +493,9 @@ impl Widget for SettingsView<'_> {
             for (row, field) in form.fields.iter().enumerate() {
                 let focused = form_focused && row == form.cursor;
                 let editing = focused && form.editing.is_some();
-                let marker = if focused { "› " } else { "  " };
+                // #11: the focused form row's cursor marker is the accent
+                // stripe (the row itself is bold via style::selection).
+                let marker = if focused { "▎ " } else { "  " };
                 let value = if editing {
                     form.editing
                         .as_ref()

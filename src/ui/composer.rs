@@ -15,8 +15,9 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
 use crate::i18n::{Locale, tr};
@@ -264,7 +265,8 @@ impl Composer {
 
 /// The composer strip: a top rule (the pane seam) and the buffer below it.
 /// Empty + focused shows a dim placeholder; the focused pane's rule is
-/// bright, unfocused dim.
+/// bright, unfocused dim. #11: the strip carries the `panel_bg` fill and a
+/// 2/2 horizontal padding inside the rule.
 pub struct ComposerView<'a> {
     pub composer: &'a Composer,
     pub focused: bool,
@@ -274,13 +276,17 @@ pub struct ComposerView<'a> {
 
 impl Widget for ComposerView<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        // The whole strip (rule row included) is a panel surface. With the
+        // Reset default theme the fill is a no-op.
+        buf.set_style(area, style::panel_fill(self.theme));
         let block = Block::new()
             .borders(Borders::TOP)
             .border_style(if self.focused {
                 style::border_focused(self.theme)
             } else {
                 style::border(self.theme)
-            });
+            })
+            .padding(Padding::horizontal(2));
         let inner = block.inner(area);
         block.render(area, buf);
         if inner.height == 0 || inner.width == 0 {
@@ -352,9 +358,16 @@ impl Widget for SeedPopup<'_> {
         Clear.render(area, buf);
         let block = Block::bordered()
             .border_style(style::border(self.theme))
+            .title_style(
+                Style::new()
+                    .add_modifier(Modifier::BOLD)
+                    .fg(self.theme.accent),
+            )
             .title(tr(self.locale, self.kind.title()));
         let inner = block.inner(area);
         block.render(area, buf);
+        // #11 popup treatment: panel_bg fill after Clear, inside the border.
+        buf.set_style(inner, style::panel_fill(self.theme));
         let mut y = inner.y;
         let mut previous_group: Option<&str> = None;
         for (i, entry) in self.entries.iter().enumerate() {
