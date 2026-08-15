@@ -4,10 +4,12 @@
 //! vertical rule (no box). The first line is the "Sessions" header; groups
 //! follow: one per workspace (header = workspace title, sessions nested
 //! under it), then an "ungrouped" group for sessions no workspace claims,
-//! then a collapsed "archived (N)" header at the foot (its sessions are
-//! listed but hidden — out of j/k navigation until an expand action lands
-//! in a later lane). With no workspaces and no archived sessions the list
-//! renders FLAT (no group headers) — exactly the pre-grouping look.
+//! then the archived group at the foot — collapsed to a "archived (N)"
+//! header by default (its sessions are listed but hidden — out of j/k
+//! navigation); `e` in the sidebar expands it for the app lifetime (no
+//! persistence) and its sessions render as rows. With no workspaces and
+//! no archived sessions the list renders FLAT (no group headers) —
+//! exactly the pre-grouping look.
 //!
 //! Rows: the active session carries a bold `●` marker at all times; the
 //! selection row is reversed, but only while the sidebar has focus (an
@@ -81,7 +83,9 @@ impl SidebarGroup {
 ///   workspaces appended) — a session belongs to the FIRST workspace that
 ///   claims its id, empty workspace groups are skipped;
 /// - then the ungrouped group (non-archived sessions no workspace claims);
-/// - then the archived group (collapsed, count in the header).
+/// - then the archived group (collapsed unless `archived_expanded` —
+///   app-lifetime state, no persistence — its sessions then render as
+///   rows and join j/k navigation; the count stays in the header).
 ///
 /// No workspaces and no archived sessions → a single title-less group:
 /// the flat look. Archived sessions always land in the archived group,
@@ -92,6 +96,7 @@ pub fn build_groups(
     workspace_order: &[WorkspaceId],
     archived: &[SessionId],
     locale: Locale,
+    archived_expanded: bool,
 ) -> Vec<SidebarGroup> {
     if sessions.is_empty() {
         return Vec::new();
@@ -172,7 +177,7 @@ pub fn build_groups(
                 "sidebar.archived",
                 &[&archived_group_sessions.len().to_string()],
             )),
-            collapsed: true,
+            collapsed: !archived_expanded,
             sessions: archived_group_sessions,
         });
     }
@@ -439,7 +444,7 @@ mod tests {
     #[test]
     fn flat_when_no_workspaces_or_archived() {
         let sessions = vec![summary("s1"), summary("s2")];
-        let groups = build_groups(&sessions, &[], &[], &[], Locale::En);
+        let groups = build_groups(&sessions, &[], &[], &[], Locale::En, false);
         assert_eq!(
             groups,
             vec![SidebarGroup {
@@ -465,7 +470,7 @@ mod tests {
         // The durable order puts beta first; s4 is ungrouped, s5 archived.
         let order = vec![WorkspaceId("wB".into()), WorkspaceId("wA".into())];
         let archived = vec![SessionId("s5".into())];
-        let groups = build_groups(&sessions, &workspaces, &order, &archived, Locale::En);
+        let groups = build_groups(&sessions, &workspaces, &order, &archived, Locale::En, false);
         let titles: Vec<_> = groups.iter().map(|g| g.title.as_deref()).collect();
         assert_eq!(
             titles,
@@ -497,7 +502,7 @@ mod tests {
             workspace("wB", "beta", &["s1"]), // also claims s1 — loses
             workspace("wC", "gamma", &[]),    // empty — dropped
         ];
-        let groups = build_groups(&sessions, &workspaces, &[], &[], Locale::En);
+        let groups = build_groups(&sessions, &workspaces, &[], &[], Locale::En, false);
         let titles: Vec<_> = groups.iter().map(|g| g.title.as_deref()).collect();
         assert_eq!(titles, vec![Some("alpha")]);
     }
@@ -507,9 +512,26 @@ mod tests {
         let sessions = vec![summary("s1")];
         let workspaces = vec![workspace("wA", "alpha", &["s1"])];
         let archived = vec![SessionId("s1".into())];
-        let groups = build_groups(&sessions, &workspaces, &[], &archived, Locale::En);
+        let groups = build_groups(&sessions, &workspaces, &[], &archived, Locale::En, false);
         let titles: Vec<_> = groups.iter().map(|g| g.title.as_deref()).collect();
         assert_eq!(titles, vec![Some("▸ archived (1)")]);
         assert_eq!(SidebarGroup::visible_len(&groups), 0);
+    }
+
+    #[test]
+    fn archived_group_expands_into_navigation() {
+        let sessions = vec![summary("s1"), summary("s2"), summary("s3")];
+        let archived = vec![SessionId("s3".into())];
+        let groups = build_groups(&sessions, &[], &[], &archived, Locale::En, true);
+        assert_eq!(groups.len(), 2, "ungrouped + archived");
+        assert!(!groups[1].collapsed, "expanded: the rows join navigation");
+        assert_eq!(groups[1].title.as_deref(), Some("▸ archived (1)"));
+        assert_eq!(SidebarGroup::visible_len(&groups), 3);
+        assert_eq!(SidebarGroup::visible_session(&groups, 2), Some(2));
+        // Collapsed again: the archived row drops out of navigation.
+        let collapsed = build_groups(&sessions, &[], &[], &archived, Locale::En, false);
+        assert!(collapsed[1].collapsed);
+        assert_eq!(SidebarGroup::visible_len(&collapsed), 2);
+        assert_eq!(SidebarGroup::visible_session(&collapsed, 2), None);
     }
 }

@@ -42,7 +42,7 @@ use crate::wire::events::{
     ApprovalOutcome, AskUserQuestionItem, HostFrame, MuxFrame, QuestionOutcome,
 };
 use crate::wire::rpc::RpcId;
-use crate::wire::session::{AttachmentId, SessionId, SessionSummary};
+use crate::wire::session::{AttachmentId, SessionId, SessionSearchItem, SessionSummary};
 use unicode_width::UnicodeWidthStr;
 
 /// App-level failure.
@@ -115,6 +115,10 @@ pub enum Action {
     /// The `@` popup needs its skill.list catalog (spawned via the
     /// back-channel; result lands as [`AppEvent::CatalogLoaded`]).
     RequestCatalog,
+    /// Sidebar `/`: the search popup's query changed — the run loop
+    /// spawns `session.search` (the result lands as
+    /// [`AppEvent::SessionSearchDone`]).
+    SearchSessions(String),
     /// Sidebar selection moved.
     Select,
     /// Sidebar Enter switched the active session.
@@ -248,6 +252,19 @@ pub struct NewSessionState {
     pub sending: bool,
 }
 
+/// The sidebar search popup state (`/` in the sidebar): the query buffer
+/// (a composer's one-line primitives), the live `session.search` result
+/// rows (they replace the grouped list while the popup is open), the
+/// selection, and the in-flight guard — one `session.search` POST at a
+/// time, mirroring `sidebar_action_sending` / `NewSessionState.sending`.
+#[derive(Debug, Default)]
+pub struct SidebarSearchState {
+    pub query: Composer,
+    pub results: Vec<SessionSearchItem>,
+    pub selected: usize,
+    pub sending: bool,
+}
+
 /// The application state: store + render cache + viewport + UI surfaces.
 pub struct App {
     pub store: SessionStore,
@@ -269,6 +286,10 @@ pub struct App {
     /// `host/archived-sessions-changed`): grouped under a collapsed
     /// "archived" header at the sidebar's foot, out of j/k navigation.
     pub archived_session_ids: Vec<SessionId>,
+    /// The sidebar's archived group is expanded (`e` toggles; app-lifetime
+    /// state, no persistence) — archived sessions then render as rows and
+    /// join j/k navigation.
+    pub archived_expanded: bool,
     /// Which surface holds the keyboard focus.
     pub focus: Focus,
     pub composer: Composer,
@@ -309,6 +330,9 @@ pub struct App {
     /// The new-session picker (`n` in the chat or sidebar): workspace
     /// choice + in-flight guard. Owns the keyboard while open.
     pub new_session: Option<NewSessionState>,
+    /// The sidebar search popup (`/` in the sidebar): query + live
+    /// results + in-flight guard. Owns the keyboard while open.
+    pub sidebar_search: Option<SidebarSearchState>,
     /// The cached `@`-catalog (skill.list result), fetched once on first
     /// open; a failed fetch is not cached so the next open retries.
     pub at_catalog: Option<AtCatalog>,
@@ -366,6 +390,7 @@ impl Default for App {
             workspaces: Vec::new(),
             workspace_order: Vec::new(),
             archived_session_ids: Vec::new(),
+            archived_expanded: false,
             focus: Focus::default(),
             composer: Composer::new(),
             sidebar: SidebarState::default(),
@@ -383,6 +408,7 @@ impl Default for App {
             rename_editor: None,
             sidebar_action_sending: false,
             new_session: None,
+            sidebar_search: None,
             at_catalog: None,
             launcher: None,
             pending_attachments: HashSet::new(),
@@ -681,6 +707,11 @@ impl App {
         // from the chat/sidebar focus; Ctrl+Q/Ctrl+C above stay global).
         if self.new_session.is_some() {
             return Some(self.handle_new_session_key(key));
+        }
+        // The sidebar search popup owns the keyboard while open (`/` opens
+        // it from the sidebar focus).
+        if self.sidebar_search.is_some() {
+            return Some(self.handle_sidebar_search_key(key));
         }
         if key.code == KeyCode::Tab {
             let next = self.focus.next();
@@ -1075,7 +1106,8 @@ impl App {
     }
 
     /// The sidebar's group model: workspace groups (in durable order) →
-    /// ungrouped → collapsed archived (ui::sidebar::build_groups).
+    /// ungrouped → archived (collapsed unless `archived_expanded` — the
+    /// `e` toggle, app-lifetime state).
     pub fn sidebar_groups(&self) -> Vec<crate::ui::sidebar::SidebarGroup> {
         crate::ui::sidebar::build_groups(
             &self.sessions,
@@ -1083,6 +1115,7 @@ impl App {
             &self.workspace_order,
             &self.archived_session_ids,
             self.locale,
+            self.archived_expanded,
         )
     }
 
@@ -1542,9 +1575,11 @@ impl App {
 
     /// Sidebar bindings: `j`/`k`/arrows move the selection, `g`/`G` (and
     /// Home/End) jump to the ends, `Enter` switches the active session,
-    /// `Esc` returns focus to the chat, `q` quits. The selection moves in
-    /// session-space: group headers are skipped and collapsed (archived)
-    /// sessions are unreachable.
+    /// `/` opens the search popup, `e` toggles the archived group's
+    /// expansion (app-lifetime state), `Esc` returns focus to the chat,
+    /// `q` quits. The selection moves in session-space: group headers are
+    /// skipped and collapsed (archived) sessions are unreachable — the
+    /// expanded archived group's rows are reachable like any other.
     fn handle_sidebar_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::KeyCode;
         // Inline rename editor (`r`): typing edits, Enter commits, Esc
@@ -1599,6 +1634,23 @@ impl App {
             KeyCode::Enter => Some(self.switch_to_selected()),
             KeyCode::Char('n') => {
                 self.open_new_session_picker();
+                Some(Action::None)
+            }
+            // `/` opens the sidebar search popup (read-only — no action
+            // guard; the search POSTs spawn through the back-channel).
+            KeyCode::Char('/') => {
+                self.sidebar_search = Some(SidebarSearchState::default());
+                Some(Action::None)
+            }
+            // `e` toggles the archived group's expansion; the selection
+            // re-clamps against the new visible row count (expanding makes
+            // the archived rows reachable, collapsing drops them again).
+            KeyCode::Char('e') => {
+                self.archived_expanded = !self.archived_expanded;
+                self.sidebar
+                    .clamp(crate::ui::sidebar::SidebarGroup::visible_len(
+                        &self.sidebar_groups(),
+                    ));
                 Some(Action::None)
             }
             // Sidebar session actions (rename/fork/archive): require a
@@ -1738,6 +1790,61 @@ impl App {
         Action::None
     }
 
+    /// Search popup bindings: typing edits the query (and searches — the
+    /// action returns [`Action::SearchSessions`] for the run loop to
+    /// spawn, or `None` once the query is empty); `j`/`k`/arrows move the
+    /// result selection (clamped); `Enter` switches to the highlighted
+    /// result and closes the popup; `Esc` closes and restores the full
+    /// grouped list. Everything else is inert while the popup is open.
+    fn handle_sidebar_search_key(&mut self, key: KeyEvent) -> Action {
+        use crossterm::event::KeyCode;
+        let Some(state) = &mut self.sidebar_search else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Backspace => {
+                state.query.backspace();
+                state.results.clear();
+                state.selected = 0;
+                if state.query.buffer().is_empty() {
+                    return Action::None;
+                }
+                Action::SearchSessions(state.query.buffer().to_string())
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.selected = state.selected.saturating_sub(1);
+                Action::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let last = state.results.len().saturating_sub(1);
+                state.selected = (state.selected + 1).min(last);
+                Action::None
+            }
+            KeyCode::Enter => {
+                let Some(result) = state.results.get(state.selected) else {
+                    return Action::None;
+                };
+                let session_id = result.session_id.clone();
+                self.sidebar_search = None; // switching leaves the popup
+                self.switch_to_session(session_id)
+            }
+            KeyCode::Esc => {
+                self.sidebar_search = None;
+                Action::None
+            }
+            KeyCode::Char(c) => {
+                state.query.insert_char(c);
+                state.results.clear();
+                state.selected = 0;
+                if state.query.buffer().is_empty() {
+                    return Action::None;
+                }
+                Action::SearchSessions(state.query.buffer().to_string())
+            }
+            _ => Action::None,
+        }
+    }
+
     /// Enter in the composer: no-op on an empty buffer; a blocked no-op with
     /// a status hint while the session is running; otherwise take the buffer
     /// and ask the run loop to dispatch `session.prompt`.
@@ -1766,7 +1873,12 @@ impl App {
         else {
             return Action::None;
         };
-        let session_id = self.sessions[index].session_id.clone();
+        self.switch_to_session(self.sessions[index].session_id.clone())
+    }
+
+    /// The shared switch path (sidebar Enter and the search popup's Enter):
+    /// same store/cache/viewport semantics as [`App::switch_to_selected`].
+    fn switch_to_session(&mut self, session_id: SessionId) -> Action {
         if self.active_session.as_ref() == Some(&session_id) {
             return Action::None;
         }

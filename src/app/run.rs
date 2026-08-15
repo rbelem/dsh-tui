@@ -33,8 +33,8 @@ use crate::wire::approvals::ApprovalResponseOutcome;
 use crate::wire::questions::{AskUserQuestionAnswer, QuestionAnswerItem};
 use crate::wire::rpc::{RpcReceipt, RpcReceiptReason};
 use crate::wire::session::{
-    PromptContentPart, PromptMode, SessionHistoryValue, SessionId, SessionUpdateQueueValue,
-    UpdateQueueAction,
+    PromptContentPart, PromptMode, SessionHistoryValue, SessionId, SessionSearchItem,
+    SessionSearchValue, SessionUpdateQueueValue, UpdateQueueAction,
 };
 use crate::wire::skills::SkillListValue;
 
@@ -125,6 +125,9 @@ impl App {
                                 Some(Action::CreateSession { workspace_id }) => {
                                     self.create_session(workspace_id, event_tx.clone())
                                 }
+                                Some(Action::SearchSessions(query)) => {
+                                    self.search_sessions(query, event_tx.clone())
+                                }
                                 _ => {}
                             }
                             self.needs_draw = true;
@@ -159,6 +162,11 @@ impl App {
                         }
                         Some(AppEvent::ArchiveDone { session_id, result }) => {
                             self.on_archive_done(session_id, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::SessionSearchDone { query, result }) => {
+                            self.on_search_done(query, result, event_tx.clone());
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
@@ -465,6 +473,22 @@ impl App {
             .new_session
             .as_ref()
             .map(|state| (state.selected, state.sending));
+        // Sidebar-search popup data (same precompute rule; the results are
+        // cloned so the closure never borrows the app's search state).
+        let sidebar_search_state = self
+            .sidebar_search
+            .as_ref()
+            .map(|state| (state.selected, state.sending));
+        let sidebar_search_query = self
+            .sidebar_search
+            .as_ref()
+            .map(|state| state.query.buffer().to_string())
+            .unwrap_or_default();
+        let sidebar_search_results: Vec<SessionSearchItem> = self
+            .sidebar_search
+            .as_ref()
+            .map(|state| state.results.clone())
+            .unwrap_or_default();
 
         term.draw(|frame| {
             if sidebar_width > 0 {
@@ -650,6 +674,29 @@ impl App {
                     y: composer_area.y.saturating_sub(height),
                     width,
                     height: height.min(room),
+                };
+                if area.height > 0 {
+                    frame.render_widget(popup, area);
+                }
+            }
+
+            // The sidebar search popup (`/`): a centered overlay over the
+            // sidebar pane, sized like the new-session picker.
+            if let Some((selected, sending)) = sidebar_search_state {
+                let popup = crate::ui::search::SidebarSearchPopup {
+                    query: &sidebar_search_query,
+                    results: &sidebar_search_results,
+                    selected,
+                    sending,
+                    theme: &self.theme,
+                    locale: self.locale,
+                };
+                let (width, height) = popup.size(sidebar_area.width, sidebar_area.height);
+                let area = Rect {
+                    x: sidebar_area.x + sidebar_area.width.saturating_sub(width) / 2,
+                    y: sidebar_area.y + sidebar_area.height.saturating_sub(height) / 2,
+                    width,
+                    height: height.min(sidebar_area.height),
                 };
                 if area.height > 0 {
                     frame.render_widget(popup, area);
@@ -924,6 +971,66 @@ impl App {
                 "toast.create_failed",
                 &[&error.to_string()],
             )),
+        }
+    }
+
+    /// Spawn `session.search` for the sidebar search popup (the loop keeps
+    /// pumping; the result lands as [`AppEvent::SessionSearchDone`]). One
+    /// search in flight at a time (the popup's `sending` guard); without a
+    /// client the action is dropped silently.
+    fn search_sessions(&mut self, query: String, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let Some(state) = &mut self.sidebar_search else {
+            return;
+        };
+        if state.sending {
+            return;
+        }
+        state.sending = true;
+        tokio::spawn(async move {
+            let result = client.session_search(query.clone()).await;
+            let _ = event_tx.send(AppEvent::SessionSearchDone { query, result });
+        });
+    }
+
+    /// Apply a finished `session.search`: clear the in-flight guard and
+    /// fold the rows (selection back to the top). A result whose echoed
+    /// query no longer matches the buffer is STALE — the user typed on
+    /// while the POST was in flight — so it is dropped and the current
+    /// buffer is searched again (latest wins; each keystroke can only
+    /// trigger one follow-up round trip). A failure clears the rows (the
+    /// grouped list is restored) and toasts briefly — the popup itself
+    /// stays open for a corrected query or Esc.
+    fn on_search_done(
+        &mut self,
+        query: String,
+        result: Result<SessionSearchValue, ClientError>,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Some(state) = &mut self.sidebar_search else {
+            return; // the popup closed while the POST was in flight
+        };
+        state.sending = false;
+        match result {
+            Ok(value) if state.query.buffer() == query => {
+                state.results = value.items;
+                state.selected = 0;
+            }
+            Ok(_) => {
+                let current = state.query.buffer().to_string();
+                self.search_sessions(current, event_tx);
+            }
+            Err(error) => {
+                state.results.clear();
+                state.selected = 0;
+                self.set_toast(crate::i18n::trf(
+                    self.locale,
+                    "search.failed",
+                    &[&error.to_string()],
+                ));
+            }
         }
     }
 

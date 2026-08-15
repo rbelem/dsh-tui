@@ -18,7 +18,7 @@ use crate::wire::events::{HostFrame, MuxFrame};
 use crate::wire::rpc::{RpcId, RpcReceipt};
 use crate::wire::session::{
     AttachmentId, SessionAttachmentValue, SessionCancelValue, SessionCreateValue, SessionForkValue,
-    SessionHistoryValue, SessionId, SessionPromptValue, SessionRenameValue,
+    SessionHistoryValue, SessionId, SessionPromptValue, SessionRenameValue, SessionSearchValue,
     SessionUpdateQueueValue,
 };
 use crate::wire::settings::{SettingsDescribeValue, SettingsWriteValue};
@@ -85,6 +85,13 @@ pub enum AppEvent {
     ArchiveDone {
         session_id: SessionId,
         result: Result<WorkspaceArchiveSessionValue, ClientError>,
+    },
+    /// A spawned sidebar-search `session.search` finished (`/`). `query`
+    /// echoes the POSTed text so a stale result (the buffer moved on while
+    /// the POST was in flight) is detected and re-searched.
+    SessionSearchDone {
+        query: String,
+        result: Result<SessionSearchValue, ClientError>,
     },
     /// The `@` catalog fetch (`skill.list`) finished.
     CatalogLoaded {

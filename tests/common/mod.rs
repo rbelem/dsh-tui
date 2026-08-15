@@ -124,6 +124,16 @@ pub fn settings_conflict(ns: &str, expected: u64, actual: u64) -> String {
     .to_string()
 }
 
+/// A `session.search` ok response template: `items_json` is the raw JSON
+/// array of search items (`[{"sessionId":"s1","snippet":"…"}]`), echoed
+/// verbatim with `hasMore: false`; the `{rpcId}` placeholder is substituted
+/// by `MockAction::Ok` like every template.
+pub fn search_ok(items_json: &str) -> String {
+    format!(
+        r#"{{"type":"server-response","rpcId":"{{rpcId}}","result":{{"ok":true,"value":{{"items":{items_json},"hasMore":false}}}}}}"#
+    )
+}
+
 /// Leak a generated template into a `&'static str` for [`MockAction::Ok`]
 /// (test-scoped; the process is the arena).
 pub fn leaked(template: String) -> &'static str {

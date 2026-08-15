@@ -263,6 +263,10 @@ fn keymap_table() {
     fn sidebar_focus(app: &mut App) {
         app.focus = Focus::Sidebar;
     }
+    fn sidebar_search(app: &mut App) {
+        app.focus = Focus::Sidebar;
+        app.handle_key(key(KeyCode::Char('/')));
+    }
     fn slash_popup(app: &mut App) {
         app.focus = Focus::Composer;
         app.composer.insert_char('/');
@@ -435,6 +439,20 @@ fn keymap_table() {
             Some(Action::Focus(Focus::Chat)),
         ),
         (sidebar_focus, key(KeyCode::Char('q')), Some(Action::Quit)),
+        // sidebar: / opens the search popup, e toggles the archived group
+        (sidebar_focus, key(KeyCode::Char('/')), Some(Action::None)),
+        (sidebar_focus, key(KeyCode::Char('e')), Some(Action::None)),
+        // sidebar search popup: typing searches, j/k move (clamped on an
+        // empty result set), Enter/Esc
+        (
+            sidebar_search,
+            key(KeyCode::Char('a')),
+            Some(Action::SearchSessions("a".into())),
+        ),
+        (sidebar_search, key(KeyCode::Char('j')), Some(Action::None)),
+        (sidebar_search, key(KeyCode::Char('k')), Some(Action::None)),
+        (sidebar_search, key(KeyCode::Enter), Some(Action::None)),
+        (sidebar_search, key(KeyCode::Esc), Some(Action::None)),
         // approval takeover: y allow once, n/Esc reject; chat keys inert
         (
             approval_mode,
