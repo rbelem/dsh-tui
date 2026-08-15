@@ -97,17 +97,16 @@ fn with_home_override(_base: &std::path::Path, f: impl FnOnce()) {
 
 /// Like [`with_config_root`] for async bodies: the env stays redirected
 /// while the future runs (the run loop reads the config mid-await).
-async fn with_config_root_async(
-    base: &std::path::Path,
-    f: impl std::future::Future<Output = ()>,
-) {
+async fn with_config_root_async(base: &std::path::Path, f: impl std::future::Future<Output = ()>) {
     let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
     // SAFETY: serialized under ENV_LOCK; restored before return.
     unsafe { std::env::set_var("XDG_CONFIG_HOME", base.to_str().unwrap()) };
     #[cfg(target_os = "macos")]
     let prev_home = std::env::var("HOME").ok();
     #[cfg(target_os = "macos")]
-    unsafe { std::env::set_var("HOME", base.join("home").to_str().unwrap()) };
+    unsafe {
+        std::env::set_var("HOME", base.join("home").to_str().unwrap())
+    };
 
     f.await;
 
