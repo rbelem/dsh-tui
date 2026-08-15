@@ -7,7 +7,7 @@ use std::collections::hash_map::Entry;
 use serde_json::Value;
 
 use crate::store::event_data::{EventData, EventDataError, parse_event_data};
-use crate::store::node::{ChatNode, FoldState, NodeKey};
+use crate::store::node::{ChatNode, FoldState, NodeData, NodeKey};
 use crate::wire::events::QueueItem;
 use crate::wire::session::ToolEventView;
 use crate::wire::session::{SessionEvent, SessionId};
@@ -177,6 +177,27 @@ impl SessionState {
     /// The retained event window (read-only; the store folds it on rebuild).
     pub(crate) fn events(&self) -> &[StoredEvent] {
         &self.events
+    }
+
+    /// Whether the session's last node is an unsettled tail: an assistant
+    /// node that is neither finalized nor interrupted, or a tool node
+    /// without a result and not interrupted. The node-fold half of the
+    /// "turn in flight" rule — shared by `App::session_running` and the
+    /// `--light` worker's turn-completion check.
+    pub fn has_unsettled_tail(&self) -> bool {
+        match self.nodes.last().map(|node| &node.data) {
+            Some(NodeData::Assistant {
+                finalized,
+                interrupted,
+                ..
+            }) => !*finalized && !*interrupted,
+            Some(NodeData::Tool {
+                result,
+                interrupted,
+                ..
+            }) => result.is_none() && !*interrupted,
+            _ => false,
+        }
     }
 
     fn evict_to_cap(&mut self) {

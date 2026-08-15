@@ -32,13 +32,17 @@ scripts/delegate-wave.sh [--file <tasks.txt>] [--max N] [--timeout MS] [--result
 ```
 
 - `--file <path>` — one task per line (blank lines skipped). Without
-  `--file`, tasks are read from piped stdin (same one-per-line format).
+  `--file`, tasks are read from piped stdin (same one-per-line format);
+  `--file` wins when both are given. (The worker's own
+  `--task`/`--file`/stdin precedence — `--task` first — applies to
+  `dsh-tui` invocations, not to the wave: the wave always drives `--file`.)
 - `--max N` — concurrent panes (default `6`).
 - `--timeout MS` — per-task wait for the worker sentinel (default
   `300000` = 5 minutes).
 - `--results <dir>` — where `<n>.out` files land (default `results`; task
-  `n` = 0-based task index). A results dir that already contains `.out`
-  files is refused — pick a fresh dir or move the old ones.
+  `n` = 0-based task index). The wave is the only thing that creates the
+  dir, so an existing dir means a prior run and is refused — pick a fresh
+  `--results` path.
 
 Examples:
 
@@ -71,7 +75,9 @@ implements:
   success or `dsh-worker: error: <reason>` on failure. The wave waits for
   `dsh-worker: (done|error)` and then classifies the task from the captured
   output.
-- **Exit codes**: 0 success · 1 RPC/stream error · 2 usage / no gateway.
+- **Exit codes**: 0 success · 1 RPC/stream error (also a gateway
+  connection failure — DSH_PORT set but unreachable) · 2 usage / missing
+  `DSH_PORT` env (with the no-DSH_PORT message).
 - **herdr lifecycle reporting**: when running inside a herdr pane
   (`HERDR_PANE_ID` set and a herdr binary reachable), the worker reports
   `working` → `idle` (success) or `blocked` (failure) through
@@ -115,5 +121,6 @@ The script-owned temp dir (`$TMPDIR/dsh-wave`) is removed on exit
   `FAILED(worker error)`. Start the gateway (or set `DSH_PORT`) first.
 - **Ctrl+C mid-wave** — the temp dir is cleaned; already-spawned panes are
   left behind. Inspect them with `herdr pane list` and close by hand.
-- **"results dir already contains .out files"** — the double-run guard: use
-  a fresh `--results` dir or move the previous wave's output.
+- **"results dir already exists"** — the double-run guard (the wave is the
+  only thing that creates the dir): use a fresh `--results` path or move
+  the previous wave's output.

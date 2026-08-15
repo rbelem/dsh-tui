@@ -3,14 +3,21 @@
 //! path is untouched.
 //!
 //! Transport contract: the task arrives via `--task TEXT`, `--file PATH`, or
-//! piped stdin (the driver transports tasks via `--file`, so quotes and
-//! newlines are preserved verbatim). The worker creates a session, submits
-//! the task, folds the mux stream into a [`SessionStore`], prints assistant
-//! text to stdout as nodes settle, and finishes when the turn completes
-//! (mirroring [`crate::app::App::session_running`] semantics). The sentinel
-//! is the last line: `dsh-worker: done` on success, `dsh-worker: error:
-//! <reason>` on failure. Exit codes: 0 success · 1 RPC/stream error ·
-//! 2 usage / no gateway.
+//! piped stdin — `--task` wins over `--file`, which wins over stdin
+//! ([`parse_light_args`]; the driver transports tasks via `--file`, so
+//! quotes and newlines are preserved verbatim). The worker creates a
+//! session, submits the task, folds the mux stream into a [`SessionStore`],
+//! prints assistant text to stdout as nodes settle, and finishes when the
+//! turn completes ([`crate::app::App::session_running`] semantics, the fold
+//! half shared via [`SessionState::has_unsettled_tail`]). The sentinel is
+//! the last line: `dsh-worker: done` on success, `dsh-worker: error:
+//! <reason>` on failure.
+//!
+//! Exit codes: `0` success · `1` RPC/stream error (also an
+//! [`WireClient::attach_from_env`] connection failure — the gateway is
+//! unreachable, as opposed to absent) · `2` usage (no task source, empty
+//! task, unknown flag) and missing `DSH_PORT` env (with the standard
+//! no-DSH_PORT message).
 //!
 //! herdr lifecycle reporting (T2): when running inside a herdr pane
 //! (`HERDR_PANE_ID` set and a herdr binary reachable via `HERDR_BIN_PATH`
@@ -332,11 +339,11 @@ fn print_settled_assistant_text(
     Ok(())
 }
 
-/// Whether the turn is complete — mirroring `App::session_running`: the
+/// Whether the turn is complete — the `App::session_running` rule: the
 /// summary running flag is false AND the node fold has no unsettled tail
-/// (an assistant/tool node that is neither finalized nor interrupted). The
-/// bare prompt user node does not complete (the host running flag may lag
-/// the user/message frame) unless the turn/end boundary closed an
+/// ([`SessionState::has_unsettled_tail`], the shared fold half). The bare
+/// prompt user node does not complete (the host running flag may lag the
+/// user/message frame) unless the turn/end boundary closed an
 /// otherwise-empty turn.
 fn turn_complete(running: bool, store: &SessionStore, session_id: &SessionId) -> bool {
     if running {
@@ -345,31 +352,13 @@ fn turn_complete(running: bool, store: &SessionStore, session_id: &SessionId) ->
     let Some(state) = store.session(session_id) else {
         return false;
     };
-    if fold_in_flight(state) {
+    if state.has_unsettled_tail() {
         return false;
     }
     match state.nodes.last().map(|node| &node.data) {
         Some(NodeData::User { .. }) => turn_ended(state),
         Some(_) => true,
         None => false,
-    }
-}
-
-/// Mirror of `App::session_running`'s node-fold half: the last node is an
-/// assistant or tool node that has neither finalized nor been interrupted.
-fn fold_in_flight(state: &SessionState) -> bool {
-    match state.nodes.last().map(|node| &node.data) {
-        Some(NodeData::Assistant {
-            finalized,
-            interrupted,
-            ..
-        }) => !*finalized && !*interrupted,
-        Some(NodeData::Tool {
-            result,
-            interrupted,
-            ..
-        }) => result.is_none() && !*interrupted,
-        _ => false,
     }
 }
 

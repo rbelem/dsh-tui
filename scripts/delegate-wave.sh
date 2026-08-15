@@ -5,7 +5,9 @@
 #   delegate-wave.sh [--file <tasks.txt>] [--max N] [--timeout MS] [--results <dir>]
 #
 # Tasks arrive one per line via --file or piped on stdin (blank lines are
-# skipped). Each task runs in its own freshly split sibling pane
+# skipped); --file wins when both are given. (There is no --task here — the
+# worker's --task/--file/stdin precedence belongs to dsh-tui, not the wave.)
+# Each task runs in its own freshly split sibling pane
 # (`dsh-tui --light --file <tmpfile>`); the wave waits for the worker's
 # sentinel (`dsh-worker: done` / `dsh-worker: error: <reason>`) and saves
 # the pane output to <results>/<n>.out (n = task index, 0-based).
@@ -16,13 +18,14 @@
 #   - Panes are NEVER closed: they are left behind for inspection after the
 #     wave (review with `herdr pane list`, close by hand with
 #     `herdr pane close <pane-id>`).
-#   - The script-owned temp dir ($TMPDIR/dsh-wave) is removed on exit; a
-#     results dir that already contains .out files is refused (no silent
-#     overwrites).
+#   - The script-owned per-run temp dir (mktemp under $TMPDIR/dsh-wave.*) is
+#     removed on exit; a results dir that already exists is refused (the
+#     wave is the only thing that creates it, so its presence means a prior
+#     run — pick a fresh --results path).
 set -euo pipefail
 
 usage() {
-  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 # ---------------------------------------------------------------------------
@@ -74,9 +77,10 @@ case "$timeout_ms" in
     ;;
 esac
 
-# Refuse to run twice against the same results dir.
-if compgen -G "$results_dir/*.out" >/dev/null 2>&1; then
-  echo "delegate-wave: results dir '$results_dir' already contains .out files — pick a fresh --results dir or move the old ones" >&2
+# Refuse to run twice against the same results dir: the wave is the only
+# thing that creates it, so an existing dir means a prior run.
+if [ -d "$results_dir" ]; then
+  echo "delegate-wave: results dir '$results_dir' already exists — pick a fresh --results path" >&2
   exit 1
 fi
 mkdir -p "$results_dir"
@@ -85,9 +89,11 @@ mkdir -p "$results_dir"
 # tasks (one per line; blank lines skipped)
 # ---------------------------------------------------------------------------
 
-tmp_dir="${TMPDIR:-/tmp}/dsh-wave"
+# Per-run temp dir: concurrent waves never collide, and the EXIT/INT/TERM
+# traps remove exactly this run's dir.
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/dsh-wave.XXXXXX")"
 status_dir="$tmp_dir/status"
-mkdir -p "$tmp_dir" "$status_dir"
+mkdir -p "$status_dir"
 trap 'rm -rf "$tmp_dir"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM

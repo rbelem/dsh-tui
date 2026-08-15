@@ -104,11 +104,20 @@ grep -q "dsh-worker: done" "$RESULTS/1.out" || {
   exit 1
 }
 
-# Double-run guard: a second wave on the same results dir is refused.
-if "$WAVE" --file "$WORK/tasks.txt" --results "$RESULTS" >/dev/null 2>&1; then
+# Double-run guard: a second wave on the same results dir is refused — the
+# dir exists now, and the wave only ever creates fresh dirs.
+set +e
+GUARD_OUT="$("$WAVE" --file "$WORK/tasks.txt" --results "$RESULTS" 2>&1)"
+GUARD_STATUS=$?
+set -e
+if [ "$GUARD_STATUS" -eq 0 ]; then
   echo "delegate-wave-smoke: double-run guard did not fire" >&2
   exit 1
 fi
+printf '%s\n' "$GUARD_OUT" | grep -q "already exists" || {
+  echo "delegate-wave-smoke: guard message missing: $GUARD_OUT" >&2
+  exit 1
+}
 
 # herdr-env guard: HERDR_ENV != 1 is refused.
 if HERDR_ENV=0 "$WAVE" --file "$WORK/tasks.txt" --results "$WORK/other" >/dev/null 2>&1; then

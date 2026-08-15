@@ -635,10 +635,12 @@ impl App {
     /// takeover swallows ALL keys, `Ctrl+T` toggles the theme picker, an
     /// open picker swallows keys until Enter/Esc, `Ctrl+W` arms the vim pane
     /// prefix (h/j/k/l move focus, any other key disarms), `Tab` cycles
-    /// focus, and the focused surface gets the key. All global bindings are
+    /// focus, and the focused surface gets the key. Global bindings are
     /// rebindable via `[keymap]` in config.toml (see
-    /// [`crate::theme::Keymap`]). Returns the resulting [`Action`]; `Quit`
-    /// is not applied here — the run loop stops.
+    /// [`crate::theme::Keymap`]); fixed: `Ctrl+W` (pane prefix), `Tab`, and
+    /// the popup/picker internals (Enter/Esc and the picker's own keys).
+    /// Returns the resulting [`Action`]; `Quit` is not applied here — the
+    /// run loop stops.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
         if self.config.keymap.matches("cancel", key) {
@@ -2079,8 +2081,8 @@ impl App {
     }
 
     /// Whether the active session has a turn in flight: the summary's
-    /// `running` flag, or the node fold — the last node is an assistant or
-    /// tool node that has neither finalized nor been interrupted.
+    /// `running` flag, or the node fold — an unsettled tail (see
+    /// [`crate::store::SessionState::has_unsettled_tail`]).
     pub fn session_running(&self) -> bool {
         let Some(session_id) = &self.active_session else {
             return false;
@@ -2095,19 +2097,7 @@ impl App {
         let Some(state) = self.store.session(session_id) else {
             return false;
         };
-        match state.nodes.last().map(|node| &node.data) {
-            Some(NodeData::Assistant {
-                finalized,
-                interrupted,
-                ..
-            }) => !finalized && !interrupted,
-            Some(NodeData::Tool {
-                result,
-                interrupted,
-                ..
-            }) => result.is_none() && !interrupted,
-            _ => false,
-        }
+        state.has_unsettled_tail()
     }
 
     /// Apply a signed scroll delta; manual scrolling turns follow off.

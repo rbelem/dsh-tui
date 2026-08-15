@@ -367,32 +367,81 @@ impl KeySpec {
 ///
 /// An absent, empty, or unparseable spec falls back to the built-in default
 /// for that action, so a broken `[keymap]` section disables nothing.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+///
+/// `parsed` caches the resolved effective spec per action (`None` = unknown
+/// action), so hot paths (`handle_key` consults bindings several times per
+/// key event) never re-parse a spec or re-scan the defaults.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Keymap {
     #[serde(flatten)]
     bindings: HashMap<String, String>,
+    /// The effective spec cache: configured spec when present and parseable,
+    /// else the built-in default; `None` = unknown action. Derived state —
+    /// never serialized (skipped on write, defaulted on read).
+    #[serde(skip)]
+    parsed: std::cell::RefCell<HashMap<String, Option<KeySpec>>>,
+}
+
+impl PartialEq for Keymap {
+    /// Equality is the configured bindings — `parsed` is derived cache
+    /// (a freshly deserialized copy compares equal to a used one).
+    fn eq(&self, other: &Self) -> bool {
+        self.bindings == other.bindings
+    }
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Keymap {
+            bindings: HashMap::new(),
+            parsed: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
 }
 
 impl Keymap {
     /// Does `key` trigger `action`? Falls back to the built-in default when
-    /// the configured spec is missing, empty, or unparseable.
+    /// the configured spec is missing, empty, or unparseable. The resolved
+    /// effective spec is cached per action (invalidated by [`Keymap::set`]).
     pub fn matches(&self, action: &str, key: KeyEvent) -> bool {
-        let Some((_, default)) = DEFAULT_KEYBINDINGS.iter().find(|(a, _)| *a == action) else {
+        let Some(spec) = self.effective_spec(action) else {
             return false;
-        };
-        let configured = self.bindings.get(action).filter(|s| !s.is_empty());
-        let spec = match configured {
-            Some(s) => parse_key_spec(s)
-                .or_else(|| parse_key_spec(default))
-                .expect("built-in defaults are valid"),
-            None => parse_key_spec(default).expect("built-in defaults are valid"),
         };
         spec.matches(key)
     }
 
-    /// Set a binding (used by tests and the config editor).
+    /// The effective spec for `action`: the configured spec when present and
+    /// parseable, else the built-in default (which is guaranteed valid);
+    /// `None` for unknown actions. Parsed once per action, then cached.
+    fn effective_spec(&self, action: &str) -> Option<KeySpec> {
+        let mut cache = self.parsed.borrow_mut();
+        if let Some(cached) = cache.get(action) {
+            return *cached;
+        }
+        let default = DEFAULT_KEYBINDINGS
+            .iter()
+            .find(|(a, _)| *a == action)
+            .map(|(_, spec)| *spec);
+        let effective = match (self.bindings.get(action).filter(|s| !s.is_empty()), default) {
+            (Some(configured), Some(default)) => Some(
+                parse_key_spec(configured)
+                    .or_else(|| parse_key_spec(default))
+                    .expect("built-in defaults are valid"),
+            ),
+            (None, Some(default)) => {
+                Some(parse_key_spec(default).expect("built-in defaults are valid"))
+            }
+            (_, None) => None,
+        };
+        cache.insert(action.to_string(), effective);
+        effective
+    }
+
+    /// Set a binding (used by tests and the config editor); invalidates the
+    /// cached effective spec for that action.
     pub fn set(&mut self, action: &str, spec: impl Into<String>) {
         self.bindings.insert(action.into(), spec.into());
+        self.parsed.borrow_mut().remove(action);
     }
 
     /// The configured spec for an action (not the default), if any.
