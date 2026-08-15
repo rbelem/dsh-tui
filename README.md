@@ -91,8 +91,10 @@ new events over the mux downlink.
 | `j`/`k`, `↑`/`↓` | scroll chat / move sidebar selection / move picker selection |
 | `g`/`Home`, `G`/`End` | jump to top / bottom of the chat |
 | `Ctrl+d` / `Ctrl+u` | scroll half a page (chat) |
+| `Ctrl+d` | quit from the composer (EOF) |
 | `Enter` | submit composer; switch to the selected sidebar session; apply picker selection |
 | `Tab` | cycle focus: chat → composer → sidebar |
+| `Ctrl+w` then `h`/`j`/`k`/`l` | move focus between panes (sidebar / chat / composer) |
 | `Esc` | return to chat (closes popups, pickers, editors) |
 | `n` | new-session picker (chat or sidebar focus; `j`/`k` move, `Enter` create) |
 | `r` | rename the selected sidebar session (inline editor: type, `Enter` commit, `Esc` cancel) |
@@ -128,7 +130,10 @@ may not arrive — plain `Enter` submits).
 - **Locale** — zh/en, keyed string tables; Ctrl+L cycles and persists;
   CJK width is handled.
 - **Config file** — `~/.config/dsh-tui/` (isolated from the host config in
-  tests via `XDG_CONFIG_HOME`).
+  tests via `XDG_CONFIG_HOME`). A `[keymap]` section rebinds shortcuts by
+  action name (see the table above for the defaults); key specs look like
+  `"ctrl+q"`, `"shift+enter"`, `"alt+q"`, `"g"`. An absent or unparseable
+  spec falls back to the built-in default; the config applies at startup.
 
 ## Development
 

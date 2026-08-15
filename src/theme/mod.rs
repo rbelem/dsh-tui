@@ -17,8 +17,10 @@
 
 pub mod bundled;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -212,6 +214,9 @@ pub struct Config {
     /// following default (`Locale::detect` resolves env when unset).
     #[serde(default)]
     pub locale: Option<String>,
+    /// User-customizable keybindings; empty = the built-in defaults.
+    #[serde(default)]
+    pub keymap: Keymap,
 }
 
 impl Config {
@@ -244,6 +249,151 @@ impl Config {
     /// `$XDG_CONFIG_HOME/dsh-tui/config.toml` (or `~/.config/dsh-tui/config.toml`).
     pub fn path() -> Option<PathBuf> {
         Some(config_root()?.join("config.toml"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// keybindings (`[keymap]` in config.toml)
+// ---------------------------------------------------------------------------
+
+/// The built-in key specs — the defaults a fresh config starts from.
+/// `[keymap]` in `config.toml` overrides any of them by action name.
+pub const DEFAULT_KEYBINDINGS: &[(&str, &str)] = &[
+    // global
+    ("quit", "ctrl+q"),
+    ("cancel", "ctrl+c"),
+    ("locale", "ctrl+l"),
+    ("theme-picker", "ctrl+t"),
+    ("settings", "ctrl+,"),
+    ("launcher", "ctrl+p"),
+    ("queue", "alt+q"),
+    // composer
+    ("composer.submit", "enter"),
+    ("composer.newline", "shift+enter"),
+    ("composer.backspace", "backspace"),
+    ("composer.delete", "delete"),
+    ("composer.left", "left"),
+    ("composer.right", "right"),
+    ("composer.home", "home"),
+    ("composer.end", "end"),
+    ("composer.up", "up"),
+    ("composer.down", "down"),
+    ("composer.quit-eof", "ctrl+d"),
+    ("composer.focus-chat", "esc"),
+];
+
+/// A parsed key spec (`ctrl+q`, `shift+enter`, `g`, `G`, `alt+up`...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeySpec {
+    code: KeyCode,
+    control: bool,
+    alt: bool,
+    shift: bool,
+}
+
+/// Parse a key-spec string. `None` = unparseable (the caller falls back to
+/// the built-in default — a bad config can never hijack a key).
+fn parse_key_spec(spec: &str) -> Option<KeySpec> {
+    let parts: Vec<&str> = spec.split('+').collect();
+    let (key, mods) = parts.split_last()?;
+    let mut control = false;
+    let mut alt = false;
+    let mut shift = false;
+    for m in mods {
+        match m.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => control = true,
+            "alt" => alt = true,
+            "shift" => shift = true,
+            _ => return None,
+        }
+    }
+    let code = match *key {
+        "esc" => KeyCode::Esc,
+        "enter" | "return" => KeyCode::Enter,
+        "tab" => KeyCode::Tab,
+        "backspace" => KeyCode::Backspace,
+        "delete" | "del" => KeyCode::Delete,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "home" => KeyCode::Home,
+        "end" => KeyCode::End,
+        "space" => KeyCode::Char(' '),
+        ch if ch.chars().count() == 1 => {
+            let c = ch.chars().next().expect("single char");
+            // An uppercase char implies shift (vim's `G`), except in a
+            // chord where it's just the shifted spelling (`Ctrl+Q`).
+            if c.is_uppercase() && !control && !alt {
+                shift = true;
+            }
+            KeyCode::Char(c.to_ascii_lowercase())
+        }
+        _ => return None,
+    };
+    Some(KeySpec {
+        code,
+        control,
+        alt,
+        shift,
+    })
+}
+
+impl KeySpec {
+    /// Does this key event match the spec? Modifiers must match exactly
+    /// (a bare `g` never matches `ctrl+g`); an uppercase char in the spec
+    /// requires shift and also matches the shifted code crossterm reports
+    /// (`ctrl+shift+x` arrives as `Char('X')` + CONTROL|SHIFT).
+    fn matches(&self, key: KeyEvent) -> bool {
+        let code_ok = match self.code {
+            KeyCode::Char(c) => {
+                key.code == KeyCode::Char(c)
+                    || (self.shift && key.code == KeyCode::Char(c.to_ascii_uppercase()))
+            }
+            other => key.code == other,
+        };
+        code_ok
+            && key.modifiers.contains(KeyModifiers::CONTROL) == self.control
+            && key.modifiers.contains(KeyModifiers::ALT) == self.alt
+            && key.modifiers.contains(KeyModifiers::SHIFT) == self.shift
+    }
+}
+
+/// User-customizable keybindings: action name → key-spec string.
+///
+/// An absent, empty, or unparseable spec falls back to the built-in default
+/// for that action, so a broken `[keymap]` section disables nothing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Keymap {
+    #[serde(flatten)]
+    bindings: HashMap<String, String>,
+}
+
+impl Keymap {
+    /// Does `key` trigger `action`? Falls back to the built-in default when
+    /// the configured spec is missing, empty, or unparseable.
+    pub fn matches(&self, action: &str, key: KeyEvent) -> bool {
+        let Some((_, default)) = DEFAULT_KEYBINDINGS.iter().find(|(a, _)| *a == action) else {
+            return false;
+        };
+        let configured = self.bindings.get(action).filter(|s| !s.is_empty());
+        let spec = match configured {
+            Some(s) => parse_key_spec(s)
+                .or_else(|| parse_key_spec(default))
+                .expect("built-in defaults are valid"),
+            None => parse_key_spec(default).expect("built-in defaults are valid"),
+        };
+        spec.matches(key)
+    }
+
+    /// Set a binding (used by tests and the config editor).
+    pub fn set(&mut self, action: &str, spec: impl Into<String>) {
+        self.bindings.insert(action.into(), spec.into());
+    }
+
+    /// The configured spec for an action (not the default), if any.
+    pub fn configured(&self, action: &str) -> Option<&str> {
+        self.bindings.get(action).map(String::as_str)
     }
 }
 

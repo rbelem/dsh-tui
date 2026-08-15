@@ -279,6 +279,12 @@ fn keymap_table() {
         app.focus = Focus::Sidebar;
         app.pane_prefix = true;
     }
+    fn custom_quit(app: &mut App) {
+        app.config.keymap.set("quit", "ctrl+d");
+    }
+    fn custom_backspace(app: &mut App) {
+        app.config.keymap.set("composer.backspace", "ctrl+h");
+    }
     fn slash_popup(app: &mut App) {
         app.focus = Focus::Composer;
         app.composer.insert_char('/');
@@ -567,6 +573,15 @@ fn keymap_table() {
         ),
         (prefix_armed, key(KeyCode::Char('x')), Some(Action::None)),
         (prefix_armed, key(KeyCode::Esc), Some(Action::None)),
+        // `[keymap]` overrides replace the default bindings.
+        (custom_quit, ctrl(KeyCode::Char('d')), Some(Action::Quit)),
+        (custom_quit, ctrl(KeyCode::Char('q')), Some(Action::None)),
+        (custom_backspace, ctrl(KeyCode::Char('h')), Some(Action::Input)),
+        (
+            custom_backspace,
+            key(KeyCode::Backspace),
+            Some(Action::None),
+        ),
     ];
     for (setup, event, expected) in cases {
         let mut app = App::default();

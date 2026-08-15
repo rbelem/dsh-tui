@@ -391,6 +391,7 @@ fn config_write_read_back_and_apply() {
             let config = Config {
                 theme: Some("catppuccin-mocha".into()),
                 locale: None,
+                keymap: dsh_tui::theme::Keymap::default(),
             };
             config.save().expect("save");
             let path = Config::path().expect("config path");

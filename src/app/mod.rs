@@ -396,8 +396,6 @@ impl Default for App {
             archived_session_ids: Vec::new(),
             archived_expanded: false,
             focus: Focus::Composer,
-            /// Ctrl+W vim pane-prefix armed: the next h/j/k/l key moves
-            /// focus, any other key disarms it.
             pane_prefix: false,
             composer: Composer::new(),
             sidebar: SidebarState::default(),
@@ -633,11 +631,13 @@ impl App {
     /// takeover swallows ALL keys, `Ctrl+T` toggles the theme picker, an
     /// open picker swallows keys until Enter/Esc, `Ctrl+W` arms the vim pane
     /// prefix (h/j/k/l move focus, any other key disarms), `Tab` cycles
-    /// focus, and the focused surface gets the key. Returns the resulting
-    /// [`Action`]; `Quit` is not applied here — the run loop stops.
+    /// focus, and the focused surface gets the key. All global bindings are
+    /// rebindable via `[keymap]` in config.toml (see
+    /// [`crate::theme::Keymap`]). Returns the resulting [`Action`]; `Quit`
+    /// is not applied here — the run loop stops.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::{KeyCode, KeyModifiers};
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        if self.config.keymap.matches("cancel", key) {
             if !matches!(self.mode, Mode::Chat) {
                 return Some(Action::Quit);
             }
@@ -647,24 +647,24 @@ impl App {
                 Some(Action::Quit)
             };
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('q') {
+        if self.config.keymap.matches("quit", key) {
             return Some(Action::Quit);
         }
         if !matches!(self.mode, Mode::Chat) {
             return Some(self.handle_takeover_key(key));
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char(',') {
+        if self.config.keymap.matches("settings", key) {
             self.mode = Mode::Settings(crate::ui::settings::SettingsState::new());
             self.hint = None;
             return Some(Action::FetchSettings);
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
+        if self.config.keymap.matches("locale", key) {
             // Ctrl+L cycles the UI locale (inert in takeovers and the
             // settings view — both swallow all keys above this point).
             self.cycle_locale();
             return Some(Action::None);
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('t') {
+        if self.config.keymap.matches("theme-picker", key) {
             if self.theme_picker.open {
                 self.theme_picker.open = false;
             } else {
@@ -681,15 +681,16 @@ impl App {
         if self.theme_picker.open {
             return Some(self.handle_picker_key(key));
         }
-        if key.modifiers.contains(KeyModifiers::ALT) && key.code == KeyCode::Char('q') {
+        if self.config.keymap.matches("queue", key) {
             return Some(self.toggle_queue_popup());
         }
         if self.queue_popup_open {
             return Some(self.handle_queue_popup_key(key));
         }
-        // Ctrl+P toggles the global launcher. Inert in the seed popup (it
-        // owns the composer's keys); Ctrl+Q/Ctrl+C above stay untouched.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('p') {
+        // Ctrl+P toggles the global launcher (rebindable via `[keymap]`).
+        // Inert in the seed popup (it owns the composer's keys); Ctrl+Q/
+        // Ctrl+C above stay untouched.
+        if self.config.keymap.matches("launcher", key) {
             if self.launcher.is_some() {
                 self.launcher = None; // toggle closed
                 return Some(Action::None);
@@ -1539,14 +1540,16 @@ impl App {
     /// `Shift+Enter` inserts a newline (web parity, Q14); arrows/Home/End
     /// move the caret; `Ctrl+D` quits (shell EOF convention — in chat focus
     /// it keeps the vim-style scroll-half-page binding); `Esc` returns
-    /// focus to the chat. While a seed popup is open, `Up`/`Down` navigate
-    /// it, `Enter` accepts, `Esc` closes it.
+    /// focus to the chat. Every binding is rebindable via `[keymap]` in
+    /// config.toml (see [`crate::theme::Keymap`]). While a seed popup is
+    /// open, `Up`/`Down` navigate it, `Enter` accepts, `Esc` closes it.
     fn handle_composer_key(&mut self, key: KeyEvent) -> Action {
         use crossterm::event::{KeyCode, KeyModifiers};
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
 
-        if control && key.code == KeyCode::Char('d') {
+        // `quit-eof` is checked first so it works even with the seed popup
+        // open, mirroring the global quit bindings.
+        if self.config.keymap.matches("composer.quit-eof", key) {
             return Action::Quit;
         }
 
@@ -1563,48 +1566,50 @@ impl App {
             return self.handle_popup_key(key);
         }
 
+        if self.config.keymap.matches("composer.focus-chat", key) {
+            self.focus = Focus::Chat;
+            return Action::Focus(Focus::Chat);
+        }
+        if self.config.keymap.matches("composer.newline", key) {
+            self.composer.newline();
+            return Action::Input;
+        }
+        if self.config.keymap.matches("composer.submit", key) {
+            return self.submit();
+        }
+        if self.config.keymap.matches("composer.backspace", key) {
+            self.composer.backspace();
+            return Action::Input;
+        }
+        if self.config.keymap.matches("composer.delete", key) {
+            self.composer.delete();
+            return Action::Input;
+        }
+        if self.config.keymap.matches("composer.left", key) {
+            self.composer.move_left();
+            return Action::Input;
+        }
+        if self.config.keymap.matches("composer.right", key) {
+            self.composer.move_right();
+            return Action::Input;
+        }
+        if self.config.keymap.matches("composer.home", key) {
+            self.composer.move_home();
+            return Action::Input;
+        }
+        if self.config.keymap.matches("composer.end", key) {
+            self.composer.move_end();
+            return Action::Input;
+        }
+        if self.config.keymap.matches("composer.up", key) {
+            self.composer.move_up();
+            return Action::Input;
+        }
+        if self.config.keymap.matches("composer.down", key) {
+            self.composer.move_down();
+            return Action::Input;
+        }
         match key.code {
-            KeyCode::Esc => {
-                self.focus = Focus::Chat;
-                Action::Focus(Focus::Chat)
-            }
-            KeyCode::Enter if shift => {
-                self.composer.newline();
-                Action::Input
-            }
-            KeyCode::Enter => self.submit(),
-            KeyCode::Backspace => {
-                self.composer.backspace();
-                Action::Input
-            }
-            KeyCode::Delete => {
-                self.composer.delete();
-                Action::Input
-            }
-            KeyCode::Left => {
-                self.composer.move_left();
-                Action::Input
-            }
-            KeyCode::Right => {
-                self.composer.move_right();
-                Action::Input
-            }
-            KeyCode::Home => {
-                self.composer.move_home();
-                Action::Input
-            }
-            KeyCode::End => {
-                self.composer.move_end();
-                Action::Input
-            }
-            KeyCode::Up => {
-                self.composer.move_up();
-                Action::Input
-            }
-            KeyCode::Down => {
-                self.composer.move_down();
-                Action::Input
-            }
             KeyCode::Char(c) if !control => {
                 self.composer.insert_char(c);
                 Action::Input
