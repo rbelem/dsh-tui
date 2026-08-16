@@ -57,6 +57,10 @@ pub struct NodeRender {
     /// skill-list block's header row — the click-toggle hit target. `None`
     /// when the message has no skill block.
     pub skill_header: Option<usize>,
+    /// #39: the line index (into `lines`, pre-wrap) of a tool node's
+    /// header row — the click-toggle fold target AND the live
+    /// running/elapsed indicator's anchor. `None` on non-tool nodes.
+    pub tool_header: Option<usize>,
 }
 
 /// Render one chat node to (unwrapped) display lines. `collapsed` is the
@@ -116,6 +120,7 @@ pub fn render_node_full(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_
     let mut image_rows = Vec::new();
     let mut code_ranges = Vec::new();
     let mut skill_header = None;
+    let mut tool_header = None;
     let lines = match &node.data {
         NodeData::User { content, .. } => {
             // The user-message tint (#38): the theme's `user_bg` behind the
@@ -170,6 +175,9 @@ pub fn render_node_full(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_
             );
             code_ranges = ranges;
             skill_header = skill;
+            // #39: the tool header is always the first rendered line
+            // (the one-line summary when collapsed, the title otherwise).
+            tool_header = Some(0);
             lines
         }
         NodeData::Compaction {
@@ -203,6 +211,7 @@ pub fn render_node_full(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_
         images: image_rows,
         code_ranges,
         skill_header,
+        tool_header,
     }
 }
 
@@ -290,8 +299,10 @@ fn render_assistant_block(
             ctx,
             skill_fold,
         ),
+        // An assistant-block tool-call scaffold is NOT a foldable tool
+        // node (no row, no glyph — plain title line).
         AssistantBlock::ToolCall { name, .. } => (
-            vec![tool_call_line(name, ctx.theme, ctx.locale)],
+            vec![tool_call_line(name, false, false, ctx.theme, ctx.locale)],
             Vec::new(),
             None,
         ),
@@ -412,9 +423,14 @@ fn render_tool_node(
         .map(|c| c.name.as_str())
         .or_else(|| result.and_then(|r| r.call.as_ref().map(|c| c.name.as_str())))
         .unwrap_or("tool");
+    // #39: the fold glyph rides the header only when the row is
+    // expandable (a result exists — a running tool with no output yet has
+    // nothing to open); a settled error row carries the failure chip
+    // below the block regardless.
+    let expandable = result.is_some();
 
     if collapsed {
-        // One-line summary (lifecycle icon + title, Q11).
+        // One-line summary (fold glyph + lifecycle title, Q11/#39).
         let failed = result.is_some_and(|r| r.is_error);
         let suffix = if failed {
             tr(locale, "marker.failed_suffix")
@@ -428,7 +444,11 @@ fn render_tool_node(
         };
         return (
             vec![Line::styled(
-                format!("{} {name}{suffix}", tr(locale, "marker.tool")),
+                format!(
+                    "{}{} {name}{suffix}",
+                    fold_glyph(collapsed, expandable),
+                    tr(locale, "marker.tool"),
+                ),
                 style,
             )],
             Vec::new(),
@@ -436,7 +456,7 @@ fn render_tool_node(
         );
     }
 
-    let mut lines = vec![tool_call_line(name, theme, locale)];
+    let mut lines = vec![tool_call_line(name, collapsed, expandable, theme, locale)];
     let mut code_ranges = Vec::new();
     let mut skill_header = None;
     if let Some(result) = result {
@@ -498,6 +518,19 @@ fn render_tool_node(
     (lines, code_ranges, skill_header)
 }
 
+/// The fold-state glyph for a tool header: `▸` collapsed / `▾` expanded,
+/// blank when the row has nothing to expand (a running tool with no result
+/// yet — nothing to open, matching the web's non-expandable rows).
+fn fold_glyph(collapsed: bool, expandable: bool) -> &'static str {
+    if !expandable {
+        ""
+    } else if collapsed {
+        "▸ "
+    } else {
+        "▾ "
+    }
+}
+
 /// The syntect language for a tool's output. Known tools map to a grammar
 /// (bash → shell); everything else renders plain — the `code` token with
 /// the panel-bg fill, exactly like an unfenced block.
@@ -508,9 +541,19 @@ fn tool_language(name: &str) -> Option<&'static str> {
     }
 }
 
-fn tool_call_line(name: &str, theme: &Theme, locale: Locale) -> Line<'static> {
+fn tool_call_line(
+    name: &str,
+    collapsed: bool,
+    expandable: bool,
+    theme: &Theme,
+    locale: Locale,
+) -> Line<'static> {
     Line::styled(
-        format!("{} {name}", tr(locale, "marker.tool")),
+        format!(
+            "{}{} {name}",
+            fold_glyph(collapsed, expandable),
+            tr(locale, "marker.tool"),
+        ),
         Style::default().fg(theme.text),
     )
 }

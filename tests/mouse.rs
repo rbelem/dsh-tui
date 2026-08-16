@@ -1331,3 +1331,94 @@ async fn wrapped_skill_header_click_lands_on_the_header_row() {
     );
     assert_eq!(app.selection, None, "no selection from the miss");
 }
+
+// ---------------------------------------------------------------------------
+// #39: tool node fold — header click toggles
+// ---------------------------------------------------------------------------
+
+/// #39: a settled tool node folds to a one-line summary by default; a
+/// click on its header row expands it (header + literal output), a second
+/// click collapses it. A header click never starts a selection.
+#[tokio::test]
+async fn tool_header_click_toggles_the_fold() {
+    let mut app = app_with_session();
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                1,
+                "tool/call",
+                json!({"turn": 1, "step": 1, "callId": "c1", "name": "bash", "arguments": r#"{"cmd":"ls"}"#}),
+            ),
+        ))
+        .expect("ingest");
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                2,
+                "tool/result",
+                json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "r1", "role": "user",
+                        "content": [{"type": "tool-result", "toolCallId": "c1", "content": [{"type": "text", "text": "file.txt\nfile2.txt"}], "isError": false}],
+                        "source": {"kind": "tool", "callId": "c1"},
+                    },
+                }),
+            ),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
+    )
+    .await;
+
+    // Folded by default: the tool renders as exactly one header row.
+    let view = format!("{}", term.backend());
+    assert!(view.contains("▸ [tool] bash"), "folded header: {view}");
+    assert!(
+        !view.contains("file.txt"),
+        "output hidden while folded: {view}"
+    );
+
+    // Click the header row (content row 0 = buffer row 1) → expands.
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            down(26, 1),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(view.contains("▾ [tool] bash"), "expanded header: {view}");
+    assert!(
+        view.contains("file.txt"),
+        "output visible while expanded: {view}"
+    );
+    assert_eq!(app.selection, None, "a header click never selects");
+
+    // Click again → collapses.
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            down(26, 1),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(view.contains("▸ [tool] bash"), "collapsed again: {view}");
+    assert!(!view.contains("file.txt"), "output hidden again: {view}");
+}

@@ -16,7 +16,7 @@ use dsh_tui::i18n::Locale;
 use dsh_tui::render::markdown::{render_node, render_node_full};
 use dsh_tui::render::{ImageCache, ImageProtocol, RowCache, render_markdown};
 use dsh_tui::store::event_data::ContentBlock;
-use dsh_tui::store::node::{AssistantBlock, ChatNode, ChatNodeKind, NodeData};
+use dsh_tui::store::node::{AssistantBlock, ChatNode, ChatNodeKind, FoldState, NodeData};
 use dsh_tui::store::{SessionStore, SessionStore as Store};
 use dsh_tui::theme::Theme;
 use dsh_tui::ui::image_viewer::ImageViewer;
@@ -843,6 +843,9 @@ async fn chat_view_renders_all_node_kinds_without_panicking() {
     let mut app = dsh_tui::app::App::default();
     app.store = store;
     app.active_session = Some(sid.clone());
+    // #39: the tool node folds by default; expand it so the failure chip
+    // renders in this all-kinds smoke draw.
+    app.store.set_fold(&sid, "c1", FoldState::expanded());
     app.sessions = vec![SessionSummary {
         session_id: sid,
         updated_at: 1.0,

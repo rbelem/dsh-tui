@@ -1309,8 +1309,8 @@ fn fold_state_defaults_and_override() {
     );
     assert_eq!(
         store.fold_state(&sid, "c1"),
-        FoldState::expanded(),
-        "tool nodes expand by default"
+        FoldState::collapsed(),
+        "tool nodes collapse by default (#39 — the web's ToolRow starts collapsed)"
     );
     // The compaction marker collapses by default.
     let marker = nodes(&store, s)

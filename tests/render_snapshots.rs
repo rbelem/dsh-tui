@@ -423,18 +423,10 @@ fn streaming_chunk_marks_dirty_and_rerenders() {
 
 #[test]
 fn collapsed_tool_renders_one_line_summary() {
+    // #39: tools fold by default (the web's ToolRow starts collapsed —
+    // "a run of tool calls stays scannable").
     let store = build_full_store();
     let mut cache = RowCache::new();
-    // Expanded default first (tool rows expand by default, Q11).
-    let expanded = render_snapshot(&store, &mut cache, 120, 30, 0);
-    assert!(
-        expanded.contains("the /etc directory"),
-        "expanded tool shows its result"
-    );
-
-    let mut store = build_full_store();
-    let mut cache = RowCache::new();
-    store.set_fold(&sid(), "c1", FoldState::collapsed());
     let snapshot = render_snapshot(&store, &mut cache, 120, 30, 0);
     assert!(
         snapshot.contains("[tool] read_file"),
@@ -445,7 +437,20 @@ fn collapsed_tool_renders_one_line_summary() {
         "collapsed tool hides the result"
     );
     insta::assert_snapshot!("chat-tool-collapsed", snapshot);
+
+    // An explicit expanded override re-shows the result (click the header
+    // to expand — tests/mouse.rs drives the click path).
+    let mut store = build_full_store();
+    let mut cache = RowCache::new();
+    store.set_fold(&sid(), "c1", FoldState::expanded());
+    let snapshot = render_snapshot(&store, &mut cache, 120, 30, 0);
+    assert!(
+        snapshot.contains("the /etc directory"),
+        "expanded tool shows its result"
+    );
 }
+
+
 
 #[test]
 fn offset_scrolling_renders_from_viewport() {

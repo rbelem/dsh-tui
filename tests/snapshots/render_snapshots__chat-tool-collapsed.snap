@@ -1,6 +1,5 @@
 ---
 source: tests/render_snapshots.rs
-assertion_line: 414
 expression: snapshot
 ---
 "                                                                                                                        "
@@ -15,7 +14,7 @@ expression: snapshot
 "  | 1 | 2 |                                                                                                             "
 "  stale fresh                                                                                                           "
 "                                                                                                                        "
-"  [tool] read_file                                                                                                      "
+"  ▸ [tool] read_file                                                                                                    "
 "                                                                                                                        "
 "  Hello world                                                                                                           "
 "  thinking                                                                                                              "

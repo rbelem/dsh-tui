@@ -47,6 +47,10 @@ pub struct CachedRow {
     /// row — the click-toggle hit target (`None` when the node has no
     /// skill block).
     pub skill_header: Option<usize>,
+    /// #39: the line index (into `lines`) of a tool node's header row —
+    /// the click-toggle fold target and the live running/elapsed
+    /// indicator's anchor (`None` on non-tool nodes).
+    pub tool_header: Option<usize>,
     /// Rendered-relevant state at render time (change detection).
     signature: u64,
 }
@@ -144,6 +148,7 @@ impl RowCache {
                         code_ranges: rendered.code_ranges,
                         code_fill: rendered.code_fill,
                         skill_header: rendered.skill_header,
+                        tool_header: rendered.tool_header,
                         signature,
                     });
                     changed = true;
@@ -205,6 +210,7 @@ impl RowCache {
                 row.code_ranges = rendered.code_ranges;
                 row.code_fill = rendered.code_fill;
                 row.skill_header = rendered.skill_header;
+                row.tool_header = rendered.tool_header;
                 rendered_any = true;
             }
             // Dirty re-render dropped the inter-message blank; restore it.
@@ -270,6 +276,7 @@ struct WrappedRender {
     code_ranges: Vec<(usize, usize)>,
     code_fill: ratatui::style::Color,
     skill_header: Option<usize>,
+    tool_header: Option<usize>,
 }
 
 /// Render one node, wrap at `ctx.width`, and re-base the image segments'
@@ -287,12 +294,14 @@ fn render_row(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> Wrap
         &marks,
         &render.code_ranges,
         render.skill_header,
+        render.tool_header,
     );
     let WrappedLines {
         lines,
         image_rebased: rebased_images,
         code_ranges,
         skill_header,
+        tool_header,
     } = wrapped;
     let images = render
         .images
@@ -309,6 +318,7 @@ fn render_row(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> Wrap
         code_ranges,
         code_fill: ctx.theme.panel_bg,
         skill_header,
+        tool_header,
     }
 }
 
@@ -321,12 +331,14 @@ fn render_row(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> Wrap
 /// output line ranges (code input lines are contiguous, so their output
 /// lines form a contiguous run).
 /// The wrapped output of [`wrap_lines_marked`]: the lines plus the
-/// re-based marks (image starts, code ranges, the #31 skill header).
+/// re-based marks (image starts, code ranges, the #31 skill header, the
+/// #39 tool header).
 struct WrappedLines {
     lines: Vec<Line<'static>>,
     image_rebased: Vec<usize>,
     code_ranges: Vec<(usize, usize)>,
     skill_header: Option<usize>,
+    tool_header: Option<usize>,
 }
 
 fn wrap_lines_marked(
@@ -335,6 +347,7 @@ fn wrap_lines_marked(
     image_marks: &[usize],
     code_ranges: &[(usize, usize)],
     skill_mark: Option<usize>,
+    tool_mark: Option<usize>,
 ) -> WrappedLines {
     if width == 0 {
         return WrappedLines {
@@ -342,6 +355,7 @@ fn wrap_lines_marked(
             image_rebased: Vec::new(),
             code_ranges: Vec::new(),
             skill_header: None,
+            tool_header: None,
         };
     }
     let width = width as usize;
@@ -349,7 +363,8 @@ fn wrap_lines_marked(
     let mut rebased = Vec::with_capacity(image_marks.len());
     let mut next_mark = image_marks.iter().peekable();
     // Output line count before each input line — maps input ranges to
-    // output ranges (and the #31 skill header to its post-wrap line).
+    // output ranges (and the #31 skill header / #39 tool header to their
+    // post-wrap lines).
     let mut out_before = Vec::with_capacity(lines.len() + 1);
     for (index, line) in lines.into_iter().enumerate() {
         out_before.push(wrapped.len());
@@ -365,11 +380,13 @@ fn wrap_lines_marked(
         .map(|(start, end)| (out_before[*start], out_before[*end]))
         .collect();
     let skill_header = skill_mark.map(|mark| out_before[mark]);
+    let tool_header = tool_mark.map(|mark| out_before[mark]);
     WrappedLines {
         lines: wrapped,
         image_rebased: rebased,
         code_ranges,
         skill_header,
+        tool_header,
     }
 }
 

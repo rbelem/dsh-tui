@@ -33,7 +33,7 @@ use ratatui::layout::Rect;
 
 use crate::client::{ClientError, WireClient};
 use crate::render::row_cache::RowCache;
-use crate::store::node::{NodeData, NodeKey};
+use crate::store::node::{FoldState, NodeData, NodeKey};
 use crate::store::{SessionStore, StoreError};
 use crate::theme::Config;
 use crate::theme::detect::{ColorLevel, detect_color_level};
@@ -1883,6 +1883,23 @@ impl App {
         self.skill_folds.insert(node_key.to_string(), !folded);
     }
 
+    /// #39: flip a tool node's fold (Q11) — the store keeps per-key fold
+    /// state, so the toggle survives node-list rebuilds. The next sync
+    /// re-renders the row (the fold rides the render signature).
+    pub fn toggle_tool_fold(&mut self, node_key: &str) {
+        let Some(session_id) = &self.active_session else {
+            return;
+        };
+        let collapsed = self.store.fold_state(session_id, node_key).collapsed;
+        self.store.set_fold(
+            session_id,
+            node_key,
+            FoldState {
+                collapsed: !collapsed,
+            },
+        );
+    }
+
     /// #31: the node key whose skill header row occupies the absolute
     /// (cache-line) index, if any — the click-toggle hit target.
     fn skill_header_at(&self, abs_line: usize) -> Option<&str> {
@@ -1891,6 +1908,23 @@ impl App {
             let len = row.lines.len();
             if abs_line >= cursor && abs_line < cursor + len {
                 return match row.skill_header {
+                    Some(relative) if relative == abs_line - cursor => Some(&row.node_key),
+                    _ => None,
+                };
+            }
+            cursor += len;
+        }
+        None
+    }
+
+    /// #39: the node key whose tool header row occupies the absolute
+    /// (cache-line) index, if any — the click-toggle fold target.
+    fn tool_header_at(&self, abs_line: usize) -> Option<&str> {
+        let mut cursor = 0usize;
+        for row in self.row_cache.lines() {
+            let len = row.lines.len();
+            if abs_line >= cursor && abs_line < cursor + len {
+                return match row.tool_header {
                     Some(relative) if relative == abs_line - cursor => Some(&row.node_key),
                     _ => None,
                 };
@@ -2006,6 +2040,15 @@ impl App {
                 + row
                     .saturating_sub(content.y)
                     .min(content.height.saturating_sub(1)) as usize;
+            // #39: a click on a tool node's header row toggles that
+            // tool's fold (the collapsed one-line summary expands to the
+            // header + output; a second click collapses it) — an action
+            // click, so it never starts a selection.
+            if let Some(node_key) = self.tool_header_at(abs_line).map(str::to_string) {
+                self.toggle_tool_fold(&node_key);
+                self.cancel_selection();
+                return Action::None;
+            }
             if let Some(node_key) = self.skill_header_at(abs_line).map(str::to_string) {
                 self.toggle_skill_fold(&node_key);
                 self.cancel_selection();

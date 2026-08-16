@@ -176,15 +176,17 @@ impl FoldState {
         FoldState { collapsed: false }
     }
 
-    /// v1 defaults mirroring the web: tool nodes expanded, compaction and
-    /// context nodes collapsed, assistant nodes expanded (streaming and
-    /// settled alike — a running assistant is never collapsed by default),
-    /// plain user messages collapsed, notices and unknown rows expanded.
+    /// v1 defaults mirroring the web: tool nodes COLLAPSED (the web's
+    /// ToolRow starts `useState(false)` — "every card kind starts
+    /// collapsed, so a run of tool calls stays scannable"; click the
+    /// header to expand), compaction and context nodes collapsed,
+    /// assistant nodes expanded (streaming and settled alike — a running
+    /// assistant is never collapsed by default), plain user messages
+    /// collapsed, notices and unknown rows expanded.
     pub fn default_for(node: &ChatNode) -> Self {
         match &node.data {
-            NodeData::Assistant { .. } | NodeData::Tool { .. } | NodeData::Unknown { .. } => {
-                FoldState::expanded()
-            }
+            NodeData::Tool { .. } => FoldState::collapsed(),
+            NodeData::Assistant { .. } | NodeData::Unknown { .. } => FoldState::expanded(),
             NodeData::User { .. }
             | NodeData::Compaction { .. }
             | NodeData::TurnError { .. }
