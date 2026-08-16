@@ -60,6 +60,24 @@ fn user_msg(id: &str, text: &str) -> serde_json::Value {
     json!({"id": id, "role": "user", "content": [{"type": "text", "text": text}], "source": {"kind": "user"}})
 }
 
+/// #32: the render-context bag for a test render. Folds always empty —
+/// skill-fold behavior is covered by the dedicated markdown tests.
+fn render_ctx<'a>(
+    width: u16,
+    theme: &'a Theme,
+    locale: Locale,
+    images: &'a ImageCache,
+    folds: &'a std::collections::HashMap<dsh_tui::store::node::NodeKey, bool>,
+) -> dsh_tui::render::markdown::RenderContext<'a> {
+    dsh_tui::render::markdown::RenderContext {
+        width,
+        theme,
+        locale,
+        images,
+        skill_folds: folds,
+    }
+}
+
 fn image_msg(id: &str, blocks: Vec<serde_json::Value>) -> serde_json::Value {
     json!({"id": id, "role": "user", "content": blocks, "source": {"kind": "user"}})
 }
@@ -157,11 +175,13 @@ fn inline_placeholder_unchanged_without_bytes() {
     cache.sync(
         &app.store,
         &SessionId("s1".into()),
-        120,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            120,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     let row = &cache.lines()[0];
     assert_eq!(row.lines.len(), 1, "caption only, no filler lines");
@@ -203,11 +223,13 @@ fn inline_image_expands_and_draws_with_cached_bytes() {
     cache.sync(
         &app.store,
         &SessionId("s1".into()),
-        100,
-        &Theme::default(),
-        Locale::En,
-        &images,
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            100,
+            &Theme::default(),
+            Locale::En,
+            &images,
+            &std::collections::HashMap::new(),
+        ),
     );
     let row = &cache.lines()[0];
     assert_eq!(row.images.len(), 1, "one inline segment");

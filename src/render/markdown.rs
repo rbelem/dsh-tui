@@ -17,6 +17,8 @@
 //! no indent). One blank row around code blocks and before headings; links
 //! are the accent token.
 
+use std::collections::HashMap;
+
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
@@ -24,7 +26,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::i18n::{Locale, tr, trf};
 use crate::render::image::{ImageCache, ImageRow};
 use crate::store::event_data::ContentBlock;
-use crate::store::node::{AssistantBlock, ChatNode, NodeData};
+use crate::store::node::{AssistantBlock, ChatNode, NodeData, NodeKey};
 use crate::theme::Theme;
 
 /// Maximum width of a tool-arguments preview on the call line.
@@ -49,8 +51,8 @@ pub struct NodeRender {
 
 /// Render one chat node to (unwrapped) display lines. `collapsed` is the
 /// node's fold state (Q11): collapsed tool nodes render a one-line summary.
-/// `theme` supplies the semantic colors (text/muted/error/warning/code);
-/// `locale` localizes the row markers.
+/// `ctx` is the render-context bag (#32): theme tokens, locale, image
+/// cache, wrap width, and the #31 skill-fold map (resolved per node).
 ///
 /// Placeholder tier: image blocks always render their `[image: name]`
 /// caption (no image cache consulted). Byte-identical to the pre-image
@@ -58,54 +60,56 @@ pub struct NodeRender {
 pub fn render_node(
     node: &ChatNode,
     collapsed: bool,
-    theme: &Theme,
-    locale: Locale,
+    ctx: &RenderContext<'_>,
 ) -> Vec<Line<'static>> {
-    render_node_full(
-        node,
-        collapsed,
-        theme,
-        locale,
-        &ImageCache::default(),
-        0,
-        false,
-    )
-    .lines
+    render_node_full(node, collapsed, ctx).lines
 }
 
-/// The inline-image context threaded through the node renderers: the byte
-/// cache plus the wrap width (the inline fit budget).
-struct InlinePlan<'a> {
-    cache: &'a ImageCache,
-    width: u16,
+/// The render-context bag threaded through the markdown pipeline (#32):
+/// the theme tokens, locale, image cache (the inline fit budget), the
+/// wrap width, and the #31 skill-fold map. Built once per draw pass in
+/// the app shell and passed down instead of a growing parameter list —
+/// adding a render input touches the struct, not every render signature.
+#[derive(Clone, Copy)]
+pub struct RenderContext<'a> {
+    /// The wrap width (the inline image fit budget).
+    pub width: u16,
+    pub theme: &'a Theme,
+    pub locale: Locale,
+    pub images: &'a ImageCache,
+    /// #31: per-message skill-block fold state (absent = folded, the
+    /// default; the row cache's render signature includes it, so a
+    /// toggle re-renders that message's rows).
+    pub skill_folds: &'a HashMap<NodeKey, bool>,
+}
+
+impl RenderContext<'_> {
+    /// The node's skill-block fold state (absent = folded, the #31
+    /// default).
+    pub fn skill_fold(&self, key: &NodeKey) -> bool {
+        self.skill_folds.get(key).copied().unwrap_or(true)
+    }
 }
 
 /// [`render_node`] with the image pipeline wired: an image block whose
-/// attachment has decoded bytes in `images` renders its caption followed by
-/// `rows` blank filler lines (the widget draws over them at draw time);
-/// anything else keeps the bare caption placeholder. `width` is the wrap
-/// width (the inline fit budget).
-pub fn render_node_full(
-    node: &ChatNode,
-    collapsed: bool,
-    theme: &Theme,
-    locale: Locale,
-    images: &ImageCache,
-    width: u16,
-    skill_fold: bool,
-) -> NodeRender {
+/// attachment has decoded bytes in `ctx.images` renders its caption
+/// followed by `rows` blank filler lines (the widget draws over them at
+/// draw time); anything else keeps the bare caption placeholder.
+/// `ctx.width` is the wrap width (the inline fit budget).
+pub fn render_node_full(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> NodeRender {
+    let theme = ctx.theme;
+    let locale = ctx.locale;
+    // #31: the skill fold is per-node state — resolved here from the map
+    // (absent = folded, the ticket default).
+    let skill_fold = ctx.skill_fold(&node.key);
     let notice = |text: String| Line::styled(text, Style::default().fg(theme.muted));
-    let plan = InlinePlan {
-        cache: images,
-        width,
-    };
     let mut image_rows = Vec::new();
     let mut code_ranges = Vec::new();
     let mut skill_header = None;
     let lines = match &node.data {
         NodeData::User { content, .. } => {
             let (lines, ranges, skill) =
-                render_content_blocks(content, theme, locale, &plan, &mut image_rows, skill_fold);
+                render_content_blocks(content, ctx, &mut image_rows, skill_fold);
             code_ranges = ranges;
             skill_header = skill;
             lines
@@ -118,7 +122,7 @@ pub fn render_node_full(
             let mut lines = Vec::new();
             for block in blocks {
                 let (block_lines, block_ranges, block_skill) =
-                    render_assistant_block(block, theme, locale, skill_fold);
+                    render_assistant_block(block, ctx, skill_fold);
                 code_ranges.extend(
                     block_ranges
                         .into_iter()
@@ -144,9 +148,7 @@ pub fn render_node_full(
                 call.as_ref(),
                 result.as_deref(),
                 collapsed,
-                theme,
-                locale,
-                &plan,
+                ctx,
                 &mut image_rows,
                 skill_fold,
             );
@@ -188,11 +190,12 @@ pub fn render_node_full(
     }
 }
 
-/// Render the markdown `text` with `base_style` into display lines. `theme`
-/// supplies the token colors (text/muted/code/accent). Returns the lines,
-/// the half-open line ranges (into the returned vec) that are fenced code
-/// (the `panel_bg` fill targets), and — #31 — the line index of a detected
-/// skill-list block's header row (`None` when the message has none).
+/// Render the markdown `text` with `base_style` into display lines. `ctx`
+/// supplies the token colors (text/muted/code/accent) and locale. Returns
+/// the lines, the half-open line ranges (into the returned vec) that are
+/// fenced code (the `panel_bg` fill targets), and — #31 — the line index
+/// of a detected skill-list block's header row (`None` when the message
+/// has none).
 ///
 /// A `##`/`###` heading whose text is exactly `skills` / `available
 /// skills` (case-insensitive, optional trailing count like `(12)`)
@@ -204,8 +207,7 @@ pub fn render_node_full(
 pub fn render_markdown(
     text: &str,
     base_style: Style,
-    theme: &Theme,
-    locale: Locale,
+    ctx: &RenderContext<'_>,
     skill_fold: bool,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Option<usize>) {
     let mut options = pulldown_cmark::Options::empty();
@@ -220,7 +222,7 @@ pub fn render_markdown(
     // passes parse the same text with the same options, so the event
     // indices line up exactly).
     let skill_block = detect_skill_block(&events);
-    let mut sink = Sink::new(base_style, theme, locale, skill_fold);
+    let mut sink = Sink::new(base_style, ctx, skill_fold);
     let mut skip_range = None;
     if let Some((start, end, _)) = &skill_block {
         skip_range = Some((*start, *end));
@@ -254,30 +256,26 @@ pub fn render_markdown(
 
 /// Render one assistant block into lines; the returned code ranges index
 /// into the returned vec. (Assistant blocks have no image content, so the
-/// image plan is not threaded here.)
+/// image side of the context is not consulted here.)
 fn render_assistant_block(
     block: &AssistantBlock,
-    theme: &Theme,
-    locale: Locale,
+    ctx: &RenderContext<'_>,
     skill_fold: bool,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Option<usize>) {
     match block {
-        AssistantBlock::Text { text } => render_markdown(
-            text,
-            Style::default().fg(theme.text),
-            theme,
-            locale,
-            skill_fold,
-        ),
+        AssistantBlock::Text { text } => {
+            render_markdown(text, Style::default().fg(ctx.theme.text), ctx, skill_fold)
+        }
         AssistantBlock::Reasoning { text } => render_markdown(
             text,
-            Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
-            theme,
-            locale,
+            Style::default()
+                .fg(ctx.theme.muted)
+                .add_modifier(Modifier::DIM),
+            ctx,
             skill_fold,
         ),
         AssistantBlock::ToolCall { name, args_raw, .. } => (
-            vec![tool_call_line(name, args_raw, theme, locale)],
+            vec![tool_call_line(name, args_raw, ctx.theme, ctx.locale)],
             Vec::new(),
             None,
         ),
@@ -289,9 +287,7 @@ fn render_assistant_block(
 /// block, if any) is relative to the returned lines.
 fn render_content_blocks(
     content: &[ContentBlock],
-    theme: &Theme,
-    locale: Locale,
-    plan: &InlinePlan<'_>,
+    ctx: &RenderContext<'_>,
     image_rows: &mut Vec<ImageRow>,
     skill_fold: bool,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Option<usize>) {
@@ -300,37 +296,34 @@ fn render_content_blocks(
     let mut skill_header = None;
     for block in content {
         let (block_lines, block_ranges, block_skill) = match block {
-            ContentBlock::Text { text } => render_markdown(
-                text,
-                Style::default().fg(theme.text),
-                theme,
-                locale,
-                skill_fold,
-            ),
+            ContentBlock::Text { text } => {
+                render_markdown(text, Style::default().fg(ctx.theme.text), ctx, skill_fold)
+            }
             ContentBlock::Reasoning { text } => render_markdown(
                 text,
-                Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
-                theme,
-                locale,
+                Style::default()
+                    .fg(ctx.theme.muted)
+                    .add_modifier(Modifier::DIM),
+                ctx,
                 skill_fold,
             ),
             ContentBlock::Image { attachment } => {
                 let name = attachment
                     .name
                     .as_deref()
-                    .unwrap_or_else(|| tr(locale, "marker.image_default"));
+                    .unwrap_or_else(|| tr(ctx.locale, "marker.image_default"));
                 // The caption is the placeholder tier AND the inline image's
                 // label — always emitted, byte-identical either way.
                 let mut caption_lines = vec![Line::styled(
-                    trf(locale, "marker.image", &[name]),
-                    Style::default().fg(theme.muted),
+                    trf(ctx.locale, "marker.image", &[name]),
+                    Style::default().fg(ctx.theme.muted),
                 )];
                 // Inline tier: decoded bytes in the cache → reserve `rows`
                 // blank filler lines below the caption; the draw loop paints
                 // the image widget over them. v1's cache is always empty
                 // (no session.attachment fetch — see render::image docs).
-                if let Some(loaded) = plan.cache.get(&attachment.attachment_id) {
-                    let rows = ImageCache::inline_rows(&loaded.source, plan.width);
+                if let Some(loaded) = ctx.images.get(&attachment.attachment_id) {
+                    let rows = ImageCache::inline_rows(&loaded.source, ctx.width);
                     image_rows.push(ImageRow {
                         line_index: lines.len() + caption_lines.len(),
                         attachment_id: attachment.attachment_id.clone(),
@@ -342,22 +335,22 @@ fn render_content_blocks(
             }
             ContentBlock::ToolCall { name, .. } => (
                 vec![Line::styled(
-                    format!("{} {name}", tr(locale, "marker.tool")),
-                    Style::default().fg(theme.text),
+                    format!("{} {name}", tr(ctx.locale, "marker.tool")),
+                    Style::default().fg(ctx.theme.text),
                 )],
                 Vec::new(),
                 None,
             ),
             ContentBlock::ToolResult { is_error, .. } => {
                 let suffix = if *is_error == Some(true) {
-                    tr(locale, "marker.failed_suffix")
+                    tr(ctx.locale, "marker.failed_suffix")
                 } else {
                     ""
                 };
                 (
                     vec![Line::styled(
-                        format!("{}{suffix}", tr(locale, "marker.tool_result")),
-                        Style::default().fg(theme.muted),
+                        format!("{}{suffix}", tr(ctx.locale, "marker.tool_result")),
+                        Style::default().fg(ctx.theme.muted),
                     )],
                     Vec::new(),
                     None,
@@ -367,8 +360,8 @@ fn render_content_blocks(
                 let block_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("?");
                 (
                     vec![Line::styled(
-                        trf(locale, "marker.block", &[block_type]),
-                        Style::default().fg(theme.muted),
+                        trf(ctx.locale, "marker.block", &[block_type]),
+                        Style::default().fg(ctx.theme.muted),
                     )],
                     Vec::new(),
                     None,
@@ -389,17 +382,16 @@ fn render_content_blocks(
     (lines, code_ranges, skill_header)
 }
 
-#[allow(clippy::too_many_arguments)] // the node-render context bag
 fn render_tool_node(
     call: Option<&crate::store::node::RunningToolCall>,
     result: Option<&crate::store::node::ToolResultNode>,
     collapsed: bool,
-    theme: &Theme,
-    locale: Locale,
-    plan: &InlinePlan<'_>,
+    ctx: &RenderContext<'_>,
     image_rows: &mut Vec<ImageRow>,
     skill_fold: bool,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Option<usize>) {
+    let theme = ctx.theme;
+    let locale = ctx.locale;
     let name = call
         .map(|c| c.name.as_str())
         .or_else(|| result.and_then(|r| r.call.as_ref().map(|c| c.name.as_str())))
@@ -434,7 +426,7 @@ fn render_tool_node(
     let mut skill_header = None;
     if let Some(result) = result {
         let (result_lines, result_ranges, result_skill) =
-            render_content_blocks(&result.content, theme, locale, plan, image_rows, skill_fold);
+            render_content_blocks(&result.content, ctx, image_rows, skill_fold);
         code_ranges.extend(
             result_ranges
                 .into_iter()
@@ -726,11 +718,11 @@ struct Sink {
 }
 
 impl Sink {
-    fn new(base: Style, theme: &Theme, locale: Locale, skill_fold: bool) -> Self {
+    fn new(base: Style, ctx: &RenderContext<'_>, skill_fold: bool) -> Self {
         Sink {
             base,
-            theme: theme.clone(),
-            locale,
+            theme: ctx.theme.clone(),
+            locale: ctx.locale,
             skill_fold,
             skill_header: None,
             lines: Vec::new(),

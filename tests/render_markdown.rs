@@ -58,6 +58,24 @@ fn user_msg(id: &str, text: &str) -> serde_json::Value {
     json!({"id": id, "role": "user", "content": [{"type": "text", "text": text}], "source": {"kind": "user"}})
 }
 
+/// #32: the render-context bag for a test render. Folds always empty —
+/// skill-fold behavior is covered by the dedicated markdown tests below.
+fn render_ctx<'a>(
+    width: u16,
+    theme: &'a Theme,
+    locale: Locale,
+    images: &'a ImageCache,
+    folds: &'a std::collections::HashMap<dsh_tui::store::node::NodeKey, bool>,
+) -> dsh_tui::render::markdown::RenderContext<'a> {
+    dsh_tui::render::markdown::RenderContext {
+        width,
+        theme,
+        locale,
+        images,
+        skill_folds: folds,
+    }
+}
+
 fn chunk(turn: i64, step: i64, data: serde_json::Value) -> serde_json::Value {
     json!({"turn": turn, "step": step, "chunk": data})
 }
@@ -121,8 +139,13 @@ fn markdown_surface_covers_every_sink_branch() {
     let (lines, _code, _skill) = render_markdown(
         md,
         Style::default().fg(theme.text),
-        &theme,
-        dsh_tui::i18n::Locale::En,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
         true,
     );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
@@ -203,8 +226,13 @@ fn fenced_code_uses_the_code_token_with_panel_fill_range() {
     let (lines, code_ranges, _skill) = render_markdown(
         "before\n```rs\nfn main() { println!(\"hi\"); }\n```\nafter",
         Style::default().fg(theme.text),
-        &theme,
-        Locale::En,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
         true,
     );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
@@ -239,15 +267,27 @@ fn fenced_code_uses_the_code_token_with_panel_fill_range() {
 fn render_node_wrapper_matches_the_full_render() {
     let theme = Theme::default();
     let chat = text_node("m1", "hello");
-    let wrapped = render_node(&chat, false, &theme, Locale::En);
+    let wrapped = render_node(
+        &chat,
+        false,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
+    );
     let full = render_node_full(
         &chat,
         false,
-        &theme,
-        Locale::En,
-        &ImageCache::default(),
-        80,
-        true,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     assert_eq!(wrapped, full.lines, "render_node is the default-cache full");
 }
@@ -261,11 +301,21 @@ fn node_data_variants_render_their_markers() {
     let theme = Theme::default();
     let image_cache = ImageCache::default();
     let render = |n: &ChatNode| {
-        render_node_full(n, false, &theme, Locale::En, &image_cache, 80, true)
-            .lines
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
+        render_node_full(
+            n,
+            false,
+            &render_ctx(
+                80,
+                &theme,
+                Locale::En,
+                &image_cache,
+                &std::collections::HashMap::new(),
+            ),
+        )
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
     };
 
     // Interrupted assistant appends the marker.
@@ -401,11 +451,21 @@ fn tool_node_error_paths_render() {
     let theme = Theme::default();
     let image_cache = ImageCache::default();
     let render = |n: &ChatNode, collapsed: bool| {
-        render_node_full(n, collapsed, &theme, Locale::En, &image_cache, 80, true)
-            .lines
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
+        render_node_full(
+            n,
+            collapsed,
+            &render_ctx(
+                80,
+                &theme,
+                Locale::En,
+                &image_cache,
+                &std::collections::HashMap::new(),
+            ),
+        )
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
     };
 
     let long_args = "x".repeat(200);
@@ -574,74 +634,27 @@ fn row_cache_signs_and_renders_every_node_kind() {
     let mut store = store_with_all_node_kinds();
     let sid = SessionId("s1".into());
     let mut cache = RowCache::new();
-    assert!(
-        cache.sync(
-            &store,
-            &sid,
-            100,
-            &Theme::default(),
-            Locale::En,
-            &ImageCache::default(),
-            &std::collections::HashMap::new(),
-        ),
-        "first sync renders"
-    );
+    let theme = Theme::default();
+    let images = ImageCache::default();
+    let folds = std::collections::HashMap::new();
+    let ctx = |width: u16| render_ctx(width, &theme, Locale::En, &images, &folds);
+    assert!(cache.sync(&store, &sid, &ctx(100)), "first sync renders");
     assert!(!cache.lines().is_empty(), "rows cached");
     // Idle second sync: nothing dirty.
-    assert!(!cache.sync(
-        &store,
-        &sid,
-        100,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
-    ));
+    assert!(!cache.sync(&store, &sid, &ctx(100)));
 
     // A new event dirties its row; render_dirty re-renders it.
     store
         .ingest(frame("s1", ev(15, "user/message", user_msg("m4", "dirty"))))
         .expect("ingest");
-    assert!(cache.sync(
-        &store,
-        &sid,
-        100,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
-    ));
-    cache.render_dirty(
-        &store,
-        &sid,
-        100,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
-    );
+    assert!(cache.sync(&store, &sid, &ctx(100)));
+    cache.render_dirty(&store, &sid, &ctx(100));
 
     // Width change re-wraps.
-    assert!(cache.sync(
-        &store,
-        &sid,
-        40,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
-    ));
+    assert!(cache.sync(&store, &sid, &ctx(40)));
 
     // A session with no store state clears the rows.
-    assert!(cache.sync(
-        &store,
-        &SessionId("gone".into()),
-        100,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
-    ));
+    assert!(cache.sync(&store, &SessionId("gone".into()), &ctx(100)));
     assert!(
         cache.lines().is_empty(),
         "rows cleared for a missing session"
@@ -849,11 +862,21 @@ fn markdown_tool_result_false_and_missing_error_code() {
     let theme = Theme::default();
     let image_cache = ImageCache::default();
     let render = |n: &ChatNode, collapsed: bool| {
-        render_node_full(n, collapsed, &theme, Locale::En, &image_cache, 80, true)
-            .lines
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
+        render_node_full(
+            n,
+            collapsed,
+            &render_ctx(
+                80,
+                &theme,
+                Locale::En,
+                &image_cache,
+                &std::collections::HashMap::new(),
+            ),
+        )
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
     };
     // A successful tool result: no failed suffix.
     let ok_tool = node(
@@ -934,8 +957,13 @@ fn skill_block_folds_to_one_header_row() {
     let (lines, _code, skill_header) = render_markdown(
         SKILLS_MD,
         Style::default().fg(theme.text),
-        &theme,
-        Locale::En,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
         true, // folded (the default)
     );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
@@ -962,8 +990,13 @@ fn skill_block_expands_to_header_and_items() {
     let (lines, _code, skill_header) = render_markdown(
         SKILLS_MD,
         Style::default().fg(theme.text),
-        &theme,
-        Locale::En,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
         false, // expanded
     );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
@@ -983,8 +1016,13 @@ fn skill_heading_variants_and_cjk_parse() {
     let (lines, _code, skill_header) = render_markdown(
         md,
         Style::default().fg(theme.text),
-        &theme,
-        Locale::En,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
         false,
     );
     assert_eq!(skill_header, Some(0), "### + trailing count matches");
@@ -1009,8 +1047,13 @@ fn non_skill_messages_render_byte_identical() {
         let (lines, _code, skill_header) = render_markdown(
             md,
             Style::default().fg(theme.text),
-            &theme,
-            Locale::En,
+            &render_ctx(
+                80,
+                &theme,
+                Locale::En,
+                &ImageCache::default(),
+                &std::collections::HashMap::new(),
+            ),
             true,
         );
         assert_eq!(skill_header, None, "no fold for: {md}");
@@ -1024,8 +1067,13 @@ fn skill_header_is_localized() {
     let (lines, _code, _skill) = render_markdown(
         SKILLS_MD,
         Style::default().fg(theme.text),
-        &theme,
-        Locale::Zh,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::Zh,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
         true,
     );
     assert_eq!(
@@ -1044,8 +1092,13 @@ fn mid_message_skill_block_follows_the_intro() {
     let (lines, _code, skill_header) = render_markdown(
         md,
         Style::default().fg(theme.text),
-        &theme,
-        Locale::En,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
         true,
     );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
@@ -1059,8 +1112,13 @@ fn mid_message_skill_block_follows_the_intro() {
     let (lines, _code, _skill) = render_markdown(
         md,
         Style::default().fg(theme.text),
-        &theme,
-        Locale::En,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
         false,
     );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();

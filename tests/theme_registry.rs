@@ -47,6 +47,24 @@ fn user_msg(id: &str, text: &str) -> serde_json::Value {
     json!({"id": id, "role": "user", "content": [{"type": "text", "text": text}], "source": {"kind": "user"}})
 }
 
+/// #32: the render-context bag for a test render. Folds always empty —
+/// skill-fold behavior is covered by the dedicated markdown tests.
+fn render_ctx<'a>(
+    width: u16,
+    theme: &'a Theme,
+    locale: Locale,
+    images: &'a ImageCache,
+    folds: &'a std::collections::HashMap<dsh_tui::store::node::NodeKey, bool>,
+) -> dsh_tui::render::markdown::RenderContext<'a> {
+    dsh_tui::render::markdown::RenderContext {
+        width,
+        theme,
+        locale,
+        images,
+        skill_folds: folds,
+    }
+}
+
 /// A store with one user message containing an unfenced code block (the
 /// plain-code path colors it with the theme's code token).
 fn store_with_code_fence() -> SessionStore {
@@ -71,20 +89,24 @@ fn render_with_theme(theme: &Theme, width: u16, height: u16) -> String {
     cache.sync(
         &store,
         &SessionId("s1".into()),
-        width,
-        theme,
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            width,
+            theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     cache.render_dirty(
         &store,
         &SessionId("s1".into()),
-        width,
-        theme,
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            width,
+            theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
@@ -348,20 +370,24 @@ fn theme_colors_reach_rendered_cells() {
     cache.sync(
         &store,
         &SessionId("s1".into()),
-        120,
-        &mocha,
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            120,
+            &mocha,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     cache.render_dirty(
         &store,
         &SessionId("s1".into()),
-        120,
-        &mocha,
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            120,
+            &mocha,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();

@@ -539,24 +539,15 @@ impl App {
             ));
         let session_id = self.active_session.clone();
         if let Some(session_id) = &session_id {
-            self.row_cache.sync(
-                &self.store,
-                session_id,
+            let ctx = crate::render::markdown::RenderContext {
                 width,
-                &self.theme,
-                self.locale,
-                &self.image_cache,
-                &self.skill_folds,
-            );
-            self.row_cache.render_dirty(
-                &self.store,
-                session_id,
-                width,
-                &self.theme,
-                self.locale,
-                &self.image_cache,
-                &self.skill_folds,
-            );
+                theme: &self.theme,
+                locale: self.locale,
+                images: &self.image_cache,
+                skill_folds: &self.skill_folds,
+            };
+            self.row_cache.sync(&self.store, session_id, &ctx);
+            self.row_cache.render_dirty(&self.store, session_id, &ctx);
             if self.view.follow {
                 // Follow in LINE space: the viewport offset counts rendered
                 // lines (scroll moves by lines), so the bottom anchor is

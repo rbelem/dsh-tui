@@ -84,6 +84,24 @@ fn user_msg(id: &str, text: &str) -> serde_json::Value {
     json!({"id": id, "role": "user", "content": [{"type": "text", "text": text}], "source": {"kind": "user"}})
 }
 
+/// #32: the render-context bag for a test render. Folds always empty —
+/// skill-fold behavior is covered by the dedicated markdown tests.
+fn render_ctx<'a>(
+    width: u16,
+    theme: &'a Theme,
+    locale: Locale,
+    images: &'a ImageCache,
+    folds: &'a std::collections::HashMap<dsh_tui::store::node::NodeKey, bool>,
+) -> dsh_tui::render::markdown::RenderContext<'a> {
+    dsh_tui::render::markdown::RenderContext {
+        width,
+        theme,
+        locale,
+        images,
+        skill_folds: folds,
+    }
+}
+
 /// Run buffered events to completion (no quit appended — tests that need a
 /// draw add keys themselves).
 async fn run_with(app: &mut App, term: &mut Terminal<TestBackend>, events: Vec<AppEvent>) {
@@ -2066,22 +2084,26 @@ fn row_cache_zero_width_and_missing_nodes_are_tolerated() {
     let changed = cache.sync(
         &store,
         &SessionId("s1".into()),
-        0,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            0,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     assert!(!changed);
     // render_dirty with no session state: skipped.
     cache.render_dirty(
         &store,
         &SessionId("s1".into()),
-        80,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            80,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     // A real session: sync renders rows; a fresh event dirties them.
     let mut store = SessionStore::new();
@@ -2092,11 +2114,13 @@ fn row_cache_zero_width_and_missing_nodes_are_tolerated() {
     assert!(cache.sync(
         &store,
         &sid,
-        80,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            80,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     ));
     store
         .ingest(frame("s1", ev(2, "user/message", user_msg("m2", "more"))))
@@ -2104,31 +2128,37 @@ fn row_cache_zero_width_and_missing_nodes_are_tolerated() {
     assert!(cache.sync(
         &store,
         &sid,
-        80,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            80,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     ));
     cache.render_dirty(
         &store,
         &sid,
-        80,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            80,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     // render_dirty against an empty store: the node lookup skips.
     let empty = SessionStore::new();
     cache.render_dirty(
         &empty,
         &sid,
-        80,
-        &Theme::default(),
-        Locale::En,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            80,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
 }
 

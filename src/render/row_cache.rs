@@ -17,12 +17,10 @@ use std::collections::HashSet;
 
 use ratatui::text::Line;
 
-use crate::i18n::Locale;
-use crate::render::image::{ImageCache, ImageRow};
-use crate::render::markdown::render_node_full;
+use crate::render::image::ImageRow;
+use crate::render::markdown::{RenderContext, render_node_full};
 use crate::store::SessionStore;
 use crate::store::node::{ChatNode, NodeKey};
-use crate::theme::Theme;
 use crate::wire::session::SessionId;
 
 /// One display-order cached row: the rendered (and wrapped) lines of one node.
@@ -80,7 +78,7 @@ impl RowCache {
     }
 
     /// Reconcile with the store's current node list for `session_id` at
-    /// `width`:
+    /// `ctx.width`:
     /// - new node → render via the markdown pipeline, insert at its display
     ///   position (nothing marked dirty — a fresh render is current);
     /// - cached node whose rendered signature changed → mark its key dirty;
@@ -90,20 +88,15 @@ impl RowCache {
     /// Returns whether anything changed (the app shell uses this to decide
     /// whether to redraw).
     ///
-    /// `images` is the decoded-image cache: an image block with cached bytes
-    /// gets filler lines + an [`ImageRow`] segment; otherwise the bare
-    /// caption placeholder (an empty cache renders exactly the placeholder
-    /// tier).
-    #[allow(clippy::too_many_arguments)] // the render-context bag
+    /// `ctx` is the render-context bag (#32): theme, locale, wrap width, the
+    /// decoded-image cache (an image block with cached bytes gets filler
+    /// lines + an [`ImageRow`] segment; otherwise the bare caption
+    /// placeholder), and the #31 skill-fold map (resolved per node).
     pub fn sync(
         &mut self,
         store: &SessionStore,
         session_id: &SessionId,
-        width: u16,
-        theme: &Theme,
-        locale: Locale,
-        images: &ImageCache,
-        skill_folds: &std::collections::HashMap<NodeKey, bool>,
+        ctx: &RenderContext<'_>,
     ) -> bool {
         let mut changed = false;
         let Some(state) = store.session(session_id) else {
@@ -115,10 +108,10 @@ impl RowCache {
             self.dirty.clear();
             return changed;
         };
-        if self.width != width {
+        if self.width != ctx.width {
             self.rows.clear();
             self.dirty.clear();
-            self.width = width;
+            self.width = ctx.width;
             changed = true;
             self.generation = self.generation.wrapping_add(1);
         }
@@ -130,7 +123,7 @@ impl RowCache {
             // #31: the skill-block fold (absent = collapsed — the ticket
             // default), part of the render signature so a toggle
             // re-renders the node.
-            let skill_fold = skill_folds.get(&node.key).copied().unwrap_or(true);
+            let skill_fold = ctx.skill_fold(&node.key);
             let signature = rendered_signature(node, collapsed, skill_fold);
             match self.take_row(&node.key) {
                 Some(mut row) => {
@@ -142,8 +135,7 @@ impl RowCache {
                     reordered.push(row);
                 }
                 None => {
-                    let rendered =
-                        render_row(node, collapsed, width, theme, locale, images, skill_fold);
+                    let rendered = render_row(node, collapsed, ctx);
                     reordered.push(CachedRow {
                         node_key: node.key.clone(),
                         anchor_seq: node.anchor_seq,
@@ -191,16 +183,11 @@ impl RowCache {
 
     /// Re-render exactly the dirty nodes (markdown re-parse per chunk, Q5)
     /// and clear the dirty set.
-    #[allow(clippy::too_many_arguments)] // the render-context bag
     pub fn render_dirty(
         &mut self,
         store: &SessionStore,
         session_id: &SessionId,
-        width: u16,
-        theme: &Theme,
-        locale: Locale,
-        images: &ImageCache,
-        skill_folds: &std::collections::HashMap<NodeKey, bool>,
+        ctx: &RenderContext<'_>,
     ) {
         let mut rendered_any = false;
         for key in self.dirty.drain() {
@@ -211,8 +198,7 @@ impl RowCache {
                 continue;
             };
             let collapsed = store.fold_state(session_id, &key).collapsed;
-            let skill_fold = skill_folds.get(&key).copied().unwrap_or(true);
-            let rendered = render_row(node, collapsed, width, theme, locale, images, skill_fold);
+            let rendered = render_row(node, collapsed, ctx);
             if let Some(row) = self.rows.iter_mut().find(|row| row.node_key == key) {
                 row.lines = rendered.lines;
                 row.images = rendered.images;
@@ -286,26 +272,18 @@ struct WrappedRender {
     skill_header: Option<usize>,
 }
 
-/// Render one node, wrap at `width`, and re-base the image segments' and
-/// code ranges' pre-wrap indices onto the wrapped line array (filler lines
-/// never split, so each marked input line maps to exactly one output start).
-/// The #11 1-blank-row spacing between messages is maintained by
+/// Render one node, wrap at `ctx.width`, and re-base the image segments'
+/// and code ranges' pre-wrap indices onto the wrapped line array (filler
+/// lines never split, so each marked input line maps to exactly one output
+/// start). The #11 1-blank-row spacing between messages is maintained by
 /// [`RowCache::ensure_inter_message_blank`], not here (a trailing blank on
 /// the LAST row would break the follow-mode bottom clamp).
-fn render_row(
-    node: &ChatNode,
-    collapsed: bool,
-    width: u16,
-    theme: &Theme,
-    locale: Locale,
-    images: &ImageCache,
-    skill_fold: bool,
-) -> WrappedRender {
-    let render = render_node_full(node, collapsed, theme, locale, images, width, skill_fold);
+fn render_row(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> WrappedRender {
+    let render = render_node_full(node, collapsed, ctx);
     let marks: Vec<usize> = render.images.iter().map(|seg| seg.line_index).collect();
     let wrapped = wrap_lines_marked(
         render.lines,
-        width,
+        ctx.width,
         &marks,
         &render.code_ranges,
         render.skill_header,
@@ -329,7 +307,7 @@ fn render_row(
         lines,
         images,
         code_ranges,
-        code_fill: theme.panel_bg,
+        code_fill: ctx.theme.panel_bg,
         skill_header,
     }
 }

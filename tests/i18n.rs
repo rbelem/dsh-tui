@@ -51,6 +51,24 @@ fn user_msg(id: &str, text: &str) -> serde_json::Value {
     json!({"id": id, "role": "user", "content": [{"type": "text", "text": text}], "source": {"kind": "user"}})
 }
 
+/// #32: the render-context bag for a test render. Folds always empty —
+/// skill-fold behavior is covered by the dedicated markdown tests.
+fn render_ctx<'a>(
+    width: u16,
+    theme: &'a Theme,
+    locale: Locale,
+    images: &'a ImageCache,
+    folds: &'a std::collections::HashMap<dsh_tui::store::node::NodeKey, bool>,
+) -> dsh_tui::render::markdown::RenderContext<'a> {
+    dsh_tui::render::markdown::RenderContext {
+        width,
+        theme,
+        locale,
+        images,
+        skill_folds: folds,
+    }
+}
+
 /// The XDG/LANG env vars are process-global: env-touching tests serialize.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -315,20 +333,24 @@ async fn zh_markers_in_chat_content() {
     cache.sync(
         &store,
         &SessionId("s1".into()),
-        120,
-        &Theme::default(),
-        Locale::Zh,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            120,
+            &Theme::default(),
+            Locale::Zh,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     cache.render_dirty(
         &store,
         &SessionId("s1".into()),
-        120,
-        &Theme::default(),
-        Locale::Zh,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            120,
+            &Theme::default(),
+            Locale::Zh,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -368,21 +390,25 @@ fn cjk_paragraph_wraps_by_width() {
     cache.sync(
         &store,
         &SessionId("s1".into()),
-        120,
-        &Theme::default(),
-        Locale::Zh,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            120,
+            &Theme::default(),
+            Locale::Zh,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     let wide = cache.lines()[0].lines.len();
     cache.sync(
         &store,
         &SessionId("s1".into()),
-        40,
-        &Theme::default(),
-        Locale::Zh,
-        &ImageCache::default(),
-        &std::collections::HashMap::new(),
+        &render_ctx(
+            40,
+            &Theme::default(),
+            Locale::Zh,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
     );
     let narrow = cache.lines()[0].lines.len();
     assert!(
