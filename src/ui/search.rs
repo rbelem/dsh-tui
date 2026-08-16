@@ -45,7 +45,8 @@ impl SidebarSearchPopup<'_> {
             .max(self.query.len());
         let width = (text + 8) as u16;
         let height = (self.results.len() as u16 + 4).min(room);
-        (width.clamp(28, available.max(28)), height)
+        // #19: never wider than the terminal (the min is a floor).
+        (width.max(28).min(available), height)
     }
 }
 

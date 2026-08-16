@@ -39,6 +39,25 @@ use crate::wire::session::{
 };
 use crate::wire::skills::SkillListValue;
 
+/// #19: truncate `text` to `max` display cells, appending a `…` ellipsis
+/// (CJK-safe: cut by cell width, never splitting a wide char).
+fn truncate_ellipsis(text: &str, max: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + w + 1 > max {
+            break;
+        }
+        out.push(ch);
+        width += w;
+    }
+    format!("{out}…")
+}
+
 impl App {
     /// The main loop. Events arrive over one channel; a 16ms interval drives
     /// coalesced draws (Q3). Returns when a quit key is handled or every
@@ -242,8 +261,15 @@ impl App {
                             self.draw_if_due(term, true)?;
                             self.drain_attachment_needs(event_tx.clone());
                         }
-                        Some(AppEvent::Resize(_width, height)) => {
-                            // Q10: width change → full re-render.
+                        Some(AppEvent::Resize(width, height)) => {
+                            // Q10: width change → full re-render. #19: an
+                            // open drawer never leaks across the tier
+                            // boundary — at ≥80 nothing paints it, so it
+                            // must not swallow keys either (close + restore
+                            // the prior focus).
+                            if width >= 80 && self.drawer_open {
+                                self.close_drawer();
+                            }
                             self.view.viewport_height = height;
                             self.row_cache.invalidate_all();
                             self.needs_draw = true;
@@ -316,6 +342,13 @@ impl App {
     where
         B: Backend,
     {
+        let size = term.size()?;
+        self.terminal_width = size.width;
+        // #19: below 32 cols the too-small screen replaces every surface
+        // (takeovers included); a resize back restores it live.
+        if size.width < crate::app::TOO_SMALL_WIDTH {
+            return self.draw_too_small(term);
+        }
         // Full-screen takeover: the chat surfaces stay live underneath
         // (frames keep folding into the store) but are not drawn.
         if !matches!(self.mode, Mode::Chat) {
@@ -412,6 +445,20 @@ impl App {
             .spacing(gap)
             .split(full);
         let (sidebar_area, right) = (panes[0], panes[1]);
+        // #19: the drawer tier (<80 cols) — no permanent sidebar; the
+        // on-demand overlay is `min(width, 30)` wide, full height, and
+        // the hit-testing rects track it (closed → zero, so mouse events
+        // fall through to the chat/composer).
+        let drawer_area = if size.width < 80 && self.drawer_open {
+            Rect {
+                x: full.x,
+                y: full.y,
+                width: size.width.min(30),
+                height: size.height,
+            }
+        } else {
+            Rect::default()
+        };
         // The queue strip docks between the chat and the composer while the
         // active session has queue items; an emptied queue closes the popup.
         let queue_empty = self.active_queue().is_empty();
@@ -429,8 +476,25 @@ impl App {
         .areas(right);
 
         // #12: the surface rects the mouse hit-testing reads (stored per
-        // draw — the first mouse event before any draw is a no-op).
-        self.sidebar_area = sidebar_area;
+        // draw — the first mouse event before any draw is a no-op). #19:
+        // in the drawer tier `sidebar_area` is the DRAWER's inner rect
+        // (inside its border) when open — the permanent column doesn't
+        // exist below 80, and a closed drawer is a zero rect so mouse
+        // events fall through to the chat/composer.
+        let permanent_sidebar = sidebar_area;
+        let drawer_inner = if drawer_area.width > 0 {
+            drawer_area.inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            })
+        } else {
+            Rect::default()
+        };
+        self.sidebar_area = if size.width < 80 {
+            drawer_inner
+        } else {
+            permanent_sidebar
+        };
         self.chat_area = chat_area;
         self.composer_area = composer_area;
 
@@ -664,19 +728,85 @@ impl App {
             );
             // #11 status line: [Fill(1) left, Length(indicator) right] —
             // a single Line can't right-align; the right cluster never
-            // wraps, the left truncates first. 1/1 horizontal inset.
+            // wraps, the left truncates first. 1/1 horizontal inset. #19:
+            // tiers — <40 indicators only; 40–79 session-id-only left
+            // (truncated with `…`); ≥80 the full left cluster.
             let status_area = status_area.inner(Margin {
                 horizontal: 1,
                 vertical: 0,
             });
-            let [status_left_area, status_right_area] =
-                Layout::horizontal([Constraint::Fill(1), Constraint::Length(status_width)])
-                    .areas(status_area);
-            frame.render_widget(Paragraph::new(Line::from(status_left)), status_left_area);
-            frame.render_widget(
-                Paragraph::new(Line::from(status_right)).right_aligned(),
-                status_right_area,
-            );
+            if size.width < 40 {
+                frame.render_widget(
+                    Paragraph::new(Line::from(status_right)).right_aligned(),
+                    status_area,
+                );
+            } else {
+                let [status_left_area, status_right_area] =
+                    Layout::horizontal([Constraint::Fill(1), Constraint::Length(status_width)])
+                        .areas(status_area);
+                let left_line = if size.width < 80 {
+                    // The session-id-only cluster: the first span (the
+                    // session line), truncated with `…` to fit the left
+                    // area — seq/mode/hint/toast are dropped below 80.
+                    let span = status_left
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| Span::raw(""));
+                    let text =
+                        truncate_ellipsis(span.content.as_ref(), status_left_area.width as usize);
+                    Line::from(Span::styled(text, span.style))
+                } else {
+                    Line::from(status_left)
+                };
+                frame.render_widget(Paragraph::new(left_line), status_left_area);
+                frame.render_widget(
+                    Paragraph::new(Line::from(status_right)).right_aligned(),
+                    status_right_area,
+                );
+            }
+
+            // #19: the drawer-tier overlay — painted AFTER the chat (it's
+            // an overlay): a bordered, panel_bg interior (the popup
+            // pattern, Clear first: with the Reset default theme the
+            // panel_bg fill is a no-op, so the Clear is what keeps the
+            // underlying chat from showing through) with the SidebarView
+            // inside. The chat layout is untouched while it's open (no
+            // layout shift).
+            if drawer_area.width > 0 {
+                frame.render_widget(ratatui::widgets::Clear, drawer_area);
+                frame.render_widget(
+                    ratatui::widgets::Block::bordered().border_style(style::border(&self.theme)),
+                    drawer_area,
+                );
+                frame.render_widget(
+                    SidebarView {
+                        sessions: &self.sessions,
+                        groups: &sidebar_groups,
+                        active: self.active_session.as_ref(),
+                        selected: self.sidebar.selected,
+                        focused: true, // the drawer owns focus while open
+                        editor: self.rename_editor.as_ref().map(|(_, editor)| editor),
+                        theme: &self.theme,
+                        locale: self.locale,
+                    },
+                    drawer_inner,
+                );
+            }
+            // #19: the drawer-tier affordance — `≡` at the chat's top-left
+            // (muted closed, accent open; itself a click target). Painted
+            // last: while the drawer is open it doubles as its corner.
+            if size.width < 80 {
+                let affordance = if self.drawer_open {
+                    Style::new()
+                        .fg(self.theme.accent)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    style::hint(&self.theme)
+                };
+                frame
+                    .buffer_mut()
+                    .set_stringn(chat_area.x, chat_area.y, "≡", 1, affordance);
+            }
 
             // The queue popup docks above the strip (view-only v1).
             if self.queue_popup_open {
@@ -834,6 +964,61 @@ impl App {
             }
         })?;
 
+        self.last_draw = Some(Instant::now());
+        self.needs_draw = false;
+        self.draws += 1;
+        Ok(())
+    }
+
+    /// #19: the full-screen "terminal too small" screen (<32 cols): the
+    /// two-tone wordmark, the title in `text`, the hint in `muted` —
+    /// centered, themed. `q` still quits; a resize back to ≥32 restores
+    /// the prior screen (the caller renders it on the next draw).
+    fn draw_too_small<B>(&mut self, term: &mut Terminal<B>) -> Result<(), B::Error>
+    where
+        B: Backend,
+    {
+        term.draw(|frame| {
+            let area = frame.area();
+            frame
+                .buffer_mut()
+                .set_style(area, Style::new().bg(self.theme.bg));
+            let title = crate::i18n::tr(self.locale, "too_small.title");
+            let hint = crate::i18n::tr(self.locale, "too_small.hint");
+            let wordmark_width = ("dsh".len() + "-tui".len()) as u16;
+            let title_width = UnicodeWidthStr::width(title) as u16;
+            let hint_width = UnicodeWidthStr::width(hint) as u16;
+            let block_width = wordmark_width.max(title_width).max(hint_width);
+            let y = area.y + area.height.saturating_sub(3) / 2;
+            let x = area.x + area.width.saturating_sub(block_width) / 2;
+            let wordmark = Line::from(vec![
+                Span::styled(
+                    "dsh",
+                    Style::new()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(self.theme.accent),
+                ),
+                Span::styled(
+                    "-tui",
+                    Style::new()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(self.theme.text),
+                ),
+            ]);
+            frame.buffer_mut().set_line(x, y, &wordmark, area.width);
+            frame.buffer_mut().set_line(
+                x + (block_width - title_width) / 2,
+                y + 1,
+                &Line::styled(title, Style::default().fg(self.theme.text)),
+                area.width,
+            );
+            frame.buffer_mut().set_line(
+                x + (block_width - hint_width) / 2,
+                y + 2,
+                &Line::styled(hint, crate::ui::style::hint(&self.theme)),
+                area.width,
+            );
+        })?;
         self.last_draw = Some(Instant::now());
         self.needs_draw = false;
         self.draws += 1;

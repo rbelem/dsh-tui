@@ -820,7 +820,10 @@ async fn no_session_attach_renders_empty_chat() {
 
     let view = format!("{}", term.backend());
     assert!(view.contains("no session"), "status line: {view}");
-    assert!(view.contains("no sessions"), "hint in status line: {view}");
+    // #19: at 60 cols the sidebar is a drawer — closed here, so only the
+    // `≡` affordance marks it (the old "no sessions" empty-state text
+    // lives inside the drawer now).
+    assert!(view.contains("≡"), "drawer affordance: {view}");
     mock.stop().await;
 }
 
@@ -833,6 +836,9 @@ async fn resize_invalidates_and_rerenders() {
     let mut app = App::default();
     app.focus = Focus::Chat; // 'q'/'x' chat keys in both phases (boot is Composer)
     app.active_session = Some(SessionId("s1".into()));
+    // #19: at 60 cols the sidebar is gone (the drawer tier), so the chat
+    // is wider than it was with the permanent 22-col pane — resize to 40
+    // to exercise a genuinely narrower content width.
     let long_text = "This is a fairly long paragraph line that will definitely wrap at narrower widths like sixty columns or so. And here is another sentence to make the paragraph long enough that the wrap counts differ clearly between widths.";
     let backend = TestBackend::new(100, 30);
     let mut term = Terminal::new(backend).unwrap();
@@ -845,7 +851,7 @@ async fn resize_invalidates_and_rerenders() {
                     "s1",
                     ev(1, "user/message", user_msg("m1", long_text)),
                 )),
-                AppEvent::Resize(60, 15),
+                AppEvent::Resize(40, 15),
                 AppEvent::Key(key(KeyCode::Char('q'))),
             ],
         )
@@ -860,7 +866,7 @@ async fn resize_invalidates_and_rerenders() {
     );
 
     // Re-wrap at the new width (backend resized between runs).
-    term.backend_mut().resize(60, 15);
+    term.backend_mut().resize(40, 15);
     app.running = true;
     let mut channel = EventChannel::new();
     let tx = channel.tx.clone();
@@ -884,7 +890,7 @@ async fn resize_invalidates_and_rerenders() {
     let narrow = app.row_cache.lines()[0].lines.len();
     assert!(
         narrow > wide,
-        "rows re-wrap at 60 columns (wide={wide}, narrow={narrow})"
+        "rows re-wrap at 40 columns (wide={wide}, narrow={narrow})"
     );
 }
 

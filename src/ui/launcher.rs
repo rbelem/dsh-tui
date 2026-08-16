@@ -200,7 +200,8 @@ impl LauncherPopup<'_> {
         let rows = 1 + self.entries.len() + groups + usize::from(self.loading);
         let width = (text + 10) as u16;
         let height = (rows as u16 + 2).min(room);
-        (width.clamp(24, available.max(24)), height)
+        // #19: never wider than the terminal (the min is a floor).
+        (width.max(24).min(available), height)
     }
 }
 

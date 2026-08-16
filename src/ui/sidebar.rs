@@ -41,12 +41,16 @@ use crate::ui::style;
 use crate::wire::session::{SessionId, SessionSummary, WorkspaceId};
 use crate::wire::workspace::WorkspaceView;
 
-/// Sidebar pane width; the pane is hidden below 60 total columns.
+/// Sidebar pane width; the pane is permanent only at the wide tier (≥80
+/// columns) — at 60–79 and below it renders as the `s`-toggled drawer
+/// overlay instead (a 12-col icon strip is illegible and eats 20% of the
+/// screen; the drawer shows full titles on demand).
 pub const SIDEBAR_WIDTH: u16 = 22;
 
-/// Sidebar width for a terminal `total` columns wide (collapse gracefully).
+/// Sidebar width for a terminal `total` columns wide (tiered, #19): the
+/// permanent 22-col pane at ≥80, nothing below (the drawer replaces it).
 pub fn sidebar_width(total: u16) -> u16 {
-    if total < 60 { 0 } else { SIDEBAR_WIDTH }
+    if total >= 80 { SIDEBAR_WIDTH } else { 0 }
 }
 
 /// One sidebar group: a header (workspace title or an i18n label) plus the
@@ -58,6 +62,9 @@ pub struct SidebarGroup {
     /// Collapsed groups render only the header; their sessions are hidden
     /// and excluded from navigation (the archived group, v1).
     pub collapsed: bool,
+    /// The archived group (the footer group): its header click toggles
+    /// `archived_expanded` (the only collapsible group in the v1 model).
+    pub is_archived: bool,
     /// Member sessions, as indices into `SidebarView::sessions`.
     pub sessions: Vec<usize>,
 }
@@ -122,6 +129,7 @@ pub fn build_groups(
         return vec![SidebarGroup {
             title: None,
             collapsed: false,
+            is_archived: false,
             sessions: (0..sessions.len()).collect(),
         }];
     }
@@ -162,6 +170,7 @@ pub fn build_groups(
         groups.push(SidebarGroup {
             title: Some(workspace.title.clone()),
             collapsed: false,
+            is_archived: false,
             sessions: members,
         });
     }
@@ -175,6 +184,7 @@ pub fn build_groups(
         groups.push(SidebarGroup {
             title: Some(tr(locale, "sidebar.ungrouped").to_string()),
             collapsed: false,
+            is_archived: false,
             sessions: ungrouped,
         });
     }
@@ -186,6 +196,7 @@ pub fn build_groups(
                 &[&archived_group_sessions.len().to_string()],
             )),
             collapsed: !archived_expanded,
+            is_archived: true,
             sessions: archived_group_sessions,
         });
     }
@@ -523,6 +534,7 @@ mod tests {
             vec![SidebarGroup {
                 title: None,
                 collapsed: false,
+                is_archived: false,
                 sessions: vec![0, 1],
             }]
         );

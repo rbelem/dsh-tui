@@ -192,9 +192,11 @@ async fn search_popup_renders_over_the_sidebar() {
 
     assert!(view.contains(" search sessions "), "popup title: {view}");
     assert!(view.contains("type to search"), "placeholder: {view}");
+    // #19: the popup never exceeds its anchor pane (the 22-col sidebar),
+    // so the hint row truncates — assert its visible prefix.
     assert!(
-        view.contains("enter opens · esc cancels"),
-        "hint row: {view}"
+        view.contains("enter opens"),
+        "hint row (truncated to the pane): {view}"
     );
 }
 

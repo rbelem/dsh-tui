@@ -173,6 +173,8 @@ pub const STRINGS: &[(&str, &str)] = &[
     ),
     ("toast.settings_failed", "设置加载失败：{0}"),
     ("toast.sidebar_action_failed", "操作失败：{0}"),
+    ("too_small.hint", "拉宽或旋转屏幕以继续"),
+    ("too_small.title", "终端太小"),
     ("viewer.action_close", " 关闭"),
     ("viewer.action_fit", " 适应/原始 · "),
     ("viewer.action_next", " 下一张 · "),

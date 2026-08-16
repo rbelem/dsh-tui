@@ -147,8 +147,19 @@ async fn grouped_sidebar_renders_headers_and_nested_sessions_120x30() {
 
 #[tokio::test]
 async fn grouped_sidebar_renders_at_60x15() {
+    // #19: at 60 cols the sidebar lives in the `s`-toggled drawer — open
+    // it and assert the grouped rows render there.
     let mut app = grouped_app();
-    let view = view_at(&mut app, 60, 15).await;
+    app.focus = Focus::Chat; // 's' is focus-gated (boot is Composer)
+    let backend = TestBackend::new(60, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut events = vec![AppEvent::Key(key(KeyCode::F(1)))]; // draw first
+    events.push(AppEvent::Key(key(KeyCode::Char('s')))); // open the drawer
+    events.push(AppEvent::Key(key(KeyCode::F(1))));
+    events.push(AppEvent::Key(ctrl(KeyCode::Char('q'))));
+    run_with(&mut app, &mut term, events).await;
+    let view = format!("{}", term.backend());
+    assert!(app.drawer_open, "s opened the drawer");
     assert!(view.contains("alpha"), "alpha header at 60x15: {view}");
     assert!(view.contains("beta"), "beta header at 60x15: {view}");
     assert!(view.contains("ungrouped"), "ungrouped at 60x15: {view}");

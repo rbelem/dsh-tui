@@ -185,6 +185,8 @@ pub const STRINGS: &[(&str, &str)] = &[
     ),
     ("toast.settings_failed", "settings failed: {0}"),
     ("toast.sidebar_action_failed", "action failed: {0}"),
+    ("too_small.hint", "widen or rotate to continue"),
+    ("too_small.title", "terminal too small"),
     ("viewer.action_close", " close"),
     ("viewer.action_fit", " fit/actual · "),
     ("viewer.action_next", " next · "),

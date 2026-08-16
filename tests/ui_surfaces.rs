@@ -130,16 +130,24 @@ async fn sidebar_with_sessions_120x30() {
 
 #[tokio::test]
 async fn sidebar_empty_60x15() {
+    // #19: at 60 cols there is no permanent sidebar — `s` opens the
+    // drawer, which shows the empty state.
     let mut app = App::default();
+    app.focus = Focus::Chat; // 's' is focus-gated (boot is Composer)
     let backend = TestBackend::new(60, 15);
     let mut term = Terminal::new(backend).unwrap();
-    draw_and_quit(&mut app, &mut term, vec![]).await;
+    let mut events = vec![AppEvent::Key(key(KeyCode::F(1)))]; // draw first
+    events.push(AppEvent::Key(key(KeyCode::Char('s')))); // open the drawer
+    events.push(AppEvent::Key(key(KeyCode::F(1))));
+    events.push(AppEvent::Key(ctrl(KeyCode::Char('q'))));
+    run_with(&mut app, &mut term, events).await;
 
+    assert!(app.drawer_open, "s opened the drawer");
     let view = format!("{}", term.backend());
     assert!(view.contains("no sessions yet"), "empty state: {view}");
-    // The hint is 20 chars; the 22-col pane's 2/2 padding leaves 18 content
-    // columns, so at the minimum sidebar width it truncates (#11).
-    assert!(view.contains("they'll appear"), "hint: {view}");
+    // The hint is 20 chars; the 30-col drawer's border + 2/2 padding
+    // leaves 26 content columns, so it fits in full here.
+    assert!(view.contains("they'll appear here"), "hint: {view}");
 }
 
 #[tokio::test]
@@ -201,8 +209,8 @@ async fn sidebar_chat_gap_column_at_80x24() {
     assert_eq!(chat.symbol(), " ", "chat starts after the gap: {chat:?}");
 }
 
-/// Acceptance 9: below 80 columns the gap drops to 0 — the chat starts
-/// immediately after the 22-col sidebar, exactly as before #11.
+/// #19: below 80 columns there is no permanent sidebar at all — the chat
+/// starts at column 0, the `≡` affordance marks the drawer tier.
 #[tokio::test]
 async fn sidebar_chat_gap_drops_below_80() {
     let mut app = App::default();
@@ -220,8 +228,16 @@ async fn sidebar_chat_gap_drops_below_80() {
     )
     .await;
     let buffer = term.backend().buffer();
-    let chat_edge = buffer.cell((22, 2)).expect("chat starts at col 22");
-    assert_eq!(chat_edge.symbol(), " ", "no gap column: {chat_edge:?}");
+    // The drawer-tier affordance at the chat's top-left (0, 0).
+    assert_eq!(
+        buffer.cell((0, 0)).expect("affordance").symbol(),
+        "≡",
+        "drawer affordance at the chat top-left"
+    );
+    // The chat content starts at col 2 (its own margin) — no sidebar
+    // column, no gap.
+    let chat = buffer.cell((2, 1)).expect("chat content cell");
+    assert_eq!(chat.symbol(), "c", "chat at col 0, no sidebar: {chat:?}");
 }
 
 /// Acceptance 4: the sidebar's selected row is identifiable by glyph +

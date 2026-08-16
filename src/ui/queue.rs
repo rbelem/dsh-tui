@@ -121,7 +121,9 @@ impl QueuePopup<'_> {
     /// Outer size (border included) for an available width and the room
     /// above the strip.
     pub fn size(&self, available: u16, room: u16) -> (u16, u16) {
-        let width = available.clamp(24, 64);
+        // #19: never wider than the terminal (the 24 floor yields to a
+        // narrower terminal instead of overflowing it).
+        let width = available.min(64);
         let height = (self.items.len() as u16 + 2)
             .min(QUEUE_POPUP_MAX_ROWS as u16 + 2)
             .min(room);

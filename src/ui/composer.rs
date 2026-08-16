@@ -357,7 +357,8 @@ impl SeedPopup<'_> {
             + usize::from(self.loading && self.entries.is_empty());
         let width = (text + 8) as u16;
         let height = (rows as u16 + 2).min(room);
-        (width.clamp(16, available.max(16)), height)
+        // #19: never wider than the terminal (the min is a floor).
+        (width.max(16).min(available), height)
     }
 }
 

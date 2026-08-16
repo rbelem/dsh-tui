@@ -398,6 +398,14 @@ pub struct App {
     /// in the status line's right cluster in `success` (no toast system —
     /// this is a status-line flash only).
     pub copied_flash: Option<(String, Instant)>,
+    /// #19: the narrow-terminal drawer (<80 cols) overlay is open. The
+    /// drawer owns focus while open (reuses [`Focus::Sidebar`]).
+    pub drawer_open: bool,
+    /// The focus before the drawer opened — Esc/close restores it.
+    pub drawer_prior_focus: Focus,
+    /// The last drawn terminal width (set per draw; the tier decisions —
+    /// too-small screen, drawer tier, status variants — read it).
+    pub terminal_width: u16,
 }
 
 impl Default for App {
@@ -457,6 +465,11 @@ impl Default for App {
             selection: None,
             select_mode: false,
             copied_flash: None,
+            drawer_open: false,
+            drawer_prior_focus: Focus::Chat,
+            // Default to the wide tier: keyless tests (no draw) keep the
+            // pre-#19 key semantics; the first draw sets the real width.
+            terminal_width: 80,
         }
     }
 }
@@ -699,6 +712,14 @@ impl App {
         if self.config.keymap.matches("quit", key) {
             return Some(Action::Quit);
         }
+        // #19: below 32 cols only `q` (and the global ctrl+q/ctrl+c above)
+        // works — the too-small screen owns the terminal.
+        if self.terminal_width < crate::app::TOO_SMALL_WIDTH {
+            if key.code == KeyCode::Char('q') && key.modifiers.is_empty() {
+                return Some(Action::Quit);
+            }
+            return Some(Action::None);
+        }
         if !matches!(self.mode, Mode::Chat) {
             return Some(self.handle_takeover_key(key));
         }
@@ -771,6 +792,20 @@ impl App {
         if self.sidebar_search.is_some() {
             return Some(self.handle_sidebar_search_key(key));
         }
+        // #19: the narrow-terminal drawer owns the keys while open — ↑/↓
+        // navigate, Enter selects (and closes), Esc/s close.
+        if self.drawer_open {
+            return Some(self.handle_drawer_key(key));
+        }
+        // #19: `s` (rebindable via `[keymap] drawer-toggle`) toggles the
+        // drawer in the drawer tier (<80 cols). Focus-gated so the
+        // composer keeps typing `s`.
+        if self.config.keymap.matches("drawer-toggle", key)
+            && self.focus != Focus::Composer
+            && self.terminal_width < 80
+        {
+            return Some(self.toggle_drawer());
+        }
         // Ctrl+W arms the vim pane prefix; the next h/j/k/l moves focus
         // (Sidebar/Chat/Composer), any other key disarms it.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('w') {
@@ -807,6 +842,68 @@ impl App {
         }
         self.focus = focus;
         Action::Focus(focus)
+    }
+
+    // -------------------------------------------------------------------
+    // #19: the narrow-terminal drawer
+    // -------------------------------------------------------------------
+
+    /// `s`: toggle the drawer overlay (only meaningful in the drawer tier,
+    /// <80 cols; the keymap check is focus-gated). Opening moves focus into
+    /// the drawer; closing restores the prior focus.
+    fn toggle_drawer(&mut self) -> Action {
+        if self.drawer_open {
+            self.close_drawer();
+        } else {
+            self.drawer_open = true;
+            self.drawer_prior_focus = self.focus;
+            self.focus = Focus::Sidebar;
+        }
+        Action::None
+    }
+
+    /// Close the drawer and restore the focus it took.
+    fn close_drawer(&mut self) {
+        if self.drawer_open {
+            self.drawer_open = false;
+            self.focus = self.drawer_prior_focus;
+        }
+    }
+
+    /// The drawer's key handling while open: ↑/↓ navigate the session
+    /// list, Enter selects (and closes), Esc/s close, everything else is
+    /// inert (the global quit/cancel keys are handled before this).
+    fn handle_drawer_key(&mut self, key: KeyEvent) -> Action {
+        use crossterm::event::KeyCode;
+        let len = crate::ui::sidebar::SidebarGroup::visible_len(&self.sidebar_groups());
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.sidebar.move_by(1, len);
+                Action::Select
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.sidebar.move_by(-1, len);
+                Action::Select
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                self.sidebar.first();
+                Action::Select
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                self.sidebar.last(len);
+                Action::Select
+            }
+            KeyCode::Enter => {
+                let action = self.switch_to_selected();
+                self.close_drawer();
+                action
+            }
+            KeyCode::Esc | KeyCode::Char('s') => {
+                self.close_drawer();
+                Action::None
+            }
+            _ => Action::None,
+        }
     }
 
     /// Ctrl+L: cycle the UI locale, persist it to the config, and force a
@@ -1658,6 +1755,11 @@ impl App {
     /// mouse and `v` are no-ops there.
     pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> Action {
         use crossterm::event::{MouseButton, MouseEventKind};
+        // #19: below 32 cols the too-small screen owns the terminal — the
+        // stale wide-draw hit-test rects must not select or scroll.
+        if self.terminal_width < crate::app::TOO_SMALL_WIDTH {
+            return Action::None;
+        }
         // Any overlay owns the surface: the theme picker, queue popup,
         // launcher, new-session/search popups, the composer's seed popup,
         // and the takeover/settings/image modes.
@@ -1705,10 +1807,31 @@ impl App {
 
     /// Left-button down: sidebar row click / group-header toggle, composer
     /// click-to-cursor, or a selection anchor on the chat (select mode).
+    /// #19: the drawer's `≡` affordance toggles it, and a click outside an
+    /// open drawer closes it.
     fn mouse_down(&mut self, column: u16, row: u16) -> Action {
+        // The `≡` affordance cell (the chat's top-left) toggles the drawer.
+        if self.terminal_width < 80
+            && self.terminal_width >= crate::app::TOO_SMALL_WIDTH
+            && column == self.chat_area.x
+            && row == self.chat_area.y
+        {
+            return self.toggle_drawer();
+        }
+        // Click-outside an open drawer closes it; the click then proceeds
+        // normally (the drawer owns nothing else while open).
+        if self.drawer_open && !Self::in_rect(self.sidebar_area, column, row) {
+            self.close_drawer();
+        }
         if Self::in_rect(self.sidebar_area, column, row) {
             self.cancel_selection();
-            return self.sidebar_click(row);
+            let action = self.sidebar_click(row);
+            // A drawer session click selects AND closes (#19); the
+            // permanent sidebar has no drawer to close.
+            if self.drawer_open {
+                self.close_drawer();
+            }
+            return action;
         }
         if Self::in_rect(self.composer_area, column, row) {
             self.cancel_selection();
@@ -1783,14 +1906,18 @@ impl App {
     /// the session list when it overflows; the status line and the hero
     /// are no-ops.
     fn mouse_wheel(&mut self, direction: i64, column: u16, row: u16) -> Action {
+        // The sidebar/drawer is checked FIRST (like the click path): the
+        // open drawer's inner rect sits inside `chat_area`, so the chat
+        // branch must never win over it — wheel over the open drawer
+        // scrolls the drawer's list, not the chat underneath.
+        if Self::in_rect(self.sidebar_area, column, row) {
+            self.sidebar_wheel(direction);
+            return Action::None;
+        }
         if Self::in_rect(self.chat_area, column, row) {
             // `scroll` clamps at the top/bottom bounds and disables follow.
             self.scroll(direction * 3);
             return Action::Scroll(direction * 3);
-        }
-        if Self::in_rect(self.sidebar_area, column, row) {
-            self.sidebar_wheel(direction);
-            return Action::None;
         }
         Action::None
     }
@@ -1841,11 +1968,10 @@ impl App {
         };
         match display {
             crate::ui::sidebar::DisplayRow::Header(group_index) => {
-                // Only the archived group is collapsible in the v1 model;
-                // build_groups always appends it last, so a click on the
-                // last header toggles its expansion (a no-op when no
-                // archived sessions exist — nothing to toggle).
-                if *group_index + 1 == groups.len() {
+                // Only the archived group is collapsible in the v1 model —
+                // its header click toggles the expansion (workspace and
+                // ungrouped headers are inert).
+                if groups[*group_index].is_archived {
                     self.archived_expanded = !self.archived_expanded;
                     self.sidebar
                         .clamp(crate::ui::sidebar::SidebarGroup::visible_len(&groups));
@@ -1935,6 +2061,11 @@ impl App {
     /// Paste: insert into the composer only while it is focused (and no
     /// popup owns the keyboard); everywhere else the payload is dropped.
     pub fn handle_paste(&mut self, text: String) -> Action {
+        // #19: below 32 cols the invisible composer must not receive
+        // paste either.
+        if self.terminal_width < crate::app::TOO_SMALL_WIDTH {
+            return Action::None;
+        }
         if self.focus != Focus::Composer
             || self.theme_picker.open
             || self.queue_popup_open
@@ -2578,6 +2709,10 @@ pub(crate) const TOAST_TTL: Duration = Duration::from_secs(3);
 
 /// The `copied · N chars` status flash lifetime (#12).
 pub(crate) const COPY_FLASH_TTL: Duration = Duration::from_secs(2);
+
+/// #19: below this width the full-screen "terminal too small" screen takes
+/// over (only `q` quits; a resize back restores the prior screen live).
+pub(crate) const TOO_SMALL_WIDTH: u16 = 32;
 
 /// Toast text for a remotely resolved approval (no exclusivity, Q10).
 fn remote_approval_text(outcome: ApprovalOutcome, locale: crate::i18n::Locale) -> String {

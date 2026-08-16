@@ -303,6 +303,9 @@ pub const DEFAULT_KEYBINDINGS: &[(&str, &str)] = &[
     // fallback when `image-viewer` is rebound, but `v` is selection's).
     ("selection-toggle", "v"),
     ("image-viewer", "i"),
+    // #19: the narrow-terminal drawer (`s` toggles it at <80 cols; never
+    // intercepts composer typing — the keymap check is focus-gated).
+    ("drawer-toggle", "s"),
     // composer
     ("composer.submit", "enter"),
     ("composer.newline", "shift+enter"),
@@ -513,7 +516,10 @@ impl ThemePopup<'_> {
             .unwrap_or(0);
         let width = (text + 8) as u16;
         let height = (self.themes.len() as u16).min(10) + 2;
-        (width.clamp(16, available.max(16)), height)
+        // #19: the popup never exceeds the terminal width — the min is a
+        // floor, not a mandate (`available.max(16)` used to inflate the
+        // popup past the terminal below its min-width).
+        (width.max(16).min(available), height)
     }
 }
 

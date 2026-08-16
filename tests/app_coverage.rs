@@ -1748,8 +1748,8 @@ async fn remote_resolutions_with_pending_entries_toast_and_promote() {
 
 #[tokio::test]
 async fn tiny_terminal_renders_every_surface() {
-    // 20×5: the sidebar collapses (below 60 cols), the composer clamps, the
-    // status line stays — every surface must survive the tiny area.
+    // 20×5 (<32): the #19 too-small screen takes over — every other
+    // surface is gated and nothing panics.
     let mut app = app_with_session();
     app.sessions = vec![summary("s1"), summary("s2")];
     let backend = TestBackend::new(20, 5);
@@ -1765,12 +1765,12 @@ async fn tiny_terminal_renders_every_surface() {
     )
     .await;
     let view = format!("{}", term.backend());
-    assert!(
-        view.contains("s1") || view.contains("s2"),
-        "sidebar rows: {view}"
-    );
+    assert!(view.contains("terminal too"), "too-small screen: {view}");
+    assert!(view.contains("widen or rotate"), "too-small hint: {view}");
+    assert!(!view.contains("s1"), "no chat surfaces below 32 cols");
 
-    // The queue popup + new-session picker at 20×5.
+    // The queue popup + new-session picker are gated below 32 cols — the
+    // keys are no-ops and the too-small screen stays.
     let mut app = app_with_session();
     app.store
         .ingest(MuxFrame::SessionQueue {
@@ -1795,12 +1795,15 @@ async fn tiny_terminal_renders_every_surface() {
         &mut app,
         &mut term,
         vec![
+            AppEvent::Key(key(KeyCode::F(1))), // draw: the too-small tier latches
             AppEvent::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT)),
             AppEvent::Key(key(KeyCode::Char('n'))),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
     .await;
+    assert!(!app.queue_popup_open, "popups are gated below 32 cols");
+    assert!(app.new_session.is_none(), "new-session gated below 32 cols");
 }
 
 // ---------------------------------------------------------------------------

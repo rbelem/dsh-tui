@@ -51,7 +51,8 @@ impl NewSessionPopup<'_> {
             .max(tr(self.locale, "create.hint").len());
         let width = (text + 8) as u16;
         let height = (self.entries.len() as u16 + 3).min(room);
-        (width.clamp(28, available.max(28)), height)
+        // #19: never wider than the terminal (the min is a floor).
+        (width.max(28).min(available), height)
     }
 }
 
