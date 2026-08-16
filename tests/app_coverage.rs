@@ -2070,6 +2070,7 @@ fn row_cache_zero_width_and_missing_nodes_are_tolerated() {
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     assert!(!changed);
     // render_dirty with no session state: skipped.
@@ -2080,6 +2081,7 @@ fn row_cache_zero_width_and_missing_nodes_are_tolerated() {
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     // A real session: sync renders rows; a fresh event dirties them.
     let mut store = SessionStore::new();
@@ -2093,7 +2095,8 @@ fn row_cache_zero_width_and_missing_nodes_are_tolerated() {
         80,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
     store
         .ingest(frame("s1", ev(2, "user/message", user_msg("m2", "more"))))
@@ -2104,7 +2107,8 @@ fn row_cache_zero_width_and_missing_nodes_are_tolerated() {
         80,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
     cache.render_dirty(
         &store,
@@ -2113,6 +2117,7 @@ fn row_cache_zero_width_and_missing_nodes_are_tolerated() {
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     // render_dirty against an empty store: the node lookup skips.
     let empty = SessionStore::new();
@@ -2123,6 +2128,7 @@ fn row_cache_zero_width_and_missing_nodes_are_tolerated() {
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
 }
 

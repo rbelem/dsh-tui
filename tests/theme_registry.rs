@@ -75,6 +75,7 @@ fn render_with_theme(theme: &Theme, width: u16, height: u16) -> String {
         theme,
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     cache.render_dirty(
         &store,
@@ -83,6 +84,7 @@ fn render_with_theme(theme: &Theme, width: u16, height: u16) -> String {
         theme,
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
@@ -350,6 +352,7 @@ fn theme_colors_reach_rendered_cells() {
         &mocha,
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     cache.render_dirty(
         &store,
@@ -358,6 +361,7 @@ fn theme_colors_reach_rendered_cells() {
         &mocha,
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();

@@ -33,7 +33,7 @@ use ratatui::layout::Rect;
 
 use crate::client::{ClientError, WireClient};
 use crate::render::row_cache::RowCache;
-use crate::store::node::NodeData;
+use crate::store::node::{NodeData, NodeKey};
 use crate::store::{SessionStore, StoreError};
 use crate::theme::{Config, terminal_supports_color};
 use crate::ui::composer::Composer;
@@ -427,6 +427,10 @@ pub struct App {
     /// while true, the drag's moving edge snaps to word boundaries (the
     /// anchor edge stays word-fixed).
     pub word_select: bool,
+    /// #31: per-message skill-list block fold state — `true` folded
+    /// (absent = folded, the default; the row cache's render signature
+    /// includes it, so a toggle re-renders that message's rows).
+    pub skill_folds: HashMap<NodeKey, bool>,
 }
 
 impl Default for App {
@@ -497,6 +501,7 @@ impl Default for App {
             selection_widths_cache: None,
             last_click: None,
             word_select: false,
+            skill_folds: HashMap::new(),
         }
     }
 }
@@ -1815,6 +1820,30 @@ impl App {
         self.hint = None;
     }
 
+    /// #31: flip a message's skill-block fold (absent = folded; the next
+    /// sync re-renders the node — the fold rides the render signature).
+    pub fn toggle_skill_fold(&mut self, node_key: &str) {
+        let folded = self.skill_folds.get(node_key).copied().unwrap_or(true);
+        self.skill_folds.insert(node_key.to_string(), !folded);
+    }
+
+    /// #31: the node key whose skill header row occupies the absolute
+    /// (cache-line) index, if any — the click-toggle hit target.
+    fn skill_header_at(&self, abs_line: usize) -> Option<&str> {
+        let mut cursor = 0usize;
+        for row in self.row_cache.lines() {
+            let len = row.lines.len();
+            if abs_line >= cursor && abs_line < cursor + len {
+                return match row.skill_header {
+                    Some(relative) if relative == abs_line - cursor => Some(&row.node_key),
+                    _ => None,
+                };
+            }
+            cursor += len;
+        }
+        None
+    }
+
     /// A mouse event (capture enabled at terminal setup). Popup-open and
     /// non-chat modes route everything to the popup: chat/sidebar/composer
     /// mouse and `v` are no-ops there.
@@ -1913,6 +1942,19 @@ impl App {
         // click is a no-op (no click-to-position in v1).
         if Self::in_rect(self.chat_area, column, row) {
             let content = self.chat_content_rect();
+            // #31: a click on a skill-list header row toggles that
+            // message's fold — an action click, so it never starts a
+            // selection (any active selection is dropped, like sidebar
+            // clicks).
+            let abs_line = self.view.offset
+                + row
+                    .saturating_sub(content.y)
+                    .min(content.height.saturating_sub(1)) as usize;
+            if let Some(node_key) = self.skill_header_at(abs_line).map(str::to_string) {
+                self.toggle_skill_fold(&node_key);
+                self.cancel_selection();
+                return Action::None;
+            }
             // #23: a second click within the double-click window on the
             // same row (a couple of cells of jitter allowed) selects the
             // word under the cursor — selection intent is implicit, so it

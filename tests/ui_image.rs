@@ -161,6 +161,7 @@ fn inline_placeholder_unchanged_without_bytes() {
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     let row = &cache.lines()[0];
     assert_eq!(row.lines.len(), 1, "caption only, no filler lines");
@@ -206,6 +207,7 @@ fn inline_image_expands_and_draws_with_cached_bytes() {
         &Theme::default(),
         Locale::En,
         &images,
+        &std::collections::HashMap::new(),
     );
     let row = &cache.lines()[0];
     assert_eq!(row.images.len(), 1, "one inline segment");

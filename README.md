@@ -132,6 +132,8 @@ tick, status indicators). In the chat, `v` arms selection mode:
   after extends the selection from the word.
 - wheel while selecting scrolls the viewport — the selection stays
   anchored to the text underneath.
+- clicking a `▸ N skills` header row expands or collapses the folded
+  skill list in that message (a header click never starts a selection).
 
 The chat's margins (the 2/2 padding) anchor at the clamped edge, so a
 drag always has a starting point. Below 80 columns, `s` opens the session

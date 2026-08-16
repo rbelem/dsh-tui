@@ -124,6 +124,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("sidebar.rename_hint", "重命名会话…"),
     ("sidebar.running", " · 运行中"),
     ("sidebar.ungrouped", "未分组"),
+    ("skill.count", "{0} 技能"),
     ("status.copied", "已复制 · {0} 个字符"),
     ("status.drawer_hint", "s 会话 · esc 关闭"),
     ("status.error", "错误：{0}"),

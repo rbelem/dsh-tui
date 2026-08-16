@@ -319,6 +319,7 @@ async fn zh_markers_in_chat_content() {
         &Theme::default(),
         Locale::Zh,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     cache.render_dirty(
         &store,
@@ -327,6 +328,7 @@ async fn zh_markers_in_chat_content() {
         &Theme::default(),
         Locale::Zh,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     let backend = TestBackend::new(120, 30);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -370,6 +372,7 @@ fn cjk_paragraph_wraps_by_width() {
         &Theme::default(),
         Locale::Zh,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     let wide = cache.lines()[0].lines.len();
     cache.sync(
@@ -379,6 +382,7 @@ fn cjk_paragraph_wraps_by_width() {
         &Theme::default(),
         Locale::Zh,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     let narrow = cache.lines()[0].lines.len();
     assert!(

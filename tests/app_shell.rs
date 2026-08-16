@@ -1337,3 +1337,94 @@ async fn answer_failure_keeps_takeover_and_retry_succeeds() {
     );
     mock.stop().await;
 }
+
+// ---------------------------------------------------------------------------
+// #31: follow-mode stays clamped across a skill-block fold toggle
+// ---------------------------------------------------------------------------
+
+/// #31: the last message carries a skill block (folded: 1 row; expanded:
+/// header + item rows). Follow-mode must re-clamp to the new content
+/// bottom after the toggle in both directions — the offset always equals
+/// total − content height.
+#[tokio::test]
+async fn follow_stays_clamped_across_a_skill_fold_toggle() {
+    let mut app = App::default();
+    app.focus = Focus::Chat;
+    app.active_session = Some(SessionId("s1".into()));
+    let backend = TestBackend::new(100, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, term, app)
+    });
+    for seq in 1..=30 {
+        tx.send(AppEvent::Frame(frame(
+            "s1",
+            ev(seq, "user/message", user_msg(&format!("m{seq}"), "hi")),
+        )))
+        .expect("frame");
+    }
+    tx.send(AppEvent::Frame(frame(
+        "s1",
+        ev(
+            31,
+            "user/message",
+            user_msg(
+                "m31",
+                "## Skills\n- bash — run shell\n- git — version control",
+            ),
+        ),
+    )))
+    .expect("frame");
+    // The inert key forces the clamp draw deterministically.
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, mut term, mut app) = run_task.await.expect("run task");
+    result.expect("run");
+
+    let total: usize = app
+        .row_cache
+        .lines()
+        .iter()
+        .map(|row| row.lines.len())
+        .sum();
+    // Chat pane at 100x30: 30 − composer 2 − status 1 − top blank 1 = 26.
+    assert_eq!(
+        app.view.offset,
+        total.saturating_sub(26),
+        "clamped with the folded skill row (total={total})"
+    );
+    // Folded: 30 messages × 2 lines + the skill header (1 row) = 61.
+    assert_eq!(total, 61, "the folded skill block is one row");
+
+    // Expand via the fold toggle: the message gains the item rows.
+    app.toggle_skill_fold("m31");
+    term.backend_mut().resize(100, 30);
+    app.running = true;
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, term, app)
+    });
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, _term, app) = run_task.await.expect("run task");
+    result.expect("run");
+
+    let total: usize = app
+        .row_cache
+        .lines()
+        .iter()
+        .map(|row| row.lines.len())
+        .sum();
+    assert_eq!(total, 63, "expanded: header + 2 item rows");
+    assert_eq!(
+        app.view.offset,
+        total.saturating_sub(26),
+        "still clamped after the expand (total={total})"
+    );
+    assert!(app.view.follow, "follow persists across the toggle");
+}

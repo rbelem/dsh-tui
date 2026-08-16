@@ -41,6 +41,10 @@ pub struct NodeRender {
     /// the row cache paints them with the theme's `panel_bg` fill at full
     /// content width.
     pub code_ranges: Vec<(usize, usize)>,
+    /// #31: the line index (into `lines`, pre-wrap) of a detected
+    /// skill-list block's header row — the click-toggle hit target. `None`
+    /// when the message has no skill block.
+    pub skill_header: Option<usize>,
 }
 
 /// Render one chat node to (unwrapped) display lines. `collapsed` is the
@@ -57,7 +61,16 @@ pub fn render_node(
     theme: &Theme,
     locale: Locale,
 ) -> Vec<Line<'static>> {
-    render_node_full(node, collapsed, theme, locale, &ImageCache::default(), 0).lines
+    render_node_full(
+        node,
+        collapsed,
+        theme,
+        locale,
+        &ImageCache::default(),
+        0,
+        false,
+    )
+    .lines
 }
 
 /// The inline-image context threaded through the node renderers: the byte
@@ -79,6 +92,7 @@ pub fn render_node_full(
     locale: Locale,
     images: &ImageCache,
     width: u16,
+    skill_fold: bool,
 ) -> NodeRender {
     let notice = |text: String| Line::styled(text, Style::default().fg(theme.muted));
     let plan = InlinePlan {
@@ -87,11 +101,13 @@ pub fn render_node_full(
     };
     let mut image_rows = Vec::new();
     let mut code_ranges = Vec::new();
+    let mut skill_header = None;
     let lines = match &node.data {
         NodeData::User { content, .. } => {
-            let (lines, ranges) =
-                render_content_blocks(content, theme, locale, &plan, &mut image_rows);
+            let (lines, ranges, skill) =
+                render_content_blocks(content, theme, locale, &plan, &mut image_rows, skill_fold);
             code_ranges = ranges;
+            skill_header = skill;
             lines
         }
         NodeData::Assistant {
@@ -101,12 +117,18 @@ pub fn render_node_full(
         } => {
             let mut lines = Vec::new();
             for block in blocks {
-                let (block_lines, block_ranges) = render_assistant_block(block, theme, locale);
+                let (block_lines, block_ranges, block_skill) =
+                    render_assistant_block(block, theme, locale, skill_fold);
                 code_ranges.extend(
                     block_ranges
                         .into_iter()
                         .map(|(start, end)| (start + lines.len(), end + lines.len())),
                 );
+                // #31: the first skill block in the message wins the fold
+                // header (later ones render as plain headings).
+                if skill_header.is_none() {
+                    skill_header = block_skill.map(|line| line + lines.len());
+                }
                 lines.extend(block_lines);
             }
             if *interrupted {
@@ -118,7 +140,7 @@ pub fn render_node_full(
             lines
         }
         NodeData::Tool { call, result, .. } => {
-            let (lines, ranges) = render_tool_node(
+            let (lines, ranges, skill) = render_tool_node(
                 call.as_ref(),
                 result.as_deref(),
                 collapsed,
@@ -126,8 +148,10 @@ pub fn render_node_full(
                 locale,
                 &plan,
                 &mut image_rows,
+                skill_fold,
             );
             code_ranges = ranges;
+            skill_header = skill;
             lines
         }
         NodeData::Compaction {
@@ -160,18 +184,30 @@ pub fn render_node_full(
         lines,
         images: image_rows,
         code_ranges,
+        skill_header,
     }
 }
 
 /// Render the markdown `text` with `base_style` into display lines. `theme`
-/// supplies the token colors (text/muted/code/accent). Returns the lines
-/// plus the half-open line ranges (into the returned vec) that are fenced
-/// code — the `panel_bg` fill targets.
+/// supplies the token colors (text/muted/code/accent). Returns the lines,
+/// the half-open line ranges (into the returned vec) that are fenced code
+/// (the `panel_bg` fill targets), and — #31 — the line index of a detected
+/// skill-list block's header row (`None` when the message has none).
+///
+/// A `##`/`###` heading whose text is exactly `skills` / `available
+/// skills` (case-insensitive, optional trailing count like `(12)`)
+/// followed by an unordered bullet list opens a skill block: folded
+/// (`skill_fold`), it contributes exactly one `▸ N skills` header row;
+/// expanded, the header (`▾`) plus one row per item (name bold, a
+/// muted ` — description` suffix). Non-matching messages render exactly as
+/// before (byte-identical).
 pub fn render_markdown(
     text: &str,
     base_style: Style,
     theme: &Theme,
-) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    locale: Locale,
+    skill_fold: bool,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Option<usize>) {
     let mut options = pulldown_cmark::Options::empty();
     // ENABLE_HEADINGS / ENABLE_BOLD_ITALIC were removed in pulldown-cmark
     // 0.12+ (headings and bold/italic are always enabled); tables and
@@ -179,12 +215,37 @@ pub fn render_markdown(
     options.insert(pulldown_cmark::Options::ENABLE_TABLES);
     options.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
     let parser = pulldown_cmark::Parser::new_ext(text, options);
-    let mut sink = Sink::new(base_style, theme);
-    for event in parser {
+    let events: Vec<pulldown_cmark::Event<'_>> = parser.collect();
+    // #31: the pre-pass finds the skill block's event range + items (both
+    // passes parse the same text with the same options, so the event
+    // indices line up exactly).
+    let skill_block = detect_skill_block(&events);
+    let mut sink = Sink::new(base_style, theme, locale, skill_fold);
+    let mut skip_range = None;
+    if let Some((start, end, _)) = &skill_block {
+        skip_range = Some((*start, *end));
+    }
+    for (index, event) in events.into_iter().enumerate() {
+        if let Some((start, end)) = skip_range {
+            // #31: the header renders AT the block boundary — content
+            // preceding the heading (an intro paragraph) has already been
+            // flushed, so a mid-message block's header lands after it.
+            if index == start {
+                if let Some((_, _, items)) = &skill_block {
+                    sink.begin_skill_block(items);
+                }
+                continue;
+            }
+            // Everything after the heading through the list's end is the
+            // block (indices before `start` render normally).
+            if index > start && index <= end {
+                continue;
+            }
+        }
         sink.push_event(event);
     }
     sink.finish();
-    (sink.lines, sink.code_ranges)
+    (sink.lines, sink.code_ranges, sink.skill_header)
 }
 
 // ---------------------------------------------------------------------------
@@ -198,43 +259,60 @@ fn render_assistant_block(
     block: &AssistantBlock,
     theme: &Theme,
     locale: Locale,
-) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    skill_fold: bool,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Option<usize>) {
     match block {
-        AssistantBlock::Text { text } => {
-            render_markdown(text, Style::default().fg(theme.text), theme)
-        }
+        AssistantBlock::Text { text } => render_markdown(
+            text,
+            Style::default().fg(theme.text),
+            theme,
+            locale,
+            skill_fold,
+        ),
         AssistantBlock::Reasoning { text } => render_markdown(
             text,
             Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
             theme,
+            locale,
+            skill_fold,
         ),
         AssistantBlock::ToolCall { name, args_raw, .. } => (
             vec![tool_call_line(name, args_raw, theme, locale)],
             Vec::new(),
+            None,
         ),
     }
 }
 
 /// Render content blocks into lines; the returned code ranges index into
-/// the returned vec.
+/// the returned vec, and the skill-header line index (of the FIRST skill
+/// block, if any) is relative to the returned lines.
 fn render_content_blocks(
     content: &[ContentBlock],
     theme: &Theme,
     locale: Locale,
     plan: &InlinePlan<'_>,
     image_rows: &mut Vec<ImageRow>,
-) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    skill_fold: bool,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Option<usize>) {
     let mut lines = Vec::new();
     let mut code_ranges = Vec::new();
+    let mut skill_header = None;
     for block in content {
-        let (block_lines, block_ranges) = match block {
-            ContentBlock::Text { text } => {
-                render_markdown(text, Style::default().fg(theme.text), theme)
-            }
+        let (block_lines, block_ranges, block_skill) = match block {
+            ContentBlock::Text { text } => render_markdown(
+                text,
+                Style::default().fg(theme.text),
+                theme,
+                locale,
+                skill_fold,
+            ),
             ContentBlock::Reasoning { text } => render_markdown(
                 text,
                 Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
                 theme,
+                locale,
+                skill_fold,
             ),
             ContentBlock::Image { attachment } => {
                 let name = attachment
@@ -260,7 +338,7 @@ fn render_content_blocks(
                     });
                     caption_lines.extend((0..rows).map(|_| Line::raw("")));
                 }
-                (caption_lines, Vec::new())
+                (caption_lines, Vec::new(), None)
             }
             ContentBlock::ToolCall { name, .. } => (
                 vec![Line::styled(
@@ -268,6 +346,7 @@ fn render_content_blocks(
                     Style::default().fg(theme.text),
                 )],
                 Vec::new(),
+                None,
             ),
             ContentBlock::ToolResult { is_error, .. } => {
                 let suffix = if *is_error == Some(true) {
@@ -281,6 +360,7 @@ fn render_content_blocks(
                         Style::default().fg(theme.muted),
                     )],
                     Vec::new(),
+                    None,
                 )
             }
             ContentBlock::Raw(value) => {
@@ -291,6 +371,7 @@ fn render_content_blocks(
                         Style::default().fg(theme.muted),
                     )],
                     Vec::new(),
+                    None,
                 )
             }
         };
@@ -299,11 +380,16 @@ fn render_content_blocks(
                 .into_iter()
                 .map(|(start, end)| (start + lines.len(), end + lines.len())),
         );
+        // #31: the first skill block in the message wins the fold header.
+        if skill_header.is_none() {
+            skill_header = block_skill.map(|line| line + lines.len());
+        }
         lines.extend(block_lines);
     }
-    (lines, code_ranges)
+    (lines, code_ranges, skill_header)
 }
 
+#[allow(clippy::too_many_arguments)] // the node-render context bag
 fn render_tool_node(
     call: Option<&crate::store::node::RunningToolCall>,
     result: Option<&crate::store::node::ToolResultNode>,
@@ -312,7 +398,8 @@ fn render_tool_node(
     locale: Locale,
     plan: &InlinePlan<'_>,
     image_rows: &mut Vec<ImageRow>,
-) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
+    skill_fold: bool,
+) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Option<usize>) {
     let name = call
         .map(|c| c.name.as_str())
         .or_else(|| result.and_then(|r| r.call.as_ref().map(|c| c.name.as_str())))
@@ -338,19 +425,22 @@ fn render_tool_node(
                 style,
             )],
             Vec::new(),
+            None,
         );
     }
 
     let mut lines = vec![tool_call_line(name, args_raw, theme, locale)];
     let mut code_ranges = Vec::new();
+    let mut skill_header = None;
     if let Some(result) = result {
-        let (result_lines, result_ranges) =
-            render_content_blocks(&result.content, theme, locale, plan, image_rows);
+        let (result_lines, result_ranges, result_skill) =
+            render_content_blocks(&result.content, theme, locale, plan, image_rows, skill_fold);
         code_ranges.extend(
             result_ranges
                 .into_iter()
                 .map(|(start, end)| (start + lines.len(), end + lines.len())),
         );
+        skill_header = result_skill.map(|line| line + lines.len());
         lines.extend(result_lines);
         if result.is_error {
             let code = result
@@ -364,7 +454,7 @@ fn render_tool_node(
             ));
         }
     }
-    (lines, code_ranges)
+    (lines, code_ranges, skill_header)
 }
 
 fn tool_call_line(name: &str, args_raw: &str, theme: &Theme, locale: Locale) -> Line<'static> {
@@ -424,10 +514,199 @@ struct TableState {
     current_row: Vec<Vec<Span<'static>>>,
 }
 
+// ---------------------------------------------------------------------------
+// skill-list blocks (#31)
+// ---------------------------------------------------------------------------
+
+/// One parsed skill-list item: the leading name token + the description
+/// (nested bullets append to it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillItem {
+    pub name: String,
+    pub description: String,
+}
+
+/// Detect a skill-list block in the parsed events: a `##`/`###` heading
+/// whose text is exactly `skills` / `available skills` (case-insensitive,
+/// optional trailing count like `(12)`) immediately followed by an
+/// unordered bullet list. Returns the heading's event index, the list's
+/// end event index, and the parsed items. Nested (indented) bullets are
+/// description continuations of the preceding item. The event stream is
+/// identical to the render pass's, so the indices line up.
+fn detect_skill_block(
+    events: &[pulldown_cmark::Event<'_>],
+) -> Option<(usize, usize, Vec<SkillItem>)> {
+    let mut index = 0;
+    while index < events.len() {
+        if let pulldown_cmark::Event::Start(pulldown_cmark::Tag::Heading {
+            level: pulldown_cmark::HeadingLevel::H2 | pulldown_cmark::HeadingLevel::H3,
+            ..
+        }) = &events[index]
+        {
+            // Collect the heading text (until End(Heading)).
+            let mut heading = String::new();
+            let mut j = index + 1;
+            while j < events.len() {
+                match &events[j] {
+                    pulldown_cmark::Event::Text(text) => heading.push_str(text),
+                    pulldown_cmark::Event::SoftBreak => heading.push(' '),
+                    pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Heading(_)) => break,
+                    _ => {
+                        heading.clear();
+                        break;
+                    }
+                }
+                j += 1;
+            }
+            if !is_skills_heading(&heading) {
+                index += 1;
+                continue;
+            }
+            // The list must follow immediately (unordered only).
+            if let Some(pulldown_cmark::Event::Start(pulldown_cmark::Tag::List(None))) =
+                events.get(j + 1)
+            {
+                // Walk the list: depth counts nested lists; a top-level
+                // item's text is its name+description, a nested item's
+                // text appends to the previous top-level item.
+                let mut items: Vec<SkillItem> = Vec::new();
+                let mut depth = 0usize;
+                let mut top_text = String::new();
+                let mut sub_text = String::new();
+                let mut in_sub = false;
+                let mut k = j + 1;
+                while k < events.len() {
+                    match &events[k] {
+                        pulldown_cmark::Event::Start(pulldown_cmark::Tag::List(_)) => {
+                            depth += 1;
+                            in_sub = depth >= 2;
+                        }
+                        pulldown_cmark::Event::End(pulldown_cmark::TagEnd::List(_)) => {
+                            depth -= 1;
+                            in_sub = depth >= 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        pulldown_cmark::Event::Text(text) => {
+                            if in_sub {
+                                sub_text.push_str(text);
+                            } else {
+                                top_text.push_str(text);
+                            }
+                        }
+                        pulldown_cmark::Event::Code(text) => {
+                            if in_sub {
+                                sub_text.push_str(text);
+                            } else {
+                                top_text.push_str(text);
+                            }
+                        }
+                        pulldown_cmark::Event::SoftBreak => {
+                            if in_sub {
+                                sub_text.push(' ');
+                            } else {
+                                top_text.push(' ');
+                            }
+                        }
+                        pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Item) => {
+                            if in_sub {
+                                // Nested continuation: the parent item's
+                                // own text arrives first (markdown order),
+                                // so flush it, then append the
+                                // continuation to it.
+                                if !top_text.trim().is_empty() {
+                                    if let Some((name, description)) =
+                                        parse_skill_item(top_text.trim())
+                                    {
+                                        items.push(SkillItem { name, description });
+                                    }
+                                    top_text.clear();
+                                }
+                                let text = sub_text.trim().to_string();
+                                sub_text.clear();
+                                if !text.is_empty()
+                                    && let Some(last) = items.last_mut()
+                                {
+                                    if last.description.is_empty() {
+                                        last.description = text;
+                                    } else {
+                                        last.description.push(' ');
+                                        last.description.push_str(&text);
+                                    }
+                                }
+                            } else {
+                                let text = top_text.trim().to_string();
+                                top_text.clear();
+                                if let Some((name, description)) = parse_skill_item(&text) {
+                                    items.push(SkillItem { name, description });
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    k += 1;
+                }
+                if !items.is_empty() {
+                    return Some((index, k, items));
+                }
+            }
+            index = j + 1;
+        } else {
+            index += 1;
+        }
+    }
+    None
+}
+
+/// The heading matches the skill-list pattern: trimmed, lower-cased, an
+/// optional trailing `(count)` stripped, exactly `skills` or
+/// `available skills`.
+fn is_skills_heading(text: &str) -> bool {
+    let mut heading = text.trim().to_lowercase();
+    if let Some(open) = heading.rfind('(')
+        && heading.ends_with(')')
+        && heading[open + 1..heading.len() - 1]
+            .chars()
+            .all(|c| c.is_ascii_digit())
+    {
+        heading.truncate(open);
+    }
+    let heading = heading.trim();
+    heading == "skills" || heading == "available skills"
+}
+
+/// Split one item into (name, description): the first ` — ` / ` - ` /
+/// `：` / `: ` separator splits; no separator → the whole item is the
+/// name. Empty items (blank bullets) are dropped.
+fn parse_skill_item(text: &str) -> Option<(String, String)> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    for separator in [" — ", " - ", "：", ": "] {
+        if let Some(position) = text.find(separator) {
+            let name = text[..position].trim();
+            if name.is_empty() {
+                return None;
+            }
+            let description = text[position + separator.len()..].trim().to_string();
+            return Some((name.to_string(), description));
+        }
+    }
+    Some((text.to_string(), String::new()))
+}
+
 /// Streaming event sink: pulldown-cmark events → styled lines.
 struct Sink {
     base: Style,
     theme: Theme,
+    locale: Locale,
+    /// #31: the fold flag for a detected skill block (true = folded).
+    skill_fold: bool,
+    /// #31: the output line index of the skill block's header row, set by
+    /// [`Sink::begin_skill_block`].
+    skill_header: Option<usize>,
     lines: Vec<Line<'static>>,
     /// Half-open line ranges (into `lines`) that are fenced code — the
     /// `panel_bg` fill targets.
@@ -447,10 +726,13 @@ struct Sink {
 }
 
 impl Sink {
-    fn new(base: Style, theme: &Theme) -> Self {
+    fn new(base: Style, theme: &Theme, locale: Locale, skill_fold: bool) -> Self {
         Sink {
             base,
             theme: theme.clone(),
+            locale,
+            skill_fold,
+            skill_header: None,
             lines: Vec::new(),
             code_ranges: Vec::new(),
             link: false,
@@ -461,6 +743,44 @@ impl Sink {
             in_code: None,
             in_cell: false,
             table: None,
+        }
+    }
+
+    /// #31: render the skill block's header row (and, expanded, the item
+    /// rows) in place of the heading + list the events would have
+    /// produced. The header carries the same heading-like spacing (one
+    /// blank row before, guarded against the top of the message).
+    fn begin_skill_block(&mut self, items: &[SkillItem]) {
+        self.blank_row();
+        self.skill_header = Some(self.lines.len());
+        let glyph = if self.skill_fold { "▸" } else { "▾" };
+        let mut spans = vec![Span::styled(
+            format!("{glyph} "),
+            Style::new()
+                .add_modifier(Modifier::BOLD)
+                .fg(self.theme.accent),
+        )];
+        spans.push(Span::styled(
+            trf(self.locale, "skill.count", &[&items.len().to_string()]),
+            Style::default().fg(self.theme.text),
+        ));
+        self.lines.push(Line::from(spans));
+        if !self.skill_fold {
+            for item in items {
+                let mut item_spans = vec![Span::styled(
+                    item.name.clone(),
+                    Style::default()
+                        .add_modifier(Modifier::BOLD)
+                        .fg(self.theme.text),
+                )];
+                if !item.description.is_empty() {
+                    item_spans.push(Span::styled(
+                        format!(" — {}", item.description),
+                        Style::default().fg(self.theme.muted),
+                    ));
+                }
+                self.lines.push(Line::from(item_spans));
+            }
         }
     }
 

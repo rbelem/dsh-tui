@@ -231,6 +231,7 @@ fn render_snapshot(
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     cache.render_dirty(
         store,
@@ -239,6 +240,7 @@ fn render_snapshot(
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("test backend");
@@ -318,7 +320,8 @@ fn streaming_chunk_marks_dirty_and_rerenders() {
             120,
             &Theme::default(),
             Locale::En,
-            &ImageCache::default()
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
         ),
         "fresh sync renders everything"
     );
@@ -329,7 +332,8 @@ fn streaming_chunk_marks_dirty_and_rerenders() {
             120,
             &Theme::default(),
             Locale::En,
-            &ImageCache::default()
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
         ),
         "idle sync changes nothing"
     );
@@ -371,7 +375,8 @@ fn streaming_chunk_marks_dirty_and_rerenders() {
             120,
             &Theme::default(),
             Locale::En,
-            &ImageCache::default()
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
         ),
         "changed node detected"
     );
@@ -476,7 +481,8 @@ fn row_cache_signature_change_detection() {
         120,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
     assert!(
         !cache.sync(
@@ -485,7 +491,8 @@ fn row_cache_signature_change_detection() {
             120,
             &Theme::default(),
             Locale::En,
-            &ImageCache::default()
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
         ),
         "no change → false"
     );
@@ -513,7 +520,8 @@ fn row_cache_signature_change_detection() {
             120,
             &Theme::default(),
             Locale::En,
-            &ImageCache::default()
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
         ),
         "changed node → true"
     );
@@ -528,6 +536,7 @@ fn row_cache_signature_change_detection() {
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     assert!(cache.dirty().is_empty());
     assert!(!cache.sync(
@@ -536,7 +545,8 @@ fn row_cache_signature_change_detection() {
         120,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
 
     // Fold state is part of the signature: collapsing marks the node dirty.
@@ -547,7 +557,8 @@ fn row_cache_signature_change_detection() {
         120,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
     assert!(cache.dirty().contains("1:1"));
 }
@@ -588,6 +599,7 @@ fn row_cache_width_change_invalidates_all() {
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     let rows_at_120 = cache.lines().len();
     let first_lines_at_120 = cache.lines()[0].lines.len();
@@ -600,7 +612,8 @@ fn row_cache_width_change_invalidates_all() {
             40,
             &Theme::default(),
             Locale::En,
-            &ImageCache::default()
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
         ),
         "width change → re-render"
     );
@@ -616,7 +629,8 @@ fn row_cache_width_change_invalidates_all() {
         40,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
 }
 
@@ -626,10 +640,12 @@ fn row_cache_width_change_invalidates_all() {
 
 #[test]
 fn markdown_code_fence_uses_the_code_token_with_spacing() {
-    let (lines, code_ranges) = render_markdown(
+    let (lines, code_ranges, _skill) = render_markdown(
         "before\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\nafter",
         Default::default(),
         &Theme::default(),
+        Locale::En,
+        true,
     );
     let fence_lines: Vec<String> = lines.iter().map(ToString::to_string).collect();
     assert!(
@@ -650,10 +666,12 @@ fn markdown_code_fence_uses_the_code_token_with_spacing() {
 
 #[test]
 fn markdown_table_renders_joined_rows() {
-    let (lines, _code) = render_markdown(
+    let (lines, _code, _skill) = render_markdown(
         "| a | b |\n|---|---|\n| 1 | 2 |",
         Default::default(),
         &Theme::default(),
+        Locale::En,
+        true,
     );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
     assert!(rendered.contains(&"| a | b |".to_string()), "{rendered:?}");
@@ -669,7 +687,13 @@ fn markdown_table_renders_joined_rows() {
 #[test]
 fn markdown_strikethrough_sets_modifier() {
     use ratatui::style::Modifier;
-    let (lines, _code) = render_markdown("~~gone~~ here", Default::default(), &Theme::default());
+    let (lines, _code, _skill) = render_markdown(
+        "~~gone~~ here",
+        Default::default(),
+        &Theme::default(),
+        dsh_tui::i18n::Locale::En,
+        true,
+    );
     assert_eq!(lines.len(), 1);
     let crossed = lines[0]
         .spans
@@ -687,7 +711,13 @@ fn markdown_strikethrough_sets_modifier() {
 fn markdown_cjk_renders_and_wraps_by_width() {
     // CJK text renders without panic and wraps at narrow widths.
     let text = "日本語のテキストが続きますここで折り返されるはずです";
-    let (lines, _code) = render_markdown(text, Default::default(), &Theme::default());
+    let (lines, _code, _skill) = render_markdown(
+        text,
+        Default::default(),
+        &Theme::default(),
+        dsh_tui::i18n::Locale::En,
+        true,
+    );
     assert_eq!(lines.len(), 1);
     let mut store = SessionStore::new();
     store
@@ -704,6 +734,7 @@ fn markdown_cjk_renders_and_wraps_by_width() {
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
     assert!(
         cache.lines()[0].lines.len() >= 2,

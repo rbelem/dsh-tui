@@ -45,6 +45,10 @@ pub struct CachedRow {
     /// The fill color for the code ranges (the theme's `panel_bg` at render
     /// time; rows are re-rendered on theme change, so it stays current).
     pub code_fill: ratatui::style::Color,
+    /// #31: the line index (into `lines`) of a skill-list block's header
+    /// row — the click-toggle hit target (`None` when the node has no
+    /// skill block).
+    pub skill_header: Option<usize>,
     /// Rendered-relevant state at render time (change detection).
     signature: u64,
 }
@@ -90,6 +94,7 @@ impl RowCache {
     /// gets filler lines + an [`ImageRow`] segment; otherwise the bare
     /// caption placeholder (an empty cache renders exactly the placeholder
     /// tier).
+    #[allow(clippy::too_many_arguments)] // the render-context bag
     pub fn sync(
         &mut self,
         store: &SessionStore,
@@ -98,6 +103,7 @@ impl RowCache {
         theme: &Theme,
         locale: Locale,
         images: &ImageCache,
+        skill_folds: &std::collections::HashMap<NodeKey, bool>,
     ) -> bool {
         let mut changed = false;
         let Some(state) = store.session(session_id) else {
@@ -121,7 +127,11 @@ impl RowCache {
         let mut reordered = Vec::with_capacity(state.nodes.len());
         for node in &state.nodes {
             let collapsed = store.fold_state(session_id, &node.key).collapsed;
-            let signature = rendered_signature(node, collapsed);
+            // #31: the skill-block fold (absent = collapsed — the ticket
+            // default), part of the render signature so a toggle
+            // re-renders the node.
+            let skill_fold = skill_folds.get(&node.key).copied().unwrap_or(true);
+            let signature = rendered_signature(node, collapsed, skill_fold);
             match self.take_row(&node.key) {
                 Some(mut row) => {
                     if row.signature != signature {
@@ -132,7 +142,8 @@ impl RowCache {
                     reordered.push(row);
                 }
                 None => {
-                    let rendered = render_row(node, collapsed, width, theme, locale, images);
+                    let rendered =
+                        render_row(node, collapsed, width, theme, locale, images, skill_fold);
                     reordered.push(CachedRow {
                         node_key: node.key.clone(),
                         anchor_seq: node.anchor_seq,
@@ -140,6 +151,7 @@ impl RowCache {
                         images: rendered.images,
                         code_ranges: rendered.code_ranges,
                         code_fill: rendered.code_fill,
+                        skill_header: rendered.skill_header,
                         signature,
                     });
                     changed = true;
@@ -179,6 +191,7 @@ impl RowCache {
 
     /// Re-render exactly the dirty nodes (markdown re-parse per chunk, Q5)
     /// and clear the dirty set.
+    #[allow(clippy::too_many_arguments)] // the render-context bag
     pub fn render_dirty(
         &mut self,
         store: &SessionStore,
@@ -187,6 +200,7 @@ impl RowCache {
         theme: &Theme,
         locale: Locale,
         images: &ImageCache,
+        skill_folds: &std::collections::HashMap<NodeKey, bool>,
     ) {
         let mut rendered_any = false;
         for key in self.dirty.drain() {
@@ -197,12 +211,14 @@ impl RowCache {
                 continue;
             };
             let collapsed = store.fold_state(session_id, &key).collapsed;
-            let rendered = render_row(node, collapsed, width, theme, locale, images);
+            let skill_fold = skill_folds.get(&key).copied().unwrap_or(true);
+            let rendered = render_row(node, collapsed, width, theme, locale, images, skill_fold);
             if let Some(row) = self.rows.iter_mut().find(|row| row.node_key == key) {
                 row.lines = rendered.lines;
                 row.images = rendered.images;
                 row.code_ranges = rendered.code_ranges;
                 row.code_fill = rendered.code_fill;
+                row.skill_header = rendered.skill_header;
                 rendered_any = true;
             }
             // Dirty re-render dropped the inter-message blank; restore it.
@@ -267,6 +283,7 @@ struct WrappedRender {
     images: Vec<ImageRow>,
     code_ranges: Vec<(usize, usize)>,
     code_fill: ratatui::style::Color,
+    skill_header: Option<usize>,
 }
 
 /// Render one node, wrap at `width`, and re-base the image segments' and
@@ -282,11 +299,23 @@ fn render_row(
     theme: &Theme,
     locale: Locale,
     images: &ImageCache,
+    skill_fold: bool,
 ) -> WrappedRender {
-    let render = render_node_full(node, collapsed, theme, locale, images, width);
+    let render = render_node_full(node, collapsed, theme, locale, images, width, skill_fold);
     let marks: Vec<usize> = render.images.iter().map(|seg| seg.line_index).collect();
-    let (lines, rebased_images, code_ranges) =
-        wrap_lines_marked(render.lines, width, &marks, &render.code_ranges);
+    let wrapped = wrap_lines_marked(
+        render.lines,
+        width,
+        &marks,
+        &render.code_ranges,
+        render.skill_header,
+    );
+    let WrappedLines {
+        lines,
+        image_rebased: rebased_images,
+        code_ranges,
+        skill_header,
+    } = wrapped;
     let images = render
         .images
         .into_iter()
@@ -301,6 +330,7 @@ fn render_row(
         images,
         code_ranges,
         code_fill: theme.panel_bg,
+        skill_header,
     }
 }
 
@@ -312,21 +342,36 @@ fn render_row(
 /// `code_ranges` are half-open input line ranges, returned re-based to
 /// output line ranges (code input lines are contiguous, so their output
 /// lines form a contiguous run).
+/// The wrapped output of [`wrap_lines_marked`]: the lines plus the
+/// re-based marks (image starts, code ranges, the #31 skill header).
+struct WrappedLines {
+    lines: Vec<Line<'static>>,
+    image_rebased: Vec<usize>,
+    code_ranges: Vec<(usize, usize)>,
+    skill_header: Option<usize>,
+}
+
 fn wrap_lines_marked(
     lines: Vec<Line<'static>>,
     width: u16,
     image_marks: &[usize],
     code_ranges: &[(usize, usize)],
-) -> (Vec<Line<'static>>, Vec<usize>, Vec<(usize, usize)>) {
+    skill_mark: Option<usize>,
+) -> WrappedLines {
     if width == 0 {
-        return (Vec::new(), Vec::new(), Vec::new());
+        return WrappedLines {
+            lines: Vec::new(),
+            image_rebased: Vec::new(),
+            code_ranges: Vec::new(),
+            skill_header: None,
+        };
     }
     let width = width as usize;
     let mut wrapped = Vec::new();
     let mut rebased = Vec::with_capacity(image_marks.len());
     let mut next_mark = image_marks.iter().peekable();
     // Output line count before each input line — maps input ranges to
-    // output ranges.
+    // output ranges (and the #31 skill header to its post-wrap line).
     let mut out_before = Vec::with_capacity(lines.len() + 1);
     for (index, line) in lines.into_iter().enumerate() {
         out_before.push(wrapped.len());
@@ -341,7 +386,13 @@ fn wrap_lines_marked(
         .iter()
         .map(|(start, end)| (out_before[*start], out_before[*end]))
         .collect();
-    (wrapped, rebased, code_ranges)
+    let skill_header = skill_mark.map(|mark| out_before[mark]);
+    WrappedLines {
+        lines: wrapped,
+        image_rebased: rebased,
+        code_ranges,
+        skill_header,
+    }
 }
 
 fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
@@ -380,13 +431,14 @@ fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 
 /// FNV-1a hash over the rendered-relevant fields of a node (kind, anchor,
 /// fold state, flags, and accumulated text lengths).
-fn rendered_signature(node: &ChatNode, collapsed: bool) -> u64 {
+fn rendered_signature(node: &ChatNode, collapsed: bool, skill_fold: bool) -> u64 {
     use crate::store::node::NodeData;
 
     let mut hash = 0xcbf29ce484222325u64;
     hash_u64(&mut hash, node.kind as u8 as u64);
     hash_u64(&mut hash, node.anchor_seq as u64);
     hash_u64(&mut hash, collapsed as u64);
+    hash_u64(&mut hash, skill_fold as u64);
     match &node.data {
         NodeData::User { content, .. } => {
             for block in content {

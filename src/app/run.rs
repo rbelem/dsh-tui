@@ -546,6 +546,7 @@ impl App {
                 &self.theme,
                 self.locale,
                 &self.image_cache,
+                &self.skill_folds,
             );
             self.row_cache.render_dirty(
                 &self.store,
@@ -554,6 +555,7 @@ impl App {
                 &self.theme,
                 self.locale,
                 &self.image_cache,
+                &self.skill_folds,
             );
             if self.view.follow {
                 // Follow in LINE space: the viewport offset counts rendered

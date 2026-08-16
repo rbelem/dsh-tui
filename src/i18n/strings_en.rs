@@ -136,6 +136,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("sidebar.rename_hint", "rename session…"),
     ("sidebar.running", " · running"),
     ("sidebar.ungrouped", "ungrouped"),
+    ("skill.count", "{0} skills"),
     ("status.copied", "copied · {0} chars"),
     ("status.drawer_hint", "s sessions · esc close"),
     ("status.error", "error: {0}"),

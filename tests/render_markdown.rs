@@ -118,7 +118,13 @@ fn markdown_surface_covers_every_sink_branch() {
         "\n",
         "| head | short |\n|---|---|\n| long-cell | x |\n| missing |\n", // table
     );
-    let (lines, _code) = render_markdown(md, Style::default().fg(theme.text), &theme);
+    let (lines, _code, _skill) = render_markdown(
+        md,
+        Style::default().fg(theme.text),
+        &theme,
+        dsh_tui::i18n::Locale::En,
+        true,
+    );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
 
     // Heading is bold; quote lines carry the │ prefix.
@@ -194,10 +200,12 @@ fn markdown_surface_covers_every_sink_branch() {
 #[test]
 fn fenced_code_uses_the_code_token_with_panel_fill_range() {
     let theme = Theme::default();
-    let (lines, code_ranges) = render_markdown(
+    let (lines, code_ranges, _skill) = render_markdown(
         "before\n```rs\nfn main() { println!(\"hi\"); }\n```\nafter",
         Style::default().fg(theme.text),
         &theme,
+        Locale::En,
+        true,
     );
     let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
     // #11: no box, no `│` indent — the code lines are bare.
@@ -232,7 +240,15 @@ fn render_node_wrapper_matches_the_full_render() {
     let theme = Theme::default();
     let chat = text_node("m1", "hello");
     let wrapped = render_node(&chat, false, &theme, Locale::En);
-    let full = render_node_full(&chat, false, &theme, Locale::En, &ImageCache::default(), 80);
+    let full = render_node_full(
+        &chat,
+        false,
+        &theme,
+        Locale::En,
+        &ImageCache::default(),
+        80,
+        true,
+    );
     assert_eq!(wrapped, full.lines, "render_node is the default-cache full");
 }
 
@@ -245,7 +261,7 @@ fn node_data_variants_render_their_markers() {
     let theme = Theme::default();
     let image_cache = ImageCache::default();
     let render = |n: &ChatNode| {
-        render_node_full(n, false, &theme, Locale::En, &image_cache, 80)
+        render_node_full(n, false, &theme, Locale::En, &image_cache, 80, true)
             .lines
             .iter()
             .map(ToString::to_string)
@@ -385,7 +401,7 @@ fn tool_node_error_paths_render() {
     let theme = Theme::default();
     let image_cache = ImageCache::default();
     let render = |n: &ChatNode, collapsed: bool| {
-        render_node_full(n, collapsed, &theme, Locale::En, &image_cache, 80)
+        render_node_full(n, collapsed, &theme, Locale::En, &image_cache, 80, true)
             .lines
             .iter()
             .map(ToString::to_string)
@@ -565,7 +581,8 @@ fn row_cache_signs_and_renders_every_node_kind() {
             100,
             &Theme::default(),
             Locale::En,
-            &ImageCache::default()
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
         ),
         "first sync renders"
     );
@@ -577,7 +594,8 @@ fn row_cache_signs_and_renders_every_node_kind() {
         100,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
 
     // A new event dirties its row; render_dirty re-renders it.
@@ -590,7 +608,8 @@ fn row_cache_signs_and_renders_every_node_kind() {
         100,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
     cache.render_dirty(
         &store,
@@ -599,6 +618,7 @@ fn row_cache_signs_and_renders_every_node_kind() {
         &Theme::default(),
         Locale::En,
         &ImageCache::default(),
+        &std::collections::HashMap::new(),
     );
 
     // Width change re-wraps.
@@ -608,7 +628,8 @@ fn row_cache_signs_and_renders_every_node_kind() {
         40,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
 
     // A session with no store state clears the rows.
@@ -618,7 +639,8 @@ fn row_cache_signs_and_renders_every_node_kind() {
         100,
         &Theme::default(),
         Locale::En,
-        &ImageCache::default()
+        &ImageCache::default(),
+        &std::collections::HashMap::new(),
     ));
     assert!(
         cache.lines().is_empty(),
@@ -827,7 +849,7 @@ fn markdown_tool_result_false_and_missing_error_code() {
     let theme = Theme::default();
     let image_cache = ImageCache::default();
     let render = |n: &ChatNode, collapsed: bool| {
-        render_node_full(n, collapsed, &theme, Locale::En, &image_cache, 80)
+        render_node_full(n, collapsed, &theme, Locale::En, &image_cache, 80, true)
             .lines
             .iter()
             .map(ToString::to_string)
@@ -896,5 +918,155 @@ fn markdown_tool_result_false_and_missing_error_code() {
     assert!(
         collapsed.iter().any(|l| l.contains("failed")),
         "collapsed failed marker: {collapsed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #31: skill-list block detection + fold rendering
+// ---------------------------------------------------------------------------
+
+const SKILLS_MD: &str =
+    "## Skills\n- bash — run shell commands\n- git — version control\n  - nested detail";
+
+#[test]
+fn skill_block_folds_to_one_header_row() {
+    let theme = Theme::default();
+    let (lines, _code, skill_header) = render_markdown(
+        SKILLS_MD,
+        Style::default().fg(theme.text),
+        &theme,
+        Locale::En,
+        true, // folded (the default)
+    );
+    let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    // The message starts with the heading: the top-blank guard skips the
+    // leading blank, so exactly the one header row renders.
+    assert_eq!(rendered.len(), 1, "one header row: {rendered:?}");
+    assert_eq!(rendered[0], "▸ 2 skills", "folded header: {rendered:?}");
+    assert_eq!(skill_header, Some(0), "the header line is the hit target");
+    // The glyph is accent+bold; the count text is plain text.
+    let header = &lines[0];
+    assert!(
+        header.spans[0].style.fg == Some(theme.accent),
+        "accent glyph"
+    );
+    assert!(
+        header.spans[0].style.add_modifier.contains(Modifier::BOLD),
+        "bold glyph"
+    );
+}
+
+#[test]
+fn skill_block_expands_to_header_and_items() {
+    let theme = Theme::default();
+    let (lines, _code, skill_header) = render_markdown(
+        SKILLS_MD,
+        Style::default().fg(theme.text),
+        &theme,
+        Locale::En,
+        false, // expanded
+    );
+    let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    assert_eq!(rendered[0], "▾ 2 skills", "expanded header: {rendered:?}");
+    assert_eq!(rendered[1], "bash — run shell commands", "item name+desc");
+    assert_eq!(
+        rendered[2], "git — version control nested detail",
+        "the nested bullet appended to its parent item"
+    );
+    assert_eq!(skill_header, Some(0), "the header is still the hit target");
+}
+
+#[test]
+fn skill_heading_variants_and_cjk_parse() {
+    let theme = Theme::default();
+    let md = "### available skills (12)\n- psutil — 系统进程\n- 磁盘占用 检查：df -h";
+    let (lines, _code, skill_header) = render_markdown(
+        md,
+        Style::default().fg(theme.text),
+        &theme,
+        Locale::En,
+        false,
+    );
+    assert_eq!(skill_header, Some(0), "### + trailing count matches");
+    let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    assert_eq!(rendered[0], "▾ 2 skills");
+    assert_eq!(rendered[1], "psutil — 系统进程", "CJK description");
+    // `：` is a tolerated separator: name "磁盘占用 检查", desc "df -h".
+    assert_eq!(rendered[2], "磁盘占用 检查 — df -h");
+}
+
+#[test]
+fn non_skill_messages_render_byte_identical() {
+    let theme = Theme::default();
+    // A skills heading WITHOUT a following list, and a list under a
+    // different heading: no fold, the normal rendering path.
+    for md in [
+        "## Skills\nno list follows",
+        "## Skills Overview\n- bash — run shell",
+        "## Other\n- bash — run shell",
+        "## skills\n1. ordered\n2. list",
+    ] {
+        let (lines, _code, skill_header) = render_markdown(
+            md,
+            Style::default().fg(theme.text),
+            &theme,
+            Locale::En,
+            true,
+        );
+        assert_eq!(skill_header, None, "no fold for: {md}");
+        assert!(!lines.iter().any(|l| l.to_string().contains("▸")), "{md}");
+    }
+}
+
+#[test]
+fn skill_header_is_localized() {
+    let theme = Theme::default();
+    let (lines, _code, _skill) = render_markdown(
+        SKILLS_MD,
+        Style::default().fg(theme.text),
+        &theme,
+        Locale::Zh,
+        true,
+    );
+    assert_eq!(
+        lines[0].to_string(),
+        "▸ 2 技能",
+        "zh header via the same trf path"
+    );
+}
+
+/// #31 review: a mid-message skill block — the header lands AFTER the
+/// intro's rows (it renders at the block boundary, not at the top).
+#[test]
+fn mid_message_skill_block_follows_the_intro() {
+    let theme = Theme::default();
+    let md = "Here's what I can do:\n\n## Skills\n- a — b\n- c — d";
+    let (lines, _code, skill_header) = render_markdown(
+        md,
+        Style::default().fg(theme.text),
+        &theme,
+        Locale::En,
+        true,
+    );
+    let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        rendered,
+        vec!["Here's what I can do:", "", "▸ 2 skills"],
+        "intro rows, then the folded header"
+    );
+    assert_eq!(skill_header, Some(2), "the header index follows the intro");
+
+    let (lines, _code, _skill) = render_markdown(
+        md,
+        Style::default().fg(theme.text),
+        &theme,
+        Locale::En,
+        false,
+    );
+    let rendered: Vec<String> = lines.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        rendered,
+        vec!["Here's what I can do:", "", "▾ 2 skills", "a — b", "c — d"],
+        "expanded items in order after the intro"
     );
 }

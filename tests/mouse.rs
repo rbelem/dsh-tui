@@ -1175,3 +1175,159 @@ async fn streaming_growth_reclamps_the_highlight() {
         .contains(Modifier::REVERSED);
     assert!(highlighted, "the highlight tracks the streamed line width");
 }
+
+// ---------------------------------------------------------------------------
+// #31: skill-list block fold — header click toggles
+// ---------------------------------------------------------------------------
+
+/// #31: a `## Skills` message folds to one header row by default; a click
+/// on the header row expands it (header + item rows), a second click
+/// collapses it. A header click never starts a selection.
+#[tokio::test]
+async fn skill_header_click_toggles_the_fold() {
+    let mut app = app_with_session();
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                1,
+                "user/message",
+                user_msg(
+                    "m1",
+                    "## Skills\n- bash — run shell commands\n- git — version control",
+                ),
+            ),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
+    )
+    .await;
+
+    // Collapsed by default: the message renders as exactly one header row.
+    let view = format!("{}", term.backend());
+    assert!(view.contains("▸ 2 skills"), "folded header: {view}");
+    assert!(
+        !view.contains("bash — run shell commands"),
+        "items hidden while folded: {view}"
+    );
+
+    // Click the header row (content row 0 = buffer row 1) → expands.
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            down(26, 1),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(view.contains("▾ 2 skills"), "expanded header: {view}");
+    assert!(
+        view.contains("bash — run shell commands"),
+        "items visible while expanded: {view}"
+    );
+    assert_eq!(app.selection, None, "a header click never selects");
+
+    // Click again → collapses.
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            down(26, 1),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(view.contains("▸ 2 skills"), "collapsed again: {view}");
+    assert!(
+        !view.contains("bash — run shell commands"),
+        "items hidden again: {view}"
+    );
+}
+
+/// #31 review: the cached skill_header is the POST-WRAP line — at a
+/// narrow width where the intro wraps, the click on the rendered header
+/// row toggles, and one row above (an intro wrap line) does NOT.
+#[tokio::test]
+async fn wrapped_skill_header_click_lands_on_the_header_row() {
+    let mut app = app_with_session();
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                1,
+                "user/message",
+                user_msg(
+                    "m1",
+                    "Here is a fairly long introductory paragraph that wraps                      at narrow widths.\n\n## Skills\n- bash — run shell commands\n- git — version control",
+                ),
+            ),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(40, 20);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
+    )
+    .await;
+
+    // The cached header index is post-wrap: the intro wrapped above it.
+    let header_line = app.row_cache.lines()[0].skill_header.expect("skill header");
+    assert!(
+        header_line > 1,
+        "the intro wrapped above the header (line {header_line})"
+    );
+
+    // Click the rendered header row (content row = header_line, buffer
+    // y = 1 + row) → expands.
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            down(26, 1 + header_line as u16),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(view.contains("▾ 2 skills"), "header click expanded: {view}");
+    assert!(
+        view.contains("bash — run shell commands"),
+        "items visible: {view}"
+    );
+
+    // One row above the header is an intro wrap line — clicking it does
+    // not toggle (and without `v` it starts no selection either).
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            down(26, header_line as u16), // the row above the header
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(
+        view.contains("▾ 2 skills"),
+        "the row above the header does not toggle: {view}"
+    );
+    assert_eq!(app.selection, None, "no selection from the miss");
+}
