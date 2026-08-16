@@ -33,6 +33,7 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
 use crate::i18n::{Locale, tr, trf};
+use crate::render::chat_view::{format_duration, format_timestamp};
 use crate::render::image::{ImageCache, ImageRow};
 use crate::store::event_data::ContentBlock;
 use crate::store::node::{AssistantBlock, ChatNode, NodeData, NodeKey};
@@ -460,6 +461,46 @@ fn render_tool_node(
     let mut code_ranges = Vec::new();
     let mut skill_header = None;
     if let Some(result) = result {
+        // #37: the settled tool row's details meta line — the started
+        // timestamp (the `tool/call` event time, when in-window) and, when
+        // the result event's time is known, the duration (call → result).
+        // Muted like the status ` · ` separators. The interaction note: a
+        // window-cut or interrupted call shows started-only (no duration to
+        // fabricate).
+        let start = result.call_time.or_else(|| call.map(|c| c.time));
+        let mut meta = String::new();
+        if let Some(start) = start {
+            meta.push_str(&trf(locale, "tool.started", &[&format_timestamp(start)]));
+            if let Some(result_time) = result.result_time {
+                meta.push_str(" · ");
+                meta.push_str(&trf(
+                    locale,
+                    "tool.duration",
+                    &[&format_duration(result_time - start)],
+                ));
+            }
+        }
+        // The schema panel: the host-computed `for: 'call'` view card
+        // (web "Schema" payload; `for: 'result'` cards are not schemas),
+        // with the explicit "unavailable" fallback when absent.
+        let schema_card = result
+            .call_view
+            .as_ref()
+            .or_else(|| call.and_then(|c| c.call_view.as_ref()))
+            .and_then(|view| match view {
+                crate::wire::session::ToolEventView::Call { view } => Some(view.card.as_str()),
+                crate::wire::session::ToolEventView::Result { .. } => None,
+            });
+        if !meta.is_empty() {
+            lines.push(Line::styled(meta, Style::default().fg(theme.muted)));
+        }
+        lines.push(Line::styled(
+            match schema_card {
+                Some(card) => trf(locale, "tool.schema", &[card]),
+                None => tr(locale, "tool.schema_unavailable").into(),
+            },
+            Style::default().fg(theme.muted),
+        ));
         // The tool OUTPUT is literal: a code block (panel-bg fill, syntax
         // highlight for known tool languages) — never markdown, so bash
         // output with `*`, backticks, or [brackets] stays byte-identical.

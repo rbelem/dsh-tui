@@ -435,6 +435,7 @@ impl Fold {
             call_id: call_id.clone(),
             call,
             call_time,
+            result_time: Some(stored.event.time),
             content,
             is_error: message.is_error(),
             error: error.cloned(),
@@ -605,6 +606,7 @@ impl Fold {
                 args_raw: call.args_raw.clone(),
             }),
             call_time: Some(call.time),
+            result_time: None, // interrupted: no real result event
             content: Vec::new(),
             is_error: true,
             error: Some(ToolErrorIdentity {

@@ -374,6 +374,9 @@ pub const DEFAULT_KEYBINDINGS: &[(&str, &str)] = &[
     // fallback when `image-viewer` is rebound, but `v` is selection's).
     ("selection-toggle", "v"),
     ("image-viewer", "i"),
+    // #37: `t` in chat focus toggles the tool row's details (the fold
+    // remains click-toggleable per row; `t` is the keyboard path).
+    ("tool-details", "t"),
     // #19: the narrow-terminal drawer (`s` toggles it at <80 cols; never
     // intercepts composer typing — the keymap check is focus-gated).
     ("drawer-toggle", "s"),

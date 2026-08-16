@@ -1811,6 +1811,13 @@ impl App {
         if self.config.keymap.matches("image-viewer", key) {
             return Some(self.open_image_viewer());
         }
+        // #37: `t` (rebindable via `[keymap] tool-details`) toggles the
+        // details view of the tool row under the viewport (last visible
+        // tool wins; the transcript's last tool falls back) — the keyboard
+        // path to the started/duration/schema meta lines.
+        if self.config.keymap.matches("tool-details", key) {
+            return Some(self.toggle_tool_details());
+        }
         match key.code {
             KeyCode::Char('q') => Some(Action::Quit),
             KeyCode::Char('n') => {
@@ -1904,6 +1911,49 @@ impl App {
                 collapsed: !collapsed,
             },
         );
+    }
+
+    /// #37: the `tool-details` key's target — the tool node whose row the
+    /// key acts on: the LAST cached tool row whose rendered line span
+    /// intersects the viewport (walking back from the bottom, so the row
+    /// under the user's gaze wins), falling back to the last tool node in
+    /// the transcript when none is visible (follow mode's tail). Toggles
+    /// that node's fold, which expands the details meta lines.
+    fn toggle_tool_details(&mut self) -> Action {
+        let Some(session_id) = self.active_session.clone() else {
+            return Action::None;
+        };
+        let Some(state) = self.store.session(&session_id) else {
+            return Action::None;
+        };
+        let first = self.view.offset;
+        let last = first + self.view.viewport_height as usize;
+        let mut key: Option<String> = None;
+        let mut cursor = 0usize;
+        for row in self.row_cache.lines() {
+            let row_end = cursor + row.lines.len();
+            if row_end > first
+                && cursor < last
+                && state.nodes.iter().any(|node| {
+                    node.key == row.node_key && matches!(node.data, NodeData::Tool { .. })
+                })
+            {
+                key = Some(row.node_key.clone());
+            }
+            cursor = row_end;
+        }
+        let key = key.or_else(|| {
+            state
+                .nodes
+                .iter()
+                .rev()
+                .find(|node| matches!(node.data, NodeData::Tool { .. }))
+                .map(|node| node.key.clone())
+        });
+        if let Some(key) = key {
+            self.toggle_tool_fold(&key);
+        }
+        Action::None
     }
 
     /// #31: the node key whose skill header row occupies the absolute

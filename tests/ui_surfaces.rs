@@ -387,6 +387,26 @@ fn elapsed_formatting() {
     assert_eq!(format_elapsed(Duration::from_secs(3600 + 61)), "(61m 01s)");
 }
 
+/// #37/#38: the tool-details duration / started stamp / token-count
+/// formatters (sub-minute decimals, UTC hh:mm:ss, K/M compaction).
+#[test]
+fn detail_and_stats_formatting() {
+    use dsh_tui::render::chat_view::{format_duration, format_timestamp, format_tokens};
+    assert_eq!(format_duration(0.0), "0.0s");
+    assert_eq!(format_duration(1.5), "1.5s");
+    assert_eq!(format_duration(59.4), "59.4s");
+    assert_eq!(format_duration(123.0), "2m 03s");
+    assert_eq!(format_duration(3600.0), "60m 00s");
+    // epoch 100 = 00:01:40 UTC; sub-zero clamps to the epoch.
+    assert_eq!(format_timestamp(100.0), "00:01:40");
+    assert_eq!(format_timestamp(0.0), "00:00:00");
+    assert_eq!(format_timestamp(-5.0), "00:00:00");
+    assert_eq!(format_tokens(0), "0");
+    assert_eq!(format_tokens(999), "999");
+    assert_eq!(format_tokens(1_380), "1.4K");
+    assert_eq!(format_tokens(49_200_000), "49.2M");
+}
+
 /// The busy clock latches on the first tick while running, shows the elapsed
 /// next to the spinner, and clears when the session goes idle (#38).
 #[tokio::test]
@@ -547,6 +567,147 @@ async fn running_tool_since_tracks_and_prunes() {
     assert!(
         !view.contains("[tool] bash ⠋"),
         "no indicator once settled: {view}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #37: the tool-details key
+// ---------------------------------------------------------------------------
+
+/// `t` (chat focus, `[keymap] tool-details`): with the tool row cached in
+/// the viewport the key expands its fold (the details meta lines); a
+/// second press collapses it. The mouse click path stays per-row.
+#[tokio::test]
+async fn tool_details_key_toggles_the_visible_tool_row() {
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    // A settled tool round-trip (call + result → one tool node).
+    app.store
+        .ingest(frame("s1", ev(1, "user/message", user_msg("m1", "do it"))))
+        .expect("ingest");
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                2,
+                "tool/call",
+                json!({"turn": 1, "step": 1, "callId": "c1", "name": "bash", "arguments": "ls"}),
+            ),
+        ))
+        .expect("ingest");
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                3,
+                "tool/result",
+                json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "r1", "role": "user",
+                        "content": [{"type": "tool-result", "toolCallId": "c1", "content": [{"type": "text", "text": "out"}], "isError": false}],
+                        "source": {"kind": "tool", "callId": "c1"},
+                    },
+                }),
+            ),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    // First run: draw (rows cached) then `t` — expands the visible row.
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))), // first draw: rows cached
+            AppEvent::Key(key(KeyCode::Char('t'))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let fold = app.store.fold_state(&SessionId("s1".into()), "c1");
+    assert!(!fold.collapsed, "t expanded the visible tool row");
+    // Second run: `t` again — collapses it back.
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Key(key(KeyCode::Char('t'))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let fold = app.store.fold_state(&SessionId("s1".into()), "c1");
+    assert!(fold.collapsed, "t collapsed the visible tool row again");
+}
+
+/// With no cached rows (no draw yet) the key falls back to the
+/// transcript's LAST tool node — follow-mode's tail — and still toggles.
+#[tokio::test]
+async fn tool_details_key_falls_back_to_the_last_tool_node() {
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                1,
+                "tool/call",
+                json!({"turn": 1, "step": 1, "callId": "c1", "name": "bash", "arguments": "ls"}),
+            ),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    // `t` before any draw: the row cache is empty, so no visible tool row
+    // exists — the fallback targets the transcript's last tool node.
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('t'))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let fold = app.store.fold_state(&SessionId("s1".into()), "c1");
+    assert!(
+        !fold.collapsed,
+        "t toggled the last tool node via the fallback"
+    );
+}
+
+/// `t` on a session with no tool nodes is a harmless no-op.
+#[tokio::test]
+async fn tool_details_key_without_tools_is_inert() {
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    app.store
+        .ingest(frame("s1", ev(1, "user/message", user_msg("m1", "hi"))))
+        .expect("ingest");
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('t'))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    // No panic, no fold state written, clean quit.
+    let state = app.store.session(&SessionId("s1".into())).expect("session");
+    assert!(
+        !state.fold.contains_key("c1"),
+        "no tool: the key must not write fold state"
     );
 }
 

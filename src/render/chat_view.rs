@@ -62,6 +62,43 @@ pub fn format_elapsed(elapsed: Duration) -> String {
     }
 }
 
+/// #37: a tool duration — `1.2s` under a minute (one decimal),
+/// `2m 03s` past it (the web header's `31m33s` shape).
+pub fn format_duration(secs: f64) -> String {
+    if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else {
+        let total = secs as u64;
+        format!("{}m {:02}s", total / 60, total % 60)
+    }
+}
+
+/// #37: a wall-clock started stamp — the epoch seconds rendered as UTC
+/// `HH:MM:SS`. UTC is deliberate: no tz database ships in this crate, and
+/// the fixed rendering is deterministic + testable (a time-of-day, not a
+/// timezone claim).
+pub fn format_timestamp(epoch_secs: f64) -> String {
+    let secs = epoch_secs.max(0.0) as u64;
+    format!(
+        "{:02}:{:02}:{:02}",
+        (secs / 3600) % 24,
+        (secs / 60) % 60,
+        secs % 60
+    )
+}
+
+/// #38: compact token counts, web-header style — `999`, `1.2K`, `49.2M`.
+pub fn format_tokens(count: i64) -> String {
+    let n = count.max(0) as f64;
+    if n >= 1_000_000.0 {
+        format!("{:.1}M", n / 1_000_000.0)
+    } else if n >= 1_000.0 {
+        format!("{:.1}K", n / 1_000.0)
+    } else {
+        count.to_string()
+    }
+}
+
 /// #39: the per-draw live chat state for running tool headers — the
 /// spinner frame index, the indicator styles (built by the caller from
 /// the active theme), plus, per running tool node key, the instant the

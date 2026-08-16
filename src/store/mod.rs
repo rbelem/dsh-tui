@@ -266,6 +266,68 @@ impl SessionStore {
     }
 }
 
+/// Aggregate session metrics for the stats bar (#39) and the context meter
+/// (#38), as a pure function of one session's derived state:
+/// - turns: distinct `turn`s among assistant / turn-error / turn-max-tokens
+///   nodes (turns with model activity — a prompt-only turn has no node);
+/// - steps: distinct `(turn, step)` pairs across assistant AND tool nodes;
+/// - tokens: usage summed across assistant nodes (`cache_*` are optional on
+///   the wire; absent counts as 0);
+/// - `context_window`: the LAST `request/context` event's `contextWindow`
+///   in the retained event window — the fold ignores that event, but the
+///   window still holds it (head-eviction only drops the OLDEST events, so
+///   the newest window wins). `None` when no context was ever reported.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SessionStats {
+    pub turns: u64,
+    pub steps: u64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
+    pub context_window: Option<i64>,
+}
+
+pub fn session_stats(state: &SessionState) -> SessionStats {
+    let mut stats = SessionStats::default();
+    let mut turns: HashSet<i64> = HashSet::new();
+    let mut steps: HashSet<(i64, i64)> = HashSet::new();
+    for node in &state.nodes {
+        match &node.data {
+            NodeData::Assistant {
+                turn, step, usage, ..
+            } => {
+                turns.insert(*turn);
+                steps.insert((*turn, *step));
+                if let Some(usage) = usage {
+                    stats.input_tokens += usage.input_tokens;
+                    stats.output_tokens += usage.output_tokens;
+                    stats.cache_read_tokens += usage.cache_read_tokens.unwrap_or(0);
+                    stats.cache_write_tokens += usage.cache_write_tokens.unwrap_or(0);
+                }
+            }
+            NodeData::TurnError { turn, .. } | NodeData::TurnMaxTokens { turn } => {
+                turns.insert(*turn);
+            }
+            NodeData::Tool {
+                call: Some(call), ..
+            } => {
+                steps.insert((call.turn, call.step));
+            }
+            _ => {}
+        }
+    }
+    stats.turns = turns.len() as u64;
+    stats.steps = steps.len() as u64;
+    for stored in state.events().iter().rev() {
+        if let EventData::RequestContext { context_window, .. } = &stored.data {
+            stats.context_window = *context_window;
+            break;
+        }
+    }
+    stats
+}
+
 /// One log line per RpcError branch (code + message; details are irrelevant).
 fn stream_error_text(error: &RpcError) -> String {
     let code = match error {

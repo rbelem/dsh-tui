@@ -659,6 +659,7 @@ fn tool_node_error_paths_render() {
                     args_raw: long_args.clone(),
                 }),
                 call_time: Some(1.0),
+                result_time: None,
                 content: vec![],
                 is_error: true,
                 error: Some(dsh_tui::store::event_data::ToolErrorIdentity {
@@ -1092,6 +1093,7 @@ fn markdown_tool_result_false_and_missing_error_code() {
                 call_id: "c1".into(),
                 call: None,
                 call_time: None,
+                result_time: None,
                 content: vec![],
                 is_error: false,
                 error: None,
@@ -1118,6 +1120,7 @@ fn markdown_tool_result_false_and_missing_error_code() {
                 call_id: "c2".into(),
                 call: None,
                 call_time: None,
+                result_time: None,
                 content: vec![],
                 is_error: true,
                 error: None,
@@ -1137,6 +1140,113 @@ fn markdown_tool_result_false_and_missing_error_code() {
     assert!(
         collapsed.iter().any(|l| l.contains("failed")),
         "collapsed failed marker: {collapsed:?}"
+    );
+}
+
+/// #37: the settled tool row's details meta lines — started + duration
+/// timing and the host's schema card, with graceful fallbacks.
+#[test]
+fn tool_details_meta_lines_show_timing_and_schema() {
+    let theme = Theme::default();
+    let image_cache = ImageCache::default();
+    let render = |n: &ChatNode, collapsed: bool| {
+        render_node_full(
+            n,
+            collapsed,
+            &render_ctx(
+                80,
+                &theme,
+                Locale::En,
+                &image_cache,
+                &std::collections::HashMap::new(),
+            ),
+        )
+        .lines
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+    };
+    // Started at epoch 100 (00:01:40 UTC), result 1.5s later, schema card
+    // attached (host-computed `for: 'call'` view).
+    let with_details = node(
+        "t1",
+        1,
+        NodeData::Tool {
+            call: Some(dsh_tui::store::node::RunningToolCall {
+                call_id: "c1".into(),
+                name: "read_file".into(),
+                args_raw: "{}".into(),
+                turn: 1,
+                step: 1,
+                time: 100.0,
+                call_view: None,
+            }),
+            result: Some(Box::new(dsh_tui::store::node::ToolResultNode {
+                call_id: "c1".into(),
+                call: Some(dsh_tui::store::node::ToolCallBackfill {
+                    name: "read_file".into(),
+                    args_raw: "{}".into(),
+                }),
+                call_time: Some(100.0),
+                result_time: Some(101.5),
+                content: vec![],
+                is_error: false,
+                error: None,
+                meta: None,
+                call_view: Some(dsh_tui::wire::session::ToolEventView::Call {
+                    view: dsh_tui::wire::session::ToolEventViewCard { card: "fs".into() },
+                }),
+                result_view: None,
+            })),
+            interrupted: false,
+        },
+    );
+    let lines = render(&with_details, false);
+    assert!(
+        lines.iter().any(|l| l.contains("started 00:01:40")),
+        "started stamp: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("duration 1.5s")),
+        "call→result duration: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("schema fs")),
+        "host schema card: {lines:?}"
+    );
+
+    // Fallbacks: no card → `schema unavailable`; no times → no timing
+    // line at all (window cut / synthesized interrupt: nothing to stamp).
+    let bare = node(
+        "t2",
+        1,
+        NodeData::Tool {
+            call: None,
+            result: Some(Box::new(dsh_tui::store::node::ToolResultNode {
+                call_id: "c2".into(),
+                call: None,
+                call_time: None,
+                result_time: None,
+                content: vec![],
+                is_error: false,
+                error: None,
+                meta: None,
+                call_view: None,
+                result_view: None,
+            })),
+            interrupted: false,
+        },
+    );
+    let lines = render(&bare, false);
+    assert!(
+        lines.iter().any(|l| l.contains("schema unavailable")),
+        "schema fallback: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|l| !l.contains("started") && !l.contains("duration")),
+        "no timing without times: {lines:?}"
     );
 }
 

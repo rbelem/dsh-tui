@@ -269,6 +269,59 @@ async fn status_at_39_is_indicators_only() {
     insta::assert_snapshot!("status-39", format!("{}", term.backend()));
 }
 
+/// #38/#39: at ≥80 the full left cluster gains the context meter and the
+/// session stats bar (turns · steps | in · out | cache) — driven by the
+/// store's aggregated usage + the last `request/context` window; both hide
+/// when the session has no data.
+#[tokio::test]
+async fn status_wide_shows_context_meter_and_stats_bar() {
+    let mut app = app_with_session();
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                1,
+                "request/context",
+                json!({"provider": "p", "model": "m", "contextWindow": 50}),
+            ),
+        ))
+        .expect("ingest");
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                2,
+                "assistant/message",
+                json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "a1", "role": "assistant",
+                        "content": [{"type": "text", "text": "hi"}],
+                        "source": {"kind": "model", "provider": "p", "model": "m"},
+                    },
+                    "usage": {"inputTokens": 10, "outputTokens": 3, "cacheReadTokens": 5},
+                }),
+            ),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(140, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
+    )
+    .await;
+    let row = status_row(&term);
+    // used = input + cache_read = 15 of the 50-token window → 30%.
+    assert!(row.contains("ctx 30%"), "meter: {row}");
+    // The full stats cluster fits at 140 cols (sidebar 22 + gap 1).
+    assert!(
+        row.contains("1 turns · 1 steps | in 10 · out 3 | cache 33%"),
+        "stats bar: {row}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // acceptance 3: the too-small screen at 31 with live restore
 // ---------------------------------------------------------------------------

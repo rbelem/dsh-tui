@@ -288,6 +288,7 @@ fn tool_round_trip_settles_with_call_backfill() {
                     args_raw: r#"{"path":"/etc"}"#.into(),
                 }),
                 call_time: Some(3.0),
+                result_time: Some(4.0),
                 content: vec![ContentBlock::Text { text: "ok".into() }],
                 is_error: false,
                 error: Some(ToolErrorIdentity {
@@ -1629,4 +1630,97 @@ fn hostile_chunk_index_is_dropped_not_allocated() {
         "hostile chunks must not materialize an assistant node"
     );
     assert_eq!(nodes[0].key, "m1", "the user message survives untouched");
+}
+
+// ---------------------------------------------------------------------------
+// #38/#39: session stats aggregation (turns · steps · tokens · context)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn session_stats_aggregate_usage_turns_steps_and_context_window() {
+    let mut store = SessionStore::new();
+    let s = "s1";
+    ingest_all(
+        &mut store,
+        s,
+        vec![
+            ev(
+                1,
+                "request/context",
+                json!({"provider": "p", "model": "m", "contextWindow": 100}),
+            ),
+            ev(2, "user/message", user_msg("m1", "hi", user_source())),
+            // Turn 1, step 1: usage with cached input.
+            ev(3, "step/start", json!({"turn": 1, "step": 1})),
+            ev(
+                4,
+                "assistant/message",
+                json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "a1", "role": "assistant",
+                        "content": [{"type": "text", "text": "ok"}],
+                        "source": {"kind": "model", "provider": "p", "model": "m"},
+                    },
+                    "usage": {"inputTokens": 10, "outputTokens": 5, "cacheReadTokens": 3},
+                }),
+            ),
+            // Turn 1, step 2: a tool step (no usage — tool steps don't
+            // bill the model) — distinct step, no token change.
+            ev(5, "step/start", json!({"turn": 1, "step": 2})),
+            ev(
+                6,
+                "tool/call",
+                json!({"turn": 1, "step": 2, "callId": "c1", "name": "bash", "arguments": "ls"}),
+            ),
+            ev(7, "step/end", json!({"turn": 1, "step": 2})),
+            // Turn 2, step 1: a second model call.
+            ev(8, "step/start", json!({"turn": 2, "step": 1})),
+            ev(
+                9,
+                "assistant/message",
+                json!({
+                    "turn": 2, "step": 1,
+                    "message": {
+                        "id": "a2", "role": "assistant",
+                        "content": [{"type": "text", "text": "again"}],
+                        "source": {"kind": "model", "provider": "p", "model": "m"},
+                    },
+                    "usage": {"inputTokens": 2, "outputTokens": 1},
+                }),
+            ),
+            // A newer context window wins over the earlier one.
+            ev(
+                10,
+                "request/context",
+                json!({"provider": "p", "model": "m", "contextWindow": 500}),
+            ),
+        ],
+    );
+    let stats = dsh_tui::store::session_stats(session_state(&store, s));
+    assert_eq!(stats.turns, 2, "two turns with model activity");
+    assert_eq!(stats.steps, 3, "two assistant steps + one tool step");
+    assert_eq!(stats.input_tokens, 12, "10 + 2");
+    assert_eq!(stats.output_tokens, 6, "5 + 1");
+    assert_eq!(stats.cache_read_tokens, 3);
+    assert_eq!(stats.cache_write_tokens, 0, "absent counts as zero");
+    assert_eq!(stats.context_window, Some(500), "the LAST context wins");
+}
+
+#[test]
+fn session_stats_hide_gracefully_without_usage_or_context() {
+    let mut store = SessionStore::new();
+    let s = "s1";
+    // A prompt-only session: a user message, no turn/step nodes at all.
+    store
+        .ingest(frame(
+            s,
+            ev(1, "user/message", user_msg("m1", "hi", user_source())),
+        ))
+        .unwrap();
+    let stats = dsh_tui::store::session_stats(session_state(&store, s));
+    assert_eq!(stats.turns, 0, "no model activity — no turn nodes");
+    assert_eq!(stats.steps, 0);
+    assert_eq!(stats.input_tokens, 0);
+    assert_eq!(stats.context_window, None, "never reported — hidden");
 }

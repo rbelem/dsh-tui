@@ -129,6 +129,7 @@ new events over the mux downlink.
 | `a` | archive the selected sidebar session |
 | `v` | arm mouse selection mode in the chat (`v select · esc cancel`; drag to select, release to copy) |
 | `i` | open the image viewer on the session's images (chat focus) |
+| `t` | toggle the tool details line (started/duration/schema) of the tool row in view (chat focus) |
 | `s` | toggle the narrow-terminal session drawer (below 80 columns) |
 | `q` | quit (chat or sidebar focus) |
 | `Ctrl+p` | launcher: fuzzy search over commands, cached skills, and settings actions |

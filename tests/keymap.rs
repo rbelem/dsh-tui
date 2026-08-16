@@ -30,6 +30,10 @@ fn defaults_match_the_builtin_bindings() {
     assert!(km.matches("theme-picker", ctrl(KeyCode::Char('t'))));
     assert!(km.matches("launcher", ctrl(KeyCode::Char('p'))));
     assert!(km.matches("queue", alt(KeyCode::Char('q'))));
+    assert!(km.matches("selection-toggle", key(KeyCode::Char('v'))));
+    assert!(km.matches("image-viewer", key(KeyCode::Char('i'))));
+    assert!(km.matches("tool-details", key(KeyCode::Char('t'))));
+    assert!(km.matches("drawer-toggle", key(KeyCode::Char('s'))));
     assert!(km.matches("composer.submit", key(KeyCode::Enter)));
     assert!(km.matches("composer.newline", shift(KeyCode::Enter)));
     assert!(km.matches("composer.backspace", key(KeyCode::Backspace)));

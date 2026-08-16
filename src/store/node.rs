@@ -93,6 +93,10 @@ pub struct ToolResultNode {
     /// `Some` when the `tool/call` event is in-window; `None` on a window cut.
     pub call: Option<ToolCallBackfill>,
     pub call_time: Option<f64>,
+    /// The result event's wall-clock time (#37): `call_time` → `result_time`
+    /// is the tool's duration. `None` on a synthesized (interrupted) result —
+    /// there is no real result event, so no duration is reported.
+    pub result_time: Option<f64>,
     pub content: Vec<ContentBlock>,
     pub is_error: bool,
     pub error: Option<ToolErrorIdentity>,

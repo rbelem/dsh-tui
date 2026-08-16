@@ -2067,6 +2067,68 @@ impl App {
             "status.focus",
             &[self.focus.label(self.locale)],
         )));
+        // #38/#39: the context meter + session stats bar ride the left
+        // cluster (the ≥80 tier — the tier that already shows seq/focus;
+        // narrower tiers drop them like the rest of the cluster). Both
+        // hide gracefully: the meter when the session never reported a
+        // context window or has no usage yet; the stats bar when the
+        // session has no turn/step nodes at all. Token metrics the event
+        // stream can't produce (LLM time, TTFT, tok/s) are simply absent.
+        if let Some(state) = self
+            .active_session
+            .as_ref()
+            .and_then(|session_id| self.store.session(session_id))
+        {
+            let stats = crate::store::session_stats(state);
+            let used = stats.input_tokens + stats.cache_read_tokens;
+            if let Some(window) = stats.context_window
+                && window > 0
+                && used > 0
+            {
+                let pct = (used as f64 * 100.0 / window as f64).floor() as i64;
+                parts.push(body(crate::i18n::trf(
+                    self.locale,
+                    "stats.ctx",
+                    &[&format!("{pct}%")],
+                )));
+            }
+            if stats.turns > 0 {
+                let mut cluster = format!(
+                    "{} · {}",
+                    crate::i18n::trf(self.locale, "stats.turns", &[&stats.turns.to_string()],),
+                    crate::i18n::trf(self.locale, "stats.steps", &[&stats.steps.to_string()]),
+                );
+                if stats.input_tokens + stats.output_tokens > 0 {
+                    cluster.push_str(" | ");
+                    cluster.push_str(&crate::i18n::trf(
+                        self.locale,
+                        "stats.input",
+                        &[&crate::render::chat_view::format_tokens(stats.input_tokens)],
+                    ));
+                    cluster.push_str(" · ");
+                    cluster.push_str(&crate::i18n::trf(
+                        self.locale,
+                        "stats.output",
+                        &[&crate::render::chat_view::format_tokens(
+                            stats.output_tokens,
+                        )],
+                    ));
+                    // Cache hit = cache reads / (cache reads + uncached
+                    // input) — the disjoint-count definition of the wire.
+                    let cache_base = stats.input_tokens + stats.cache_read_tokens;
+                    if cache_base > 0 {
+                        let pct = stats.cache_read_tokens * 100 / cache_base;
+                        cluster.push_str(" | ");
+                        cluster.push_str(&crate::i18n::trf(
+                            self.locale,
+                            "stats.cache",
+                            &[&format!("{pct}%")],
+                        ));
+                    }
+                }
+                parts.push(body(cluster));
+            }
+        }
         if let Some(hint) = &self.hint {
             parts.push(Span::styled(hint.clone(), style::hint(theme)));
         }
