@@ -561,6 +561,16 @@ impl App {
                 self.view.offset = total.saturating_sub(chat_height as usize);
             }
         }
+        // #33: fold state lives only for currently cached nodes — pruned
+        // when the node leaves the cache (removed, compacted, or an
+        // inactive session). The retain runs against the post-sync rows,
+        // so a toggle on a cached node always survives.
+        self.skill_folds.retain(|key, _| {
+            self.row_cache
+                .lines()
+                .iter()
+                .any(|row| row.node_key == *key)
+        });
         // #11 status line: two clusters — left context (session · seq ·
         // mode, muted separators), right state indicator. The right chunk is
         // sized to its content so it never wraps; the left absorbs all
