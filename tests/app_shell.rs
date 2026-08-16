@@ -205,8 +205,15 @@ async fn attach_history_draw_end_to_end() {
         let result = app.run(&mut term, &mut channel).await;
         (result, term)
     });
-    // Let the mock's scripted frames arrive and be drawn.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Deterministic arrival: wait until the mock has SENT all scripted
+    // mux frames, let the client read/forward tail settle, then an inert
+    // key forces the immediate draw pass before 'q' — no tick timing (this
+    // was a sleep-based flake under parallel load: a delayed tick left the
+    // streamed frame undrawn when 'q' captured the terminal).
+    mock.wait_for_ws_frames("/api/events.mux", 4).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    tx.send(AppEvent::Key(key(KeyCode::Char('x'))))
+        .expect("draw force");
     tx.send(AppEvent::Key(key(KeyCode::Char('q'))))
         .expect("quit key");
     let (result, term) = run_task.await.expect("run task");

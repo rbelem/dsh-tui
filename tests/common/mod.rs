@@ -151,6 +151,10 @@ pub struct MockGateway {
     /// already-connected subscriber, e.g. an approval trigger after boot).
     ws_pushers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
     ws_frames: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    /// How many scripted WS frames each path has SENT so far (the wait side
+    /// of `set_ws_frames` — deterministic on the serve side; the client's
+    /// read/forward tail still needs a short settle, like `wait_for_posts`).
+    ws_frames_served: Arc<Mutex<HashMap<String, usize>>>,
     /// WS paths whose scripted frames are followed by a clean socket close
     /// (the client's reconnect path; `ws-dies-mid-frame` fixtures).
     ws_close_after: Arc<Mutex<HashSet<String>>>,
@@ -179,6 +183,8 @@ impl MockGateway {
         let task_ws_close = Arc::clone(&ws_close_after);
         let ws_garbage = Arc::new(Mutex::new(HashSet::new()));
         let task_ws_garbage = Arc::clone(&ws_garbage);
+        let ws_frames_served = Arc::new(Mutex::new(HashMap::new()));
+        let task_ws_frames_served = Arc::clone(&ws_frames_served);
         let task_ws_frames = Arc::clone(&ws_frames);
         let task = tokio::spawn(async move {
             loop {
@@ -193,6 +199,7 @@ impl MockGateway {
                             Arc::clone(&task_history),
                             Arc::clone(&task_pushers),
                             Arc::clone(&task_ws_frames),
+                            Arc::clone(&task_ws_frames_served),
                             Arc::clone(&task_ws_close),
                             Arc::clone(&task_ws_garbage),
                         ));
@@ -207,6 +214,7 @@ impl MockGateway {
             history_fixtures,
             ws_pushers,
             ws_frames: Arc::clone(&ws_frames),
+            ws_frames_served,
             ws_close_after,
             ws_garbage,
             shutdown: Some(shutdown_tx),
@@ -294,6 +302,33 @@ impl MockGateway {
         }
     }
 
+    /// Wait until at least `count` scripted WS frames have been SENT on
+    /// `path`, with an absolute deadline (10s). Deterministic on the SERVE
+    /// side of a mux-frame push; the client's read/forward tail (frames
+    /// landing in the app's event channel) has no test-side observable —
+    /// tests that need it keep a short bounded wait after this, exactly
+    /// like `wait_for_posts`.
+    pub async fn wait_for_ws_frames(&self, path: &str, count: usize) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let served = self
+                .ws_frames_served
+                .lock()
+                .await
+                .get(path)
+                .copied()
+                .unwrap_or(0);
+            if served >= count {
+                return;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{path} scripted frames never served (wanted {count}, got {served})"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     pub async fn stop(self) {
         if let Some(tx) = self.shutdown {
             let _ = tx.send(());
@@ -325,6 +360,7 @@ async fn handle_connection(
     history_fixtures: Arc<Mutex<HashMap<String, String>>>,
     ws_pushers: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<String>>>>,
     ws_frames: Arc<Mutex<HashMap<String, Vec<String>>>>,
+    ws_frames_served: Arc<Mutex<HashMap<String, usize>>>,
     ws_close_after: Arc<Mutex<HashSet<String>>>,
     ws_garbage: Arc<Mutex<HashSet<String>>>,
 ) {
@@ -359,6 +395,11 @@ async fn handle_connection(
         ws_pushers.lock().await.insert(path.clone(), pusher_tx);
         for frame in frames {
             socket.send(Message::Text(frame)).await.unwrap();
+            *ws_frames_served
+                .lock()
+                .await
+                .entry(path.clone())
+                .or_insert(0) += 1;
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
         // `ws-dies-mid-frame` fixtures: close cleanly after the scripted
