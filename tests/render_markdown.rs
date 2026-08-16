@@ -673,14 +673,17 @@ fn tool_node_error_paths_render() {
         },
     );
 
-    // Expanded: the tool-call line truncates the long args; the error
-    // result appends the failed marker with the error code.
+    // Expanded: the tool-call line is bare `[tool] bash` — the raw JSON
+    // args never render — and the error result appends the failed marker
+    // with the error code.
     let expanded = render(&error_tool, false);
     assert!(
-        expanded
-            .iter()
-            .any(|l| l.contains("...") && l.contains("bash")),
-        "truncated args: {expanded:?}"
+        expanded.iter().any(|l| l.contains("[tool] bash")),
+        "bare tool line: {expanded:?}"
+    );
+    assert!(
+        !expanded.iter().any(|l| l.contains(&long_args)),
+        "raw args never render: {expanded:?}"
     );
     assert!(
         expanded

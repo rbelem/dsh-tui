@@ -1,6 +1,6 @@
 ---
 source: tests/render_snapshots.rs
-assertion_line: 421
+assertion_line: 454
 expression: "render_snapshot(&store, &mut cache, 120, 30, 2)"
 ---
 "                                                                                                                        "
@@ -13,7 +13,7 @@ expression: "render_snapshot(&store, &mut cache, 120, 30, 2)"
 "  | 1 | 2 |                                                                                                             "
 "  stale fresh                                                                                                           "
 "                                                                                                                        "
-"  [tool] read_file {"path":"/etc"}                                                                                      "
+"  [tool] read_file                                                                                                      "
 "  the /etc directory                                                                                                    "
 "                                                                                                                        "
 "  Hello world                                                                                                           "

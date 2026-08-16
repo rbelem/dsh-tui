@@ -38,9 +38,6 @@ use crate::store::event_data::ContentBlock;
 use crate::store::node::{AssistantBlock, ChatNode, NodeData, NodeKey};
 use crate::theme::Theme;
 
-/// Maximum width of a tool-arguments preview on the call line.
-const ARGS_PREVIEW_MAX: usize = 100;
-
 /// Zero-width marker wrapping a link's URL inside its span content:
 /// `ZWSP url ZWSP text`. See the module docs (OSC 8 hyperlinks, #2).
 pub const LINK_PREFIX: char = '\u{200B}';
@@ -293,8 +290,8 @@ fn render_assistant_block(
             ctx,
             skill_fold,
         ),
-        AssistantBlock::ToolCall { name, args_raw, .. } => (
-            vec![tool_call_line(name, args_raw, ctx.theme, ctx.locale)],
+        AssistantBlock::ToolCall { name, .. } => (
+            vec![tool_call_line(name, ctx.theme, ctx.locale)],
             Vec::new(),
             None,
         ),
@@ -415,7 +412,6 @@ fn render_tool_node(
         .map(|c| c.name.as_str())
         .or_else(|| result.and_then(|r| r.call.as_ref().map(|c| c.name.as_str())))
         .unwrap_or("tool");
-    let args_raw = call.map(|c| c.args_raw.as_str()).unwrap_or_default();
 
     if collapsed {
         // One-line summary (lifecycle icon + title, Q11).
@@ -440,24 +436,53 @@ fn render_tool_node(
         );
     }
 
-    let mut lines = vec![tool_call_line(name, args_raw, theme, locale)];
+    let mut lines = vec![tool_call_line(name, theme, locale)];
     let mut code_ranges = Vec::new();
     let mut skill_header = None;
     if let Some(result) = result {
-        let (result_lines, result_ranges, result_skill) = render_content_blocks(
-            &result.content,
-            Style::default().fg(theme.text),
-            ctx,
-            image_rows,
-            skill_fold,
-        );
-        code_ranges.extend(
-            result_ranges
-                .into_iter()
-                .map(|(start, end)| (start + lines.len(), end + lines.len())),
-        );
-        skill_header = result_skill.map(|line| line + lines.len());
-        lines.extend(result_lines);
+        // The tool OUTPUT is literal: a code block (panel-bg fill, syntax
+        // highlight for known tool languages) — never markdown, so bash
+        // output with `*`, backticks, or [brackets] stays byte-identical.
+        // Exotic results (image/reasoning blocks) keep the markdown path.
+        let all_text = !result.content.is_empty()
+            && result
+                .content
+                .iter()
+                .all(|b| matches!(b, ContentBlock::Text { .. }));
+        if all_text {
+            let mut text = String::new();
+            for block in &result.content {
+                if let ContentBlock::Text { text: part } = block {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(part);
+                }
+            }
+            let start = lines.len();
+            lines.extend(code_block_lines(&text, tool_language(name), theme));
+            let end = lines.len();
+            if end > start {
+                code_ranges.push((start, end));
+                // #11: 1 blank row after the block.
+                lines.push(Line::raw(""));
+            }
+        } else if !result.content.is_empty() {
+            let (result_lines, result_ranges, result_skill) = render_content_blocks(
+                &result.content,
+                Style::default().fg(theme.text),
+                ctx,
+                image_rows,
+                skill_fold,
+            );
+            code_ranges.extend(
+                result_ranges
+                    .into_iter()
+                    .map(|(start, end)| (start + lines.len(), end + lines.len())),
+            );
+            skill_header = result_skill.map(|line| line + lines.len());
+            lines.extend(result_lines);
+        }
         if result.is_error {
             let code = result
                 .error
@@ -473,37 +498,21 @@ fn render_tool_node(
     (lines, code_ranges, skill_header)
 }
 
-fn tool_call_line(name: &str, args_raw: &str, theme: &Theme, locale: Locale) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        format!("{} {name}", tr(locale, "marker.tool")),
-        Style::default().fg(theme.text),
-    )];
-    if !args_raw.is_empty() {
-        let preview = truncate_width(args_raw, ARGS_PREVIEW_MAX);
-        spans.push(Span::styled(
-            format!(" {preview}"),
-            Style::default().fg(theme.muted).add_modifier(Modifier::DIM),
-        ));
+/// The syntect language for a tool's output. Known tools map to a grammar
+/// (bash → shell); everything else renders plain — the `code` token with
+/// the panel-bg fill, exactly like an unfenced block.
+fn tool_language(name: &str) -> Option<&'static str> {
+    match name {
+        "bash" | "sh" | "shell" => Some("bash"),
+        _ => None,
     }
-    Line::from(spans)
 }
 
-/// Unicode-width-aware truncation with an ASCII ellipsis.
-fn truncate_width(text: &str, max: usize) -> String {
-    if UnicodeWidthStr::width(text) <= max {
-        return text.to_string();
-    }
-    let mut out = String::new();
-    let mut width = 0usize;
-    for ch in text.chars() {
-        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + w + 3 > max {
-            break;
-        }
-        out.push(ch);
-        width += w;
-    }
-    format!("{out}...")
+fn tool_call_line(name: &str, theme: &Theme, locale: Locale) -> Line<'static> {
+    Line::styled(
+        format!("{} {name}", tr(locale, "marker.tool")),
+        Style::default().fg(theme.text),
+    )
 }
 
 // ---------------------------------------------------------------------------
