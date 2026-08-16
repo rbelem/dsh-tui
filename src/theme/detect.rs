@@ -3,6 +3,10 @@
 //! never blocking longer than ~150ms; all `None` → the caller keeps its
 //! fallback default.
 //!
+//! Also hosts color-capability detection (#4): [`ColorLevel`] (env-only, no
+//! terminal queries) and [`best_color`], which snaps an RGB color to the
+//! nearest xterm-256 index or 16-color named color the terminal can render.
+//!
 //! The OSC 11 layer is interactive-safe: it opens `/dev/tty` non-blocking
 //! and polls with a deadline, so it NEVER leaves a reader thread blocking
 //! the terminal (which would steal keystrokes from crossterm's input
@@ -14,6 +18,8 @@
 
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
+
+use ratatui::style::Color;
 
 /// The detected color scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,4 +360,138 @@ fn desktop_signal() -> Option<ColorMode> {
 #[cfg(target_os = "windows")]
 fn desktop_signal() -> Option<ColorMode> {
     None
+}
+
+// ---------------------------------------------------------------------------
+// color capability + palette snapping (#4)
+// ---------------------------------------------------------------------------
+
+/// The terminal's color capability, coarse-grained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorLevel {
+    /// Truecolor (`COLORTERM=truecolor|24bit`): RGB is sent as-is.
+    TrueColor,
+    /// 256 colors (`COLORTERM=256color` or `TERM=*-256color`): RGB snaps to
+    /// the nearest xterm-256 index.
+    Ansi256,
+    /// 16 colors (anything else): RGB snaps to a minimal named palette.
+    Ansi16,
+}
+
+/// Detect the color level from `COLORTERM`/`TERM` — env-only, no OSC
+/// queries (terminal probing belongs to light/dark detection, not here).
+pub fn detect_color_level() -> ColorLevel {
+    match std::env::var("COLORTERM").as_deref() {
+        Ok("truecolor") | Ok("24bit") => ColorLevel::TrueColor,
+        Ok("256color") => ColorLevel::Ansi256,
+        _ => {
+            if std::env::var("TERM").is_ok_and(|term| term.contains("256color")) {
+                ColorLevel::Ansi256
+            } else {
+                ColorLevel::Ansi16
+            }
+        }
+    }
+}
+
+/// Snap an RGB color to what the terminal can actually render. Truecolor
+/// passes through unchanged; 256-color picks the nearest xterm cube/gray
+/// index; 16-color picks the nearest named ANSI color.
+pub fn best_color(rgb: (u8, u8, u8), level: ColorLevel) -> Color {
+    match level {
+        ColorLevel::TrueColor => Color::Rgb(rgb.0, rgb.1, rgb.2),
+        ColorLevel::Ansi256 => {
+            let target = lab(rgb);
+            let (index, _) = xterm256_palette()
+                .into_iter()
+                .map(|(i, c)| (i, cie76(target, lab(c))))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .expect("the xterm palette is non-empty");
+            Color::Indexed(index)
+        }
+        ColorLevel::Ansi16 => {
+            let target = lab(rgb);
+            let (color, _) = ANSI16
+                .iter()
+                .map(|(color, c)| (*color, cie76(target, lab(*c))))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .expect("the 16-color palette is non-empty");
+            color
+        }
+    }
+}
+
+/// The 16-color fallback: ratatui's named colors with xterm-ish
+/// representatives (205 = xterm's red3-style "bright" channel, 128/85 the
+/// standard gray pair). Always snaps — a theme that explicitly requested
+/// colors should never silently lose them to `Reset` (the "too far →
+/// default" alternative was rejected for exactly that reason).
+const ANSI16: &[(Color, (u8, u8, u8))] = &[
+    (Color::Black, (0, 0, 0)),
+    (Color::Red, (205, 0, 0)),
+    (Color::Green, (0, 205, 0)),
+    (Color::Yellow, (205, 205, 0)),
+    (Color::Blue, (0, 0, 205)),
+    (Color::Magenta, (205, 0, 205)),
+    (Color::Cyan, (0, 205, 205)),
+    (Color::Gray, (128, 128, 128)),
+    (Color::DarkGray, (85, 85, 85)),
+    (Color::White, (255, 255, 255)),
+];
+
+/// The 240 fixed xterm colors (indices 16–255): the 6×6×6 cube plus the 24
+/// grays, computed rather than pasted. The 16 system colors are excluded —
+/// they are terminal-defined.
+fn xterm256_palette() -> Vec<(u8, (u8, u8, u8))> {
+    let cube_level = |n: u8| if n == 0 { 0 } else { 55 + 40 * n };
+    let mut palette = Vec::with_capacity(240);
+    for r in 0..6 {
+        for g in 0..6 {
+            for b in 0..6 {
+                palette.push((
+                    16 + r * 36 + g * 6 + b,
+                    (cube_level(r), cube_level(g), cube_level(b)),
+                ));
+            }
+        }
+    }
+    for i in 0..24 {
+        let v = 8 + 10 * i;
+        palette.push((232 + i, (v, v, v)));
+    }
+    palette
+}
+
+/// sRGB → CIELAB (D65), so [`best_color`] can rank candidates by CIE76
+/// perceptual distance (Euclidean in Lab).
+fn lab((r, g, b): (u8, u8, u8)) -> (f64, f64, f64) {
+    let linear = |c: u8| {
+        let c = c as f64 / 255.0;
+        if c > 0.04045 {
+            ((c + 0.055) / 1.055).powf(2.4)
+        } else {
+            c / 12.92
+        }
+    };
+    let (r, g, b) = (linear(r), linear(g), linear(b));
+    // sRGB (D65) → XYZ.
+    let x = 0.4124564 * r + 0.3575761 * g + 0.1804375 * b;
+    let y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
+    let z = 0.0193339 * r + 0.1191920 * g + 0.9503041 * b;
+    let f = |t: f64| {
+        const D: f64 = 6.0 / 29.0;
+        if t > D * D * D {
+            t.cbrt()
+        } else {
+            t / (3.0 * D * D) + 4.0 / 29.0
+        }
+    };
+    let (fx, fy, fz) = (f(x / 0.95047), f(y), f(z / 1.08883));
+    (116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz))
+}
+
+/// CIE76 distance: Euclidean in CIELAB.
+fn cie76(a: (f64, f64, f64), b: (f64, f64, f64)) -> f64 {
+    let (dl, da, db) = (a.0 - b.0, a.1 - b.1, a.2 - b.2);
+    (dl * dl + da * da + db * db).sqrt()
 }

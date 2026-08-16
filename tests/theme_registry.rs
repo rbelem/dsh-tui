@@ -571,12 +571,16 @@ fn config_write_read_back_and_apply() {
         );
 
         // Without truecolor, the config theme is not applied (terminal-
-        // following default stays).
+        // following default stays). TERM is pinned to a plain value: a
+        // `*-256color` TERM would qualify as a palette-capable terminal
+        // (#4) and legitimately apply the snapped theme.
         let mut app = App::default();
         with_env_var("DSH_THEME", None, || {
             with_env_var("COLORTERM", None, || {
-                assert!(!terminal_supports_color());
-                app.load_theme_config();
+                with_env_var("TERM", Some("xterm"), || {
+                    assert!(!terminal_supports_color());
+                    app.load_theme_config();
+                });
             });
         });
         assert_eq!(

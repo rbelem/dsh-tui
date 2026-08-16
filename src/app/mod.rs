@@ -35,7 +35,8 @@ use crate::client::{ClientError, WireClient};
 use crate::render::row_cache::RowCache;
 use crate::store::node::{NodeData, NodeKey};
 use crate::store::{SessionStore, StoreError};
-use crate::theme::{Config, terminal_supports_color};
+use crate::theme::Config;
+use crate::theme::detect::{ColorLevel, detect_color_level};
 use crate::ui::composer::Composer;
 use crate::ui::sidebar::SidebarState;
 use crate::ui::takeover::{ApprovalTakeover, Mode, QuestionTakeover};
@@ -1036,7 +1037,7 @@ impl App {
         let Some(theme) = self.themes.themes.get(self.theme_picker.selected) else {
             return;
         };
-        self.theme = theme.clone();
+        self.theme = theme.snapped(detect_color_level());
         self.config.theme = Some(theme.name.clone());
         if let Err(error) = self.config.save() {
             self.set_toast(crate::i18n::trf(
@@ -1050,19 +1051,25 @@ impl App {
     }
 
     /// Startup theme resolution: load user themes, then apply the persisted
-    /// config theme when the terminal can render palettes (truecolor
-    /// `COLORTERM`). `DSH_THEME=<name>` beats the persisted config (the
-    /// tmux/herdr + testing escape hatch; an unknown name applies nothing —
-    /// same contract as a bad config theme).
+    /// config theme when the terminal can render palettes (truecolor or
+    /// 256-color `COLORTERM`; #4 snaps RGB to the terminal's palette on
+    /// 256-color, and 16-color terminals keep the Reset default). `DSH_THEME=<name>`
+    /// beats the persisted config (the tmux/herdr + testing escape hatch;
+    /// an unknown name applies nothing — same contract as a bad config theme).
     ///
     /// With no explicit theme, the detected terminal/system light/dark
     /// scheme picks the default — `dsh-dark` (dark or detection failure)
     /// or `dsh-light`. The all-`Reset` terminal-following default only
-    /// remains for non-truecolor terminals or an explicit `default` name
-    /// (the pre-#11 look, opt-in).
+    /// remains for 16-color terminals or an explicit `default` name (the
+    /// pre-#11 look, opt-in).
     pub fn load_theme_config(&mut self) {
         self.themes.load_user_dir();
         self.config = Config::load();
+        // #4: palette themes render on truecolor (RGB as-is) and 256-color
+        // (RGB snapped to the nearest xterm index); 16-color terminals keep
+        // the Reset-based default.
+        let level = detect_color_level();
+        let palette_ok = level != ColorLevel::Ansi16;
         // `DSH_THEME` (when set and non-empty) beats config.toml; naming
         // the unregistered `default` keeps the Reset-based neutral.
         let explicit = std::env::var("DSH_THEME")
@@ -1071,20 +1078,20 @@ impl App {
             .or_else(|| self.config.theme.clone());
         if let Some(name) = &explicit
             && let Some(theme) = self.themes.find(name)
-            && terminal_supports_color()
+            && palette_ok
         {
-            self.theme = theme.clone();
-        } else if explicit.is_none() && terminal_supports_color() {
+            self.theme = theme.snapped(level);
+        } else if explicit.is_none() && palette_ok {
             // No explicit theme: pick by the detected scheme. A failed
-            // detection on a truecolor terminal defaults to dsh-dark —
-            // never the all-Reset theme (issue #11: OSC 11 unanswered
-            // left the app monochrome).
+            // detection on a color terminal defaults to dsh-dark — never
+            // the all-Reset theme (issue #11: OSC 11 unanswered left the
+            // app monochrome).
             let name = match crate::theme::detect::detect_color_mode() {
                 Some(crate::theme::detect::ColorMode::Light) => "dsh-light",
                 Some(crate::theme::detect::ColorMode::Dark) | None => "dsh-dark",
             };
             if let Some(theme) = self.themes.find(name) {
-                self.theme = theme.clone();
+                self.theme = theme.snapped(level);
             }
         }
     }

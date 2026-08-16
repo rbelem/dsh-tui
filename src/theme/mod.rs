@@ -5,8 +5,10 @@
 //! `code`/`bg`/`text`, plus the #11 additions `panel_bg`/`border` and the
 //! user-message tint `user_bg`. The
 //! default theme is terminal-following — every token is `Reset`, preserving
-//! the modifiers-only look; palette themes render only on terminals that
-//! report truecolor ([`terminal_supports_color`]).
+//! the modifiers-only look; palette themes render on truecolor terminals
+//! (RGB as-is) and 256-color terminals (RGB snapped to the nearest xterm
+//! index via [`detect::best_color`], #4). 16-color terminals keep the
+//! Reset-based default.
 //!
 //! Bundled themes live in `themes/*.toml` (embedded via `include_str!`); user
 //! themes live in `$XDG_CONFIG_HOME/dsh-tui/themes/*.toml` (or
@@ -15,7 +17,7 @@
 //! `$XDG_CONFIG_HOME/dsh-tui/config.toml` (`theme = "name"`).
 //!
 //! With no explicit theme, [`detect::detect_color_mode`] picks the startup
-//! default on truecolor terminals: `dsh-dark` for dark schemes (and for
+//! default on color terminals: `dsh-dark` for dark schemes (and for
 //! detection failures — issue #11: OSC 11 unanswered must never leave the
 //! app monochrome), `dsh-light` for light ones (OSC 11 terminal query, then
 //! env signals, then desktop settings). `DSH_THEME=<name>` beats the
@@ -121,6 +123,32 @@ impl Theme {
                 None => None,
             },
         })
+    }
+
+    /// Snap every RGB token to what the terminal can actually render
+    /// ([`detect::best_color`]), leaving non-RGB tokens (`Reset`, `Indexed`)
+    /// untouched. Applied when a theme is resolved for the app (#4) — the
+    /// registry keeps the exact RGB values, so the picker preview and user
+    /// themes stay faithful on truecolor terminals.
+    pub fn snapped(&self, level: detect::ColorLevel) -> Theme {
+        let snap = |color: Color| match color {
+            Color::Rgb(r, g, b) => detect::best_color((r, g, b), level),
+            other => other,
+        };
+        Theme {
+            name: self.name.clone(),
+            accent: snap(self.accent),
+            muted: snap(self.muted),
+            error: snap(self.error),
+            warning: snap(self.warning),
+            success: snap(self.success),
+            code: snap(self.code),
+            bg: snap(self.bg),
+            text: snap(self.text),
+            panel_bg: snap(self.panel_bg),
+            border: snap(self.border),
+            user_bg: self.user_bg.map(snap),
+        }
     }
 }
 
