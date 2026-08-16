@@ -828,6 +828,117 @@ async fn no_session_attach_renders_empty_chat() {
 }
 
 // ---------------------------------------------------------------------------
+// 5b. follow-mode bottom clamp with a trailing code block (#18)
+// ---------------------------------------------------------------------------
+
+/// Regression pin (#18): a message ending in a fenced code block carries
+/// its own trailing blank (markdown-level) — follow mode must stay clamped
+/// to the exact content bottom (total − content height) and the LAST
+/// cached line must be the code text, not a stray blank pushed onto the
+/// last row by a partial re-render.
+#[tokio::test]
+async fn follow_clamps_with_a_trailing_code_block() {
+    let mut app = App::default();
+    app.focus = Focus::Chat; // 'x'/'q' chat keys (boot is Composer)
+    app.active_session = Some(SessionId("s1".into()));
+    let backend = TestBackend::new(100, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, term, app)
+    });
+    // 20 one-line messages, then a message ending in a code block.
+    for seq in 1..=20 {
+        tx.send(AppEvent::Frame(frame(
+            "s1",
+            ev(seq, "user/message", user_msg(&format!("m{seq}"), "hi")),
+        )))
+        .expect("frame");
+    }
+    tx.send(AppEvent::Frame(frame(
+        "s1",
+        ev(
+            21,
+            "user/message",
+            user_msg("m21", "before\n```rust\nfn main() {}\n```"),
+        ),
+    )))
+    .expect("frame");
+    // The inert key forces the clamp draw deterministically (no tick
+    // timing), then q quits.
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, mut term, mut app) = run_task.await.expect("run task");
+    result.expect("run");
+
+    assert!(app.view.follow, "follow stays on");
+    let total: usize = app
+        .row_cache
+        .lines()
+        .iter()
+        .map(|row| row.lines.len())
+        .sum();
+    // Chat pane at 100x24: 24 − composer 2 − status 1 − top blank 1 = 20.
+    assert_eq!(
+        app.view.offset,
+        total.saturating_sub(20),
+        "clamped to the exact content bottom (total={total})"
+    );
+    // The code-block message renders as exactly 4 lines — before, blank,
+    // code, blank — with its single intentional trailing blank. A stray
+    // mid-stream re-render blank would push it to 5 (or double the final
+    // blank) and shift the bottom clamp by one.
+    let last_row = app.row_cache.lines().last().expect("last row");
+    assert_eq!(last_row.lines.len(), 4, "no stray blank appended");
+    assert_eq!(
+        last_row.lines[2].to_string(),
+        "fn main() {}",
+        "the code line is third"
+    );
+    assert!(
+        last_row.lines[3].to_string().trim().is_empty(),
+        "the code block's single trailing blank closes the row"
+    );
+    // The full history: 20 messages × (line + between-blank — the final
+    // one gains its blank once the code message lands) + the 4-line code
+    // message.
+    assert_eq!(total, 20 * 2 + 4, "exact total line count");
+
+    // New content re-clamps to the new bottom (still follow).
+    term.backend_mut().resize(100, 24);
+    app.running = true;
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, term, app)
+    });
+    tx.send(AppEvent::Frame(frame(
+        "s1",
+        ev(22, "user/message", user_msg("m22", "after")),
+    )))
+    .expect("frame");
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, _term, app) = run_task.await.expect("run task");
+    result.expect("run");
+    let total: usize = app
+        .row_cache
+        .lines()
+        .iter()
+        .map(|row| row.lines.len())
+        .sum();
+    assert_eq!(
+        app.view.offset,
+        total.saturating_sub(20),
+        "re-clamped to the new bottom (total={total})"
+    );
+    assert!(app.view.follow, "follow persists");
+}
+
+// ---------------------------------------------------------------------------
 // 6. resize
 // ---------------------------------------------------------------------------
 

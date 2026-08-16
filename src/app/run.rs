@@ -39,6 +39,11 @@ use crate::wire::session::{
 };
 use crate::wire::skills::SkillListValue;
 
+/// #15: the running-spinner braille frames, cycled per tick in the status
+/// line's right cluster while a session runs (all 1 cell wide — no layout
+/// shift; glyphs, not strings — i18n-safe).
+pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// #19: truncate `text` to `max` display cells, appending a `…` ellipsis
 /// (CJK-safe: cut by cell width, never splitting a wide char).
 fn truncate_ellipsis(text: &str, max: usize) -> String {
@@ -56,6 +61,19 @@ fn truncate_ellipsis(text: &str, max: usize) -> String {
         width += w;
     }
     format!("{out}…")
+}
+
+/// #26: the responsive tier of a terminal width — 0: too-small (<32),
+/// 1: drawer (32–79), 2: wide (≥80). A drawer state is only meaningful
+/// inside tier 1; tier transitions close it.
+fn drawer_tier(width: u16) -> u8 {
+    if width < crate::app::TOO_SMALL_WIDTH {
+        0
+    } else if width < 80 {
+        1
+    } else {
+        2
+    }
 }
 
 impl App {
@@ -262,12 +280,17 @@ impl App {
                             self.drain_attachment_needs(event_tx.clone());
                         }
                         Some(AppEvent::Resize(width, height)) => {
-                            // Q10: width change → full re-render. #19: an
-                            // open drawer never leaks across the tier
-                            // boundary — at ≥80 nothing paints it, so it
-                            // must not swallow keys either (close + restore
-                            // the prior focus).
-                            if width >= 80 && self.drawer_open {
+                            // Q10: width change → full re-render. #26: an
+                            // open drawer never survives a tier-CHANGING
+                            // resize in either direction (the tiers: <32
+                            // too-small, 32–79 drawer, ≥80 wide) — close
+                            // + restore the prior focus so no stale drawer
+                            // state leaks across a boundary (<32
+                            // round-trips included; same-tier resizes keep
+                            // the drawer).
+                            if drawer_tier(width) != drawer_tier(self.terminal_width)
+                                && self.drawer_open
+                            {
                                 self.close_drawer();
                             }
                             self.view.viewport_height = height;
@@ -300,6 +323,7 @@ impl App {
                         Some(AppEvent::Tick) => {
                             self.expire_toast();
                             self.expire_copied_flash();
+                            self.advance_spinner();
                             self.draw_if_due(term, false)?;
                         }
                         None => break,
@@ -308,6 +332,7 @@ impl App {
                 _ = tick.tick() => {
                     self.expire_toast();
                     self.expire_copied_flash();
+                    self.advance_spinner();
                     self.draw_if_due(term, false)?;
                 }
             }
@@ -736,6 +761,9 @@ impl App {
                 vertical: 0,
             });
             if size.width < 40 {
+                // #30: below 40 the left cluster is hidden, so no status
+                // hint can render here — the `≡` affordance at the chat's
+                // top-left is the drawer's discoverability path at 32–39.
                 frame.render_widget(
                     Paragraph::new(Line::from(status_right)).right_aligned(),
                     status_area,
@@ -744,21 +772,38 @@ impl App {
                 let [status_left_area, status_right_area] =
                     Layout::horizontal([Constraint::Fill(1), Constraint::Length(status_width)])
                         .areas(status_area);
+                // #30: while the drawer is open it covers the status row's
+                // left edge (full height) — shift the left cluster past its
+                // right edge so the drawer hint stays visible.
+                let left_area = if self.drawer_open {
+                    Rect {
+                        x: status_left_area.x + size.width.min(30),
+                        ..status_left_area
+                    }
+                } else {
+                    status_left_area
+                };
                 let left_line = if size.width < 80 {
                     // The session-id-only cluster: the first span (the
                     // session line), truncated with `…` to fit the left
-                    // area — seq/mode/hint/toast are dropped below 80.
-                    let span = status_left
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| Span::raw(""));
-                    let text =
-                        truncate_ellipsis(span.content.as_ref(), status_left_area.width as usize);
+                    // area — seq/mode/toast are dropped below 80. #30: a
+                    // live hint (the drawer's `s sessions · esc close`)
+                    // takes the slot while the drawer is open.
+                    let span = match &self.hint {
+                        Some(hint) => {
+                            Span::styled(hint.clone(), crate::ui::style::hint(&self.theme))
+                        }
+                        None => status_left
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| Span::raw("")),
+                    };
+                    let text = truncate_ellipsis(span.content.as_ref(), left_area.width as usize);
                     Line::from(Span::styled(text, span.style))
                 } else {
                     Line::from(status_left)
                 };
-                frame.render_widget(Paragraph::new(left_line), status_left_area);
+                frame.render_widget(Paragraph::new(left_line), left_area);
                 frame.render_widget(
                     Paragraph::new(Line::from(status_right)).right_aligned(),
                     status_right_area,
@@ -1878,7 +1923,12 @@ impl App {
         let indicator = if self.last_error.is_some() {
             ("✕", Style::default().fg(theme.error))
         } else if self.session_running() {
-            ("⠋", style::active(theme))
+            // #15: the animated braille spinner (the frame advances per
+            // tick while busy; idle draws nothing).
+            (
+                SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()],
+                style::active(theme),
+            )
         } else if truncated {
             ("△", style::warning(theme))
         } else {

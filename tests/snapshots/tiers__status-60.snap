@@ -1,0 +1,20 @@
+---
+source: tests/tiers.rs
+assertion_line: 250
+expression: "format!(\"{}\", term.backend())"
+---
+"≡                                                           "
+"  hi                                                        "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"                                                            "
+"────────────────────────────────────────────────────────────"
+"  type a message — enter to send                            "
+" session s1                                               ● "

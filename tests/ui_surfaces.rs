@@ -326,7 +326,8 @@ async fn status_indicators_carry_semantic_colors() {
         let y = 14u16; // status row (chat 12 + composer 2 + status 1)
         for x in 0..100u16 {
             if let Some(cell) = buffer.cell((x, y))
-                && matches!(cell.symbol(), "●" | "⠋" | "✕" | "△")
+                && (matches!(cell.symbol(), "●" | "✕" | "△")
+                    || dsh_tui::app::run::SPINNER_FRAMES.contains(&cell.symbol()))
             {
                 return (cell.symbol().to_string(), cell.fg);
             }
@@ -344,14 +345,18 @@ async fn status_indicators_carry_semantic_colors() {
     assert_eq!(glyph, "●");
     assert_eq!(fg, dark.success, "idle indicator = success");
 
-    // Running: ⠋ in accent.
+    // Running: a braille spinner frame in accent (#15 animates the frame
+    // per tick; any frame is a valid running indicator).
     let mut app = App::default();
     app.theme = dark.clone();
     app.sessions = vec![summary("s1", true)];
     app.active_session = Some(SessionId("s1".into()));
     app.focus = Focus::Chat;
     let (glyph, fg) = indicator_cell(&mut app).await;
-    assert_eq!(glyph, "⠋");
+    assert!(
+        dsh_tui::app::run::SPINNER_FRAMES.contains(&glyph.as_str()),
+        "running indicator is a spinner frame: {glyph:?}"
+    );
     assert_eq!(fg, dark.accent, "running indicator = accent");
 
     // Error: ✕ in error (beats the running spinner).

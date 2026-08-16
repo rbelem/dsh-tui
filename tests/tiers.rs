@@ -233,6 +233,8 @@ fn status_row(term: &Terminal<TestBackend>) -> String {
 
 #[tokio::test]
 async fn status_at_60_is_session_id_only() {
+    // #29: insta-pinned — the session-id-only left cluster + the full
+    // indicator cluster at 60 cols.
     let mut app = app_with_session();
     app.store
         .ingest(frame("s1", ev(1, "user/message", user_msg("m1", "hi"))))
@@ -245,23 +247,13 @@ async fn status_at_60_is_session_id_only() {
         vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
     )
     .await;
-    let status = status_row(&term);
-    assert!(
-        status.starts_with("session s1"),
-        "#19: session-id-only left at 60: {status:?}"
-    );
-    assert!(
-        status.ends_with('●'),
-        "full indicator cluster at 60: {status:?}"
-    );
-    assert!(
-        !status.contains("seq") && !status.contains("focus"),
-        "no seq/mode at 60: {status:?}"
-    );
+    insta::assert_snapshot!("status-60", format!("{}", term.backend()));
 }
 
 #[tokio::test]
 async fn status_at_39_is_indicators_only() {
+    // #29: insta-pinned — at 39 cols the left cluster is hidden; only the
+    // right indicator cluster renders.
     let mut app = app_with_session();
     app.store
         .ingest(frame("s1", ev(1, "user/message", user_msg("m1", "hi"))))
@@ -274,8 +266,7 @@ async fn status_at_39_is_indicators_only() {
         vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
     )
     .await;
-    let status = status_row(&term);
-    assert_eq!(status, "●", "#19: indicators only at 39: {status:?}");
+    insta::assert_snapshot!("status-39", format!("{}", term.backend()));
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +404,7 @@ async fn wide_tier_keeps_the_permanent_sidebar() {
         "s is a no-op at ≥80"
     );
     assert!(!app.drawer_open);
+    assert_eq!(app.hint, None, "#30: no drawer hint at ≥80");
     // The affordance does not render.
     assert!(!view.contains('≡'), "no affordance at ≥80: {view}");
 }
@@ -825,6 +817,292 @@ fn wheel_down(column: u16, row: u16) -> AppEvent {
         row,
         modifiers: KeyModifiers::NONE,
     })
+}
+
+/// #26: every tier-CHANGING resize closes the drawer — the <32
+/// round-trip included (70 → 31 → 70 leaves no stale drawer state).
+#[tokio::test]
+async fn drawer_closes_on_the_too_small_round_trip() {
+    let mut app = app_with_session();
+    let backend = TestBackend::new(70, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            AppEvent::Key(key(KeyCode::Char('s'))), // open the drawer
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(app.drawer_open, "drawer open at 70");
+
+    // Shrink below 32: a tier-changing resize closes the drawer.
+    term.backend_mut().resize(31, 10);
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Resize(31, 10),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(!app.drawer_open, "70 → 31 closed the drawer");
+    assert_eq!(app.focus, Focus::Chat, "focus restored");
+
+    // Grow back into the drawer tier: no stale state reappears.
+    term.backend_mut().resize(70, 24);
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Resize(70, 24),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(!app.drawer_open, "31 → 70 stays closed");
+    // The drawer is still reachable: `s` opens it fresh.
+    app.focus = Focus::Chat;
+    assert_eq!(app.handle_key(key(KeyCode::Char('s'))), Some(Action::None));
+    assert!(app.drawer_open, "s reopens the drawer after the round-trip");
+}
+
+/// #26: a same-tier resize keeps the drawer open (no boundary crossed).
+#[tokio::test]
+async fn same_tier_resize_keeps_the_drawer() {
+    let mut app = app_with_session();
+    let backend = TestBackend::new(70, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            AppEvent::Key(key(KeyCode::Char('s'))), // open the drawer
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(app.drawer_open);
+
+    // 70 → 60: still the drawer tier — the drawer survives the resize.
+    term.backend_mut().resize(60, 24);
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Resize(60, 24),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(app.drawer_open, "same-tier resize keeps the drawer");
+    assert_eq!(app.focus, Focus::Sidebar, "drawer still owns focus");
+}
+
+/// #15: the running spinner animates on ticks (the frame counter advances
+/// per tick and the status glyph is a pure function of it — the
+/// wall-clock repaint cadence is the existing DRAW_INTERVAL budget, so the
+/// deterministic pins are the counter and the idle quiescence: idle ticks
+/// schedule no repaints).
+#[tokio::test]
+async fn spinner_animates_while_running_and_stays_quiet_when_idle() {
+    let mut app = app_with_session();
+    app.sessions[0].running = true;
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            AppEvent::Tick,
+            AppEvent::Tick,
+            AppEvent::Tick,
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    // The frame advanced on each tick (10-frame cycle).
+    assert_eq!(app.spinner_frame, 3, "frame advances per tick");
+    // The glyph the status line shows is a pure function of the frame.
+    let frame = dsh_tui::app::run::SPINNER_FRAMES[app.spinner_frame % 10];
+    assert!(!frame.is_empty(), "a spinner frame is selected");
+
+    // Idle (no running session): ticks advance the counter but schedule
+    // no repaints — draws stay at exactly the one F(1) forced.
+    let mut app = app_with_session();
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            AppEvent::Tick,
+            AppEvent::Tick,
+            AppEvent::Tick,
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert_eq!(app.spinner_frame, 3, "counter advances regardless");
+    assert_eq!(app.draws, 1, "idle ticks schedule no repaint");
+}
+
+/// #30: the drawer discoverability hint — appears on the FIRST open of
+/// the run (in the compact status left cluster), clears on close, and
+/// never nags on subsequent opens.
+#[tokio::test]
+async fn drawer_hint_shows_once_and_clears_on_close() {
+    let mut app = app_with_session();
+    let backend = TestBackend::new(70, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            AppEvent::Key(key(KeyCode::Char('s'))), // first open
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(
+        view.contains("s sessions · esc close"),
+        "first open shows the hint: {view}"
+    );
+
+    // Close clears the hint.
+    app.focus = Focus::Chat;
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.drawer_open);
+    assert_eq!(app.hint, None, "hint cleared on close");
+
+    // A second open does not re-show it (once per run).
+    app.focus = Focus::Chat;
+    assert_eq!(app.handle_key(key(KeyCode::Char('s'))), Some(Action::None));
+    assert!(app.drawer_open);
+    assert_eq!(app.hint, None, "hint is one-time");
+}
+
+/// #30: the drawer hint is i18n'd (zh).
+#[tokio::test]
+async fn drawer_hint_is_localized() {
+    let mut app = app_with_session();
+    app.locale = dsh_tui::i18n::Locale::Zh;
+    let backend = TestBackend::new(70, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            AppEvent::Key(key(KeyCode::Char('s'))),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(view.contains("s 会话 · esc 关闭"), "zh hint: {view}");
+}
+
+/// #30: the once-per-run hint flag must not burn invisibly below 40 cols
+/// (where the status left cluster is hidden) — a first open at 35 leaves
+/// the flag unset, so a later open at 70 still shows the hint.
+#[tokio::test]
+async fn drawer_hint_flag_survives_a_below_40_first_open() {
+    let mut app = app_with_session();
+    // First open at 35 cols: the hint cannot render (no left cluster).
+    let backend = TestBackend::new(35, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            AppEvent::Key(key(KeyCode::Char('s'))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(app.drawer_open, "drawer opens at 35");
+    assert!(!app.drawer_hint_shown, "the flag must not burn below 40");
+    assert_eq!(app.hint, None, "no hint set below 40");
+
+    // Close explicitly, then reopen at 70: the hint still shows (the flag
+    // was never set by the below-40 open).
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.drawer_open);
+    term.backend_mut().resize(70, 24);
+    app.running = true;
+    app.focus = Focus::Chat;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            AppEvent::Key(key(KeyCode::Char('s'))), // reopen at 70
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(app.drawer_open, "drawer reopened at 70");
+    assert!(app.drawer_hint_shown, "flag set at 70");
+    let view = format!("{}", term.backend());
+    assert!(
+        view.contains("s sessions · esc close"),
+        "hint renders at 70: {view}"
+    );
+}
+
+/// #30: closing the drawer restores an armed select-mode hint (the drawer
+/// hint overwrote it while open; `v` mode stays active).
+#[tokio::test]
+async fn drawer_close_restores_the_select_hint() {
+    let mut app = app_with_session();
+    app.focus = Focus::Chat;
+    // Arm selection mode: the `v select · esc cancel` hint shows.
+    assert_eq!(app.handle_key(key(KeyCode::Char('v'))), Some(Action::None));
+    assert!(app.select_mode);
+    assert_eq!(app.hint.as_deref(), Some("v select · esc cancel"));
+
+    // Open the drawer (the drawer hint replaces the select hint) …
+    let backend = TestBackend::new(70, 24);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            AppEvent::Key(key(KeyCode::Char('s'))),
+            AppEvent::Key(key(KeyCode::Esc)), // … and close it
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(!app.drawer_open, "drawer closed");
+    assert!(app.select_mode, "select mode is still armed");
+    assert_eq!(
+        app.hint.as_deref(),
+        Some("v select · esc cancel"),
+        "the select hint is restored"
+    );
 }
 
 /// Wheel over the OPEN drawer scrolls the drawer's list (the drawer inner

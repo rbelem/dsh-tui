@@ -22,12 +22,6 @@
 //! Selection is session-space: `SidebarState::selected` counts only
 //! visible session rows (group headers are never selectable, and j/k
 //! crosses group boundaries as if they weren't there).
-//!
-//! The list is the attach flow's `session.list` + `workspace.list`
-//! snapshots plus live host-stream updates (`App::handle_host_frame`).
-//! Selection is session-space: `SidebarState::selected` counts only
-//! visible session rows (group headers are never selectable, and j/k
-//! crosses group boundaries as if they weren't there).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Margin, Rect};

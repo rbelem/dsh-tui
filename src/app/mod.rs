@@ -403,9 +403,18 @@ pub struct App {
     pub drawer_open: bool,
     /// The focus before the drawer opened — Esc/close restores it.
     pub drawer_prior_focus: Focus,
+    /// The hint showing before the drawer opened — close restores it (the
+    /// drawer hint overwrote it while open).
+    pub drawer_prior_hint: Option<String>,
     /// The last drawn terminal width (set per draw; the tier decisions —
     /// too-small screen, drawer tier, status variants — read it).
     pub terminal_width: u16,
+    /// #15: the running-spinner animation frame (advanced per tick; the
+    /// status line cycles the braille frames while the session runs).
+    pub spinner_frame: usize,
+    /// #30: the drawer discoverability hint was shown once (per app run) —
+    /// the first open only, so it never nags.
+    pub drawer_hint_shown: bool,
 }
 
 impl Default for App {
@@ -467,9 +476,12 @@ impl Default for App {
             copied_flash: None,
             drawer_open: false,
             drawer_prior_focus: Focus::Chat,
+            drawer_prior_hint: None,
             // Default to the wide tier: keyless tests (no draw) keep the
             // pre-#19 key semantics; the first draw sets the real width.
             terminal_width: 80,
+            spinner_frame: 0,
+            drawer_hint_shown: false,
         }
     }
 }
@@ -622,6 +634,17 @@ impl App {
             .is_some_and(|(_, at)| at.elapsed() >= COPY_FLASH_TTL)
         {
             self.copied_flash = None;
+            self.needs_draw = true;
+        }
+    }
+
+    /// #15: advance the running-spinner frame and — only while the chat is
+    /// actually busy — schedule the repaint that animates it. Idle draws
+    /// nothing (the needs_draw gating stays untouched), so the animation
+    /// causes no redraw churn when there is nothing to animate.
+    pub fn advance_spinner(&mut self) {
+        self.spinner_frame = self.spinner_frame.wrapping_add(1);
+        if matches!(self.mode, Mode::Chat) && self.session_running() {
             self.needs_draw = true;
         }
     }
@@ -857,16 +880,32 @@ impl App {
         } else {
             self.drawer_open = true;
             self.drawer_prior_focus = self.focus;
+            // Save whatever hint is showing (an armed select-mode hint,
+            // a queue hint, …) so closing the drawer restores it.
+            self.drawer_prior_hint = self.hint.take();
             self.focus = Focus::Sidebar;
+            // #30: the discoverability hint (`s sessions · esc close`)
+            // shows on the FIRST open of the run, in the status line's
+            // left cluster while the drawer is open — but only when it can
+            // actually render: below 40 cols the tier rules hide the left
+            // cluster, so the once-per-run flag must not burn invisibly at
+            // 32–39 (a later open at ≥40 still shows it).
+            if !self.drawer_hint_shown && self.terminal_width >= 40 {
+                self.hint = Some(crate::i18n::tr(self.locale, "status.drawer_hint").into());
+                self.drawer_hint_shown = true;
+            }
         }
         Action::None
     }
 
-    /// Close the drawer and restore the focus it took.
+    /// Close the drawer, restore the focus it took, and restore the hint
+    /// that was showing before it opened (the select-mode hint survives an
+    /// open/close round-trip).
     fn close_drawer(&mut self) {
         if self.drawer_open {
             self.drawer_open = false;
             self.focus = self.drawer_prior_focus;
+            self.hint = self.drawer_prior_hint.take();
         }
     }
 
