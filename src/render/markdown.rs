@@ -509,9 +509,11 @@ fn render_tool_node(
                 .as_ref()
                 .map(|e| e.code.as_str())
                 .unwrap_or("failed");
-            lines.push(Line::styled(
+            // #39: the failure renders as a status chip — a padded badge
+            // on the panel fill — instead of a plain error line.
+            lines.push(chip_line(
                 trf(locale, "marker.tool_result_failed", &[code]),
-                Style::default().fg(theme.error),
+                theme,
             ));
         }
     }
@@ -529,6 +531,16 @@ fn fold_glyph(collapsed: bool, expandable: bool) -> &'static str {
     } else {
         "▾ "
     }
+}
+
+/// A one-cell-padded status chip: `fg` text on the panel fill, so a
+/// failure reads as a badge rather than a bare line (with the Reset
+/// default theme the fill is a no-op and the padding is inert).
+fn chip_line(text: String, theme: &Theme) -> Line<'static> {
+    Line::styled(
+        format!(" {text} "),
+        Style::default().fg(theme.error).bg(theme.panel_bg),
+    )
 }
 
 /// The syntect language for a tool's output. Known tools map to a grammar

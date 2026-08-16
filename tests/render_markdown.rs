@@ -685,12 +685,32 @@ fn tool_node_error_paths_render() {
         !expanded.iter().any(|l| l.contains(&long_args)),
         "raw args never render: {expanded:?}"
     );
+    // #39: the failed marker renders as a status chip — one-cell padding
+    // and the error fg on the panel fill — not a plain line (the style
+    // layer is asserted directly; the TestBackend dump is style-blind).
+    let node_lines = render_node_full(
+        &error_tool,
+        false,
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &image_cache,
+            &std::collections::HashMap::new(),
+        ),
+    )
+    .lines;
+    let chip = node_lines
+        .iter()
+        .find(|l| l.to_string().contains("[tool-result] failed: exit-1"))
+        .expect("chip line");
+    let chip_text: String = chip.spans.iter().map(|s| s.content.as_ref()).collect();
     assert!(
-        expanded
-            .iter()
-            .any(|l| l.contains("[tool-result] failed: exit-1")),
-        "{expanded:?}"
+        chip_text.starts_with(' ') && chip_text.ends_with(' '),
+        "one-cell chip padding: {chip_text:?}"
     );
+    assert_eq!(chip.style.fg, Some(theme.error), "chip error fg");
+    assert_eq!(chip.style.bg, Some(theme.panel_bg), "chip panel fill bg");
 
     // Collapsed: a one-line summary, error-styled with the failed suffix.
     let collapsed = render(&error_tool, true);
