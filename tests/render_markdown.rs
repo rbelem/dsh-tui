@@ -1,7 +1,7 @@
 //! Coverage-push render tests: the markdown surface (headings, quotes,
 //! lists, code, tables, links, breaks), the node renderers for every
 //! NodeData/ContentBlock variant (interrupted, turn-error, max-tokens,
-//! raw, tool errors, truncation), the syntect fenced-code path, the
+//! raw, tool errors, truncation), the fenced-code path, the
 //! row-cache signature hash arms, and the image viewer's loaded-image and
 //! meta arms. Direct construction where the types are public; the store
 //! path where the row cache needs real nodes.
