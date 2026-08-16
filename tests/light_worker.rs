@@ -341,16 +341,27 @@ async fn run_light_reports_turn_error() {
 /// code, stdout, stderr). The child is killed if it outlives the deadline
 /// (a hung worker must fail the test, not hang it).
 fn run_worker(port: Option<u16>, args: &[&str]) -> (Option<i32>, String, String) {
-    run_worker_with_herdr(port, args, None)
+    run_worker_with_herdr(port, args, None, None)
 }
 
 /// [`run_worker`] with an explicit herdr environment: `herdr` Some((pane,
 /// bin)) sets `HERDR_PANE_ID` + `HERDR_BIN_PATH` for the child, None removes
 /// both.
+/// [`run_worker`] with an extra env var (the no-gateway test isolates the
+/// config to pin a dead port).
+fn run_worker_with_env(
+    port: Option<u16>,
+    args: &[&str],
+    extra_env: Option<(&str, &str)>,
+) -> (Option<i32>, String, String) {
+    run_worker_with_herdr(port, args, None, extra_env)
+}
+
 fn run_worker_with_herdr(
     port: Option<u16>,
     args: &[&str],
     herdr: Option<(&str, &str)>,
+    extra_env: Option<(&str, &str)>,
 ) -> (Option<i32>, String, String) {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_dsh-tui"));
     match port {
@@ -368,6 +379,9 @@ fn run_worker_with_herdr(
         None => {
             cmd.env_remove("HERDR_PANE_ID").env_remove("HERDR_BIN_PATH");
         }
+    }
+    if let Some((key, value)) = extra_env {
+        cmd.env(key, value);
     }
     cmd.args(args)
         .stdin(Stdio::null())
@@ -469,11 +483,23 @@ async fn worker_prompt_rejection_prints_error_sentinel() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn worker_usage_and_no_gateway_exit_2() {
-    // No gateway: the existing no-DSH_PORT message + exit 2.
-    let (status, _stdout, stderr) = run_worker(None, &["--light", "--task", "task"]);
-    assert_eq!(status, Some(2), "exit 2 without DSH_PORT");
+    // #34: the resolution applies to --light (no auto-start); an isolated
+    // config pins a dead port so the no-gateway path is deterministic.
+    let xdg = std::env::temp_dir().join(format!("dsh-tui-light-xdg-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(xdg.join("dsh-tui"));
+    std::fs::write(
+        xdg.join("dsh-tui/config.toml"),
+        "[gateway]\nport = 18770\nauto_start = false\n",
+    )
+    .expect("write config");
+    let (status, _stdout, stderr) = run_worker_with_env(
+        None,
+        &["--light", "--task", "task"],
+        Some(("XDG_CONFIG_HOME", xdg.to_str().expect("xdg"))),
+    );
+    assert_eq!(status, Some(2), "exit 2 without a gateway");
     assert!(
-        stderr.contains("no DSH_PORT set"),
+        stderr.contains("no gateway reachable on 127.0.0.1:18770"),
         "hint on stderr: {stderr}"
     );
 
@@ -679,6 +705,7 @@ async fn worker_reports_lifecycle_with_herdr_env() {
         Some(mock.port()),
         &["--light", "--task", "hello worker"],
         Some(("wT:p9", &bin)),
+        None,
     );
     assert_eq!(status, Some(0), "exit 0 on success; stderr: {stderr}");
     assert!(

@@ -26,6 +26,12 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("focus.chat", "chat"),
     ("focus.composer", "composer"),
     ("focus.sidebar", "sidebar"),
+    ("gateway.none", "dsh-tui: no gateway"),
+    (
+        "gateway.not_ours",
+        "dsh-tui: the gateway on 127.0.0.1:{0} wasn't started by dsh-tui — stop it yourself",
+    ),
+    ("gateway.stopped", "dsh-tui: gateway stopped"),
     ("hero.new_hint", "new session"),
     ("hero.sidebar_hint", "find a session in the sidebar"),
     (
@@ -54,12 +60,25 @@ pub const STRINGS: &[(&str, &str)] = &[
         "dsh-tui: attached to 127.0.0.1:{0}, session {1}",
     ),
     (
-        "main.no_dsh_port",
-        "dsh-tui: no DSH_PORT set — attach to a running gateway (dsh web) or set DSH_PORT=<port>",
+        "main.gateway_start_failed",
+        "dsh-tui: gateway failed to start — see {0}",
+    ),
+    ("main.invalid_port", "dsh-tui: invalid port `{0}` from {1}"),
+    (
+        "main.no_gateway",
+        "dsh-tui: no gateway reachable on 127.0.0.1:{0} — start one with `dsh web` or set [gateway] auto_start=true",
     ),
     (
         "main.no_sessions",
         "gateway has no sessions — start one from the web UI",
+    ),
+    (
+        "main.port_requires_value",
+        "dsh-tui: --port requires a value",
+    ),
+    (
+        "main.starting_gateway",
+        "dsh-tui: starting gateway on 127.0.0.1:{0}…",
     ),
     (
         "main.workspace_list_failed",

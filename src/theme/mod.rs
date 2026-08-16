@@ -236,6 +236,33 @@ fn config_root() -> Option<PathBuf> {
 // ---------------------------------------------------------------------------
 
 /// The persisted app config (`config.toml`).
+/// The `[gateway]` config section (#34/#35): the port fallback (below
+/// `--port` and `DSH_PORT`) and whether a dead port auto-starts the
+/// gateway on launch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayConfig {
+    /// The gateway port fallback; `None` = the 3080 default.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Auto-start the gateway when the resolved port isn't serving
+    /// (default true — the herdr model; `false` keeps the error path).
+    #[serde(default = "default_auto_start")]
+    pub auto_start: bool,
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        GatewayConfig {
+            port: None,
+            auto_start: true,
+        }
+    }
+}
+
+fn default_auto_start() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Config {
     /// The active theme name; `None` = the terminal-following default.
@@ -248,6 +275,9 @@ pub struct Config {
     /// User-customizable keybindings; empty = the built-in defaults.
     #[serde(default)]
     pub keymap: Keymap,
+    /// Gateway lifecycle settings (port fallback + auto-start).
+    #[serde(default)]
+    pub gateway: GatewayConfig,
 }
 
 impl Config {

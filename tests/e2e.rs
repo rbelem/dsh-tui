@@ -588,12 +588,19 @@ async fn ctrl_q_exits_cleanly() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_dsh_port_exits_with_a_hint() {
-    // The binary WITHOUT DSH_PORT: the pure-client contract says exit(2)
-    // with a hint on stderr (main.rs's no-port branch).
+    // #34/#35: the binary WITHOUT DSH_PORT resolves the port (CLI > env >
+    // config > 3080) — an isolated config pins a dead port with
+    // auto_start off, so the no-gateway contract is deterministic: exit(2)
+    // with the resolved-port hint on stderr.
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_dsh-tui"));
     cmd.env("DSH_TUI_LOCALE", "en");
     let xdg = std::env::temp_dir().join(format!("dsh-tui-e2e-xdg-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&xdg);
+    let _ = std::fs::create_dir_all(xdg.join("dsh-tui"));
+    std::fs::write(
+        xdg.join("dsh-tui/config.toml"),
+        "[gateway]\nport = 18769\nauto_start = false\n",
+    )
+    .expect("write isolated config");
     cmd.env("XDG_CONFIG_HOME", &xdg);
     let pair = native_pty_system()
         .openpty(PtySize {
@@ -655,14 +662,17 @@ async fn missing_dsh_port_exits_with_a_hint() {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let text = String::from_utf8_lossy(&output.lock().expect("output lock")).into_owned();
-            if text.contains("no DSH_PORT set") || Instant::now() > deadline {
+            if text.contains("no gateway reachable") || Instant::now() > deadline {
                 break text;
             }
             std::thread::sleep(Duration::from_millis(20));
         }
     };
-    assert!(text.contains("no DSH_PORT set"), "hint on stderr: {text}");
-    assert_eq!(status, Some(2), "exit code 2 for the no-port contract");
+    assert!(
+        text.contains("no gateway reachable on 127.0.0.1:18769"),
+        "hint on stderr: {text}"
+    );
+    assert_eq!(status, Some(2), "exit code 2 for the no-gateway contract");
 }
 
 #[tokio::test(flavor = "multi_thread")]

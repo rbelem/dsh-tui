@@ -83,8 +83,9 @@ struct Inner {
     next_seq: AtomicU64,
 }
 
-/// The chat-loop wire client. Attach mode: connects to a RUNNING gateway on
-/// the loopback port; never boots one.
+/// The chat-loop wire client. Attach mode: connects to whatever serves the
+/// resolved port on the loopback (the gateway lifecycle lives in
+/// [`crate::gateway`] — this client never boots anything).
 #[derive(Clone)]
 pub struct WireClient {
     inner: Arc<Inner>,
@@ -133,7 +134,8 @@ impl WireClient {
     }
 
     /// Read `DSH_PORT` and attach. `None` when the variable is unset — a pure
-    /// client never boots anything.
+    /// client never boots anything (the gateway lifecycle is
+    /// [`crate::gateway`]'s job).
     pub fn attach_from_env() -> Result<Option<Self>, ClientError> {
         match std::env::var("DSH_PORT") {
             Ok(port) => {

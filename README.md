@@ -1,11 +1,16 @@
 # dsh-tui
 
 A Rust terminal client for the [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)
-gateway (`dsh`) — a terminal surface at parity with its web UI. It attaches
-to a **running** gateway via `DSH_PORT` and drives it over the wire protocol
-(RPC + host frames): browse workspaces and sessions, chat with the agent,
-cancel or retry turns, rename/fork/archive sessions, create sessions, and
-switch themes or UI locale. It is a pure client — it never boots anything.
+gateway (`dsh`) — a terminal surface at parity with its web UI. It
+attaches to the gateway over the wire protocol (RPC + host frames):
+browse workspaces and sessions, chat with the agent, cancel or retry
+turns, rename/fork/archive sessions, create sessions, and switch themes
+or UI locale.
+
+The gateway lifecycle follows the herdr model: if nothing is listening on
+the resolved port at launch, dsh-tui starts `dsh web` itself in the
+background (it keeps running after the TUI exits) and stops it only via
+`dsh-tui server stop`.
 
 Version 0.1.0. ~36 commits, 293 tests.
 
@@ -52,20 +57,42 @@ devbox run -- cargo build --release
 # binary at target/release/dsh-tui
 ```
 
-### Prerequisite: a running gateway
+### Gateway: auto-start by default
 
 `dsh-tui` attaches to a `dsh web` gateway from the deepseek-harness repo.
-The gateway boots **without a provider key** (browse/attach/list all work);
-submitting prompts requires a provider configured in the environment —
-without one, a run fails with a turn error surfaced in the UI (no crash).
+By default it boots the gateway itself when nothing is listening: the
+resolved port probes at launch, and a dead port spawns `dsh web` detached
+(stdout+stderr → `$XDG_STATE_HOME/dsh-tui/gateway.log`). The gateway
+persists after the TUI exits — stop it explicitly with `dsh-tui server
+stop`. The gateway boots **without a provider key** (browse/attach/list
+all work); submitting prompts requires a provider configured in the
+environment — without one, a run fails with a turn error surfaced in the
+UI (no crash).
+
+The port resolves CLI > env > config > default **3080** (the dsh web
+profile's composed default):
+
+```sh
+dsh-tui --port 4000              # CLI wins
+DSH_PORT=4000 dsh-tui            # env
+# config.toml: [gateway] port = 4000
+dsh-tui                          # default 3080, nothing to set
+```
+
+A manually started gateway works the same way — it is detected by the
+probe and attached to as-is:
 
 ```sh
 # terminal 1: the gateway
 dsh web --port 8765
 
 # terminal 2: the TUI
-DSH_PORT=8765 ./target/release/dsh-tui
+dsh-tui --port 8765
 ```
+
+To disable auto-start (keep the pure manual flow), set
+`[gateway] auto_start = false` in `~/.config/dsh-tui/config.toml` —
+a dead port then errors with the "no gateway reachable" message.
 
 ## Usage
 

@@ -1,5 +1,6 @@
-//! Attach flow (Q9): resume the most recently updated session on a running
-//! gateway (ticket 06 Q8 — pure client, never boots anything).
+//! Attach flow (Q9): resume the most recently updated session on the
+//! gateway — the client attaches to whatever serves the resolved port
+//! (the gateway may have been auto-started by `main`, #35).
 
 use crate::app::AppError;
 use crate::client::WireClient;

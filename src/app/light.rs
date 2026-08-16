@@ -146,6 +146,16 @@ pub fn parse_light_args(args: &[String], stdin_piped: bool) -> Result<TaskSource
                 let value = args.get(index).ok_or("--file requires a path")?;
                 file = Some(value.clone());
             }
+            // #34: the gateway port resolution applies to --light too (the
+            // value is consumed here so the worker's task parse stays
+            // clean; the resolution itself reads the raw args).
+            "--port" => {
+                index += 1;
+                if args.get(index).is_none() {
+                    return Err("--port requires a value".into());
+                }
+            }
+            arg if arg.starts_with("--port=") => {}
             other => return Err(format!("unknown argument `{other}`")),
         }
         index += 1;
@@ -195,14 +205,33 @@ pub fn main_light(args: &[String]) -> Result<(), AppError> {
             std::process::exit(2);
         }
     };
-    let client = match WireClient::attach_from_env() {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            let locale =
-                crate::i18n::Locale::detect(crate::theme::Config::load().locale.as_deref());
-            eprintln!("{}", crate::i18n::tr(locale, "main.no_dsh_port"));
+    // #34: the same resolution as the TUI path (CLI > env > config >
+    // default); the worker never auto-starts (#35) — a dead port is the
+    // no-gateway error.
+    let locale = crate::i18n::Locale::detect(crate::theme::Config::load().locale.as_deref());
+    let port = match crate::gateway::resolve_port(args) {
+        Ok(port) => port,
+        Err(crate::gateway::PortError::Invalid { value, source }) => {
+            eprintln!(
+                "{}",
+                crate::i18n::trf(locale, "main.invalid_port", &[&value, &source])
+            );
             std::process::exit(2);
         }
+        Err(crate::gateway::PortError::MissingValue) => {
+            eprintln!("{}", crate::i18n::tr(locale, "main.port_requires_value"));
+            std::process::exit(2);
+        }
+    };
+    if !crate::gateway::port_serving(port) {
+        eprintln!(
+            "{}",
+            crate::i18n::trf(locale, "main.no_gateway", &[&port.to_string()])
+        );
+        std::process::exit(2);
+    }
+    let client = match WireClient::attach(port) {
+        Ok(client) => client,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1);

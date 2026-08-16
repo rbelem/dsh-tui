@@ -16,9 +16,10 @@ review. Workers report their lifecycle to herdr, so they appear as
   `HERDR_ENV=1` (the herdr-skill rule: verify the environment before
   controlling a herdr session). Run it from inside a herdr pane.
 - **A dsh gateway reachable via `DSH_PORT`** — the worker connects to
-  `127.0.0.1:$DSH_PORT` (attach mode; the gateway is never started by
-  anything here). The wave passes the caller's `DSH_PORT` into the worker
-  panes when it is set.
+  `127.0.0.1:$DSH_PORT` (attach mode; the worker lane never auto-starts —
+  the resolution follows the same CLI > env > config > 3080 precedence,
+  defaulting to `127.0.0.1:3080` when `DSH_PORT` is unset). The wave
+  passes the caller's `DSH_PORT` into the worker panes when it is set.
 - **`dsh-tui` in PATH** — the worker command runs in the spawned panes; the
   wave forwards the caller's `PATH` explicitly (herdr panes get the server's
   environment, so a `dsh-tui` installed only in your shell profile would not
@@ -76,8 +77,8 @@ implements:
   `dsh-worker: (done|error)` and then classifies the task from the captured
   output.
 - **Exit codes**: 0 success · 1 RPC/stream error (also a gateway
-  connection failure — DSH_PORT set but unreachable) · 2 usage / missing
-  `DSH_PORT` env (with the no-DSH_PORT message).
+  connection failure — the port set but unreachable) · 2 usage / no
+  gateway reachable on the resolved port (with the no-gateway message).
 - **herdr lifecycle reporting**: when running inside a herdr pane
   (`HERDR_PANE_ID` set and a herdr binary reachable), the worker reports
   `working` → `idle` (success) or `blocked` (failure) through
@@ -117,7 +118,7 @@ The script-owned temp dir (`$TMPDIR/dsh-wave`) is removed on exit
   error, or `dsh-tui` not found in the pane's PATH — see the PATH note in
   Prerequisites).
 - **No gateway** — the worker exits 2 with the
-  `no DSH_PORT set — attach to a running gateway` message; the wave reports
+  `no gateway reachable on 127.0.0.1:<port>` message; the wave reports
   `FAILED(worker error)`. Start the gateway (or set `DSH_PORT`) first.
 - **Ctrl+C mid-wave** — the temp dir is cleaned; already-spawned panes are
   left behind. Inspect them with `herdr pane list` and close by hand.
