@@ -2884,7 +2884,11 @@ impl App {
         state.has_unsettled_tail()
     }
 
-    /// Apply a signed scroll delta; manual scrolling turns follow off.
+    /// Apply a signed scroll delta with position-implicit follow: at the
+    /// bottom (the clamp's max) the viewport follows new content; scrolled
+    /// up, it stays put. The single rule `follow = offset == max` — a
+    /// wheel burst landing at the bottom re-arms follow, a wheel-up leaves
+    /// it off; `G`/`g` keep their explicit semantics.
     ///
     /// Scrolling down is BOTTOM-LOCKED in line space: the offset never
     /// passes `total - viewport_height`, the same anchor follow-mode uses
@@ -2893,7 +2897,6 @@ impl App {
     /// `line_to_row` then pins the START at the final line, rendering the
     /// tail at the TOP of the chat with a blank void below (v1 blocker).
     fn scroll(&mut self, delta: i64) {
-        self.view.follow = false;
         if delta >= 0 {
             self.view.offset = self.view.offset.saturating_add(delta as usize);
         } else {
@@ -2910,6 +2913,9 @@ impl App {
             .sum();
         let max = total.saturating_sub(self.view.viewport_height as usize);
         self.view.offset = self.view.offset.min(max);
+        // #36: the bottom re-arms follow (content that fits the viewport
+        // always sits at the bottom → follows too).
+        self.view.follow = self.view.offset == max;
     }
 }
 

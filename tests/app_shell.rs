@@ -659,7 +659,10 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
     let (result, app) = run_task.await.expect("run task");
     result.expect("run");
 
-    assert!(!app.view.follow, "manual scroll disables follow");
+    // #36 position-implicit follow: the j landed AT the bottom (the clamp
+    // max), so follow re-armed — a manual scroll that reaches the bottom
+    // follows new content.
+    assert!(app.view.follow, "at the bottom, follow re-arms");
     // The clamp draw above pinned the bottom at offset 8 (9 rendered lines:
     // 5 messages + 4 #11 inter-message blanks; chat content rows 1: the
     // pane is 2 tall and ChatView reserves 1 blank top row; composer 2 +
@@ -719,7 +722,8 @@ async fn scroll_past_end_locks_the_tail_at_the_bottom() {
         app.view.offset, 33,
         "scroll stops at total - chat_height, not past it"
     );
-    assert!(!app.view.follow, "manual scroll disabled follow");
+    // #36: the hammered scrolls landed AT the bottom → follow re-armed.
+    assert!(app.view.follow, "at the bottom, follow re-arms");
     let view = format!("{}", term.backend());
     let rows: Vec<&str> = view.lines().collect();
     // The tail is locked at the chat area's LAST row (row 26; the composer
@@ -1427,4 +1431,166 @@ async fn follow_stays_clamped_across_a_skill_fold_toggle() {
         "still clamped after the expand (total={total})"
     );
     assert!(app.view.follow, "follow persists across the toggle");
+}
+
+// ---------------------------------------------------------------------------
+// #36: position-implicit follow
+// ---------------------------------------------------------------------------
+
+/// #36: a scrolled-up viewport STAYS PUT across new content — the offset
+/// is absolute while follow is off (the renderer's line_to_row is a
+/// bounds clamp, never a bottom-yank).
+#[tokio::test]
+async fn scrolled_up_offset_unchanged_across_new_content() {
+    let mut app = App::default();
+    app.focus = Focus::Chat; // 'k'/'q' chat keys (boot is Composer)
+    app.active_session = Some(SessionId("s1".into()));
+    let backend = TestBackend::new(100, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app)
+    });
+    for seq in 1..=30 {
+        tx.send(AppEvent::Frame(frame(
+            "s1",
+            ev(seq, "user/message", user_msg(&format!("m{seq}"), "hi")),
+        )))
+        .expect("frame");
+    }
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    // Scroll up 6 lines: follow off, offset pinned at 27.
+    tx.send(AppEvent::Key(key(KeyCode::Char('k')))).expect("k");
+    tx.send(AppEvent::Key(key(KeyCode::Char('k')))).expect("k");
+    tx.send(AppEvent::Key(key(KeyCode::Char('k')))).expect("k");
+    tx.send(AppEvent::Key(key(KeyCode::Char('k')))).expect("k");
+    tx.send(AppEvent::Key(key(KeyCode::Char('k')))).expect("k");
+    tx.send(AppEvent::Key(key(KeyCode::Char('k')))).expect("k");
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    // New content arrives while scrolled up.
+    for seq in 31..=33 {
+        tx.send(AppEvent::Frame(frame(
+            "s1",
+            ev(seq, "user/message", user_msg(&format!("m{seq}"), "hi")),
+        )))
+        .expect("frame");
+    }
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, app) = run_task.await.expect("run task");
+    result.expect("run");
+
+    assert!(!app.view.follow, "scrolled up → follow off");
+    assert_eq!(
+        app.view.offset, 27,
+        "new content must not move a scrolled-up viewport"
+    );
+}
+
+/// #36: scrolling back down to the bottom re-arms follow automatically —
+/// the next content re-clamps to the new bottom (no `G` press).
+#[tokio::test]
+async fn wheel_down_to_bottom_resumes_follow_and_reclamps() {
+    let mut app = App::default();
+    app.focus = Focus::Chat;
+    app.active_session = Some(SessionId("s1".into()));
+    let backend = TestBackend::new(100, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app)
+    });
+    for seq in 1..=30 {
+        tx.send(AppEvent::Frame(frame(
+            "s1",
+            ev(seq, "user/message", user_msg(&format!("m{seq}"), "hi")),
+        )))
+        .expect("frame");
+    }
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    // Scroll up: follow off, offset 31 (33 - 2).
+    tx.send(AppEvent::Key(key(KeyCode::Char('k')))).expect("k");
+    tx.send(AppEvent::Key(key(KeyCode::Char('k')))).expect("k");
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    // Wheel down 33 lines: 31 + 33 = 64 → clamps at max 33 → follow
+    // re-arms (the wheel events route through scroll()).
+    for _ in 0..11 {
+        tx.send(AppEvent::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: 60,
+            row: 10,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }))
+        .expect("wheel");
+    }
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    // New content arrives: follow is re-armed → the offset re-clamps.
+    tx.send(AppEvent::Frame(frame(
+        "s1",
+        ev(31, "user/message", user_msg("m31", "hi")),
+    )))
+    .expect("frame");
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, app) = run_task.await.expect("run task");
+    result.expect("run");
+
+    assert!(app.view.follow, "at the bottom, follow re-armed");
+    let total: usize = app
+        .row_cache
+        .lines()
+        .iter()
+        .map(|row| row.lines.len())
+        .sum();
+    assert_eq!(
+        app.view.offset,
+        total.saturating_sub(26),
+        "the new content re-clamped to the new bottom"
+    );
+}
+
+/// #36: `G` still jumps to the bottom and follows explicitly.
+#[tokio::test]
+async fn g_jumps_to_the_bottom_and_follows() {
+    let mut app = App::default();
+    app.focus = Focus::Chat;
+    app.active_session = Some(SessionId("s1".into()));
+    let backend = TestBackend::new(100, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    let mut channel = EventChannel::new();
+    let tx = channel.tx.clone();
+    let run_task = tokio::spawn(async move {
+        let result = app.run(&mut term, &mut channel).await;
+        (result, app)
+    });
+    for seq in 1..=30 {
+        tx.send(AppEvent::Frame(frame(
+            "s1",
+            ev(seq, "user/message", user_msg(&format!("m{seq}"), "hi")),
+        )))
+        .expect("frame");
+    }
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    tx.send(AppEvent::Key(key(KeyCode::Char('k')))).expect("k");
+    tx.send(AppEvent::Key(key(KeyCode::Char('G')))).expect("G");
+    tx.send(AppEvent::Key(key(KeyCode::Char('x')))).expect("x");
+    tx.send(AppEvent::Key(key(KeyCode::Char('q')))).expect("q");
+    let (result, app) = run_task.await.expect("run task");
+    result.expect("run");
+    let total: usize = app
+        .row_cache
+        .lines()
+        .iter()
+        .map(|row| row.lines.len())
+        .sum();
+    assert!(app.view.follow, "G follows explicitly");
+    assert_eq!(
+        app.view.offset,
+        total.saturating_sub(26),
+        "G jumps to the bottom"
+    );
 }
