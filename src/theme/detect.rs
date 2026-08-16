@@ -15,6 +15,14 @@
 //! prefixed reply is consumed; any other first input aborts the query —
 //! at most one stray byte is lost, and the app's startup paint makes that
 //! harmless.
+//!
+//! The OSC 11 layer additionally requires the tty in RAW mode: on a
+//! canonical tty the terminal's reply is ECHOed to the screen as
+//! `^[]11;rgb:...^[\` garbage and line-buffered (the reply carries no
+//! newline), so the poll cannot read it. Startup therefore uses
+//! [`detect_color_mode_no_tty`] (environment + desktop only) and re-runs
+//! [`detect_color_mode`] once the terminal is raw
+//! ([`App::refresh_terminal_theme`](crate::app::App::refresh_terminal_theme)).
 
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
@@ -31,11 +39,24 @@ pub enum ColorMode {
 /// Layered detection: OSC 11 terminal background first, then environment
 /// signals, then desktop settings. `None` when every layer is inconclusive
 /// (the caller keeps its default).
+///
+/// The OSC 11 layer requires a raw tty — a canonical tty echoes the reply
+/// to the screen and line-buffers it away. At startup (pre-raw-mode) use
+/// [`detect_color_mode_no_tty`]; re-run this once the terminal is raw
+/// (see [`App::refresh_terminal_theme`](crate::app::App::refresh_terminal_theme)).
 pub fn detect_color_mode() -> Option<ColorMode> {
     osc11_background()
         .map(classify)
         .or_else(env_signal)
         .or_else(desktop_signal)
+}
+
+/// Startup-safe detection: environment + desktop signals only — never the
+/// tty. The OSC 11 layer needs raw mode (see [`detect_color_mode`]), so the
+/// startup call must not query the terminal; the raw-mode re-run happens in
+/// [`App::refresh_terminal_theme`](crate::app::App::refresh_terminal_theme).
+pub fn detect_color_mode_no_tty() -> Option<ColorMode> {
+    env_signal().or_else(desktop_signal)
 }
 
 /// Parse an OSC 11 reply into `(r, g, b)`. Accepts `rgb:RRRR/GGGG/BBBB`

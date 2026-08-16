@@ -1056,6 +1056,15 @@ impl App {
         self.theme_picker.open = false;
     }
 
+    /// The explicit theme choice: `DSH_THEME` (when set and non-empty)
+    /// beats the persisted config theme.
+    fn explicit_theme_name(&self) -> Option<String> {
+        std::env::var("DSH_THEME")
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+            .or_else(|| self.config.theme.clone())
+    }
+
     /// Startup theme resolution: load user themes, then apply the persisted
     /// config theme when the terminal can render palettes (truecolor or
     /// 256-color `COLORTERM`; #4 snaps RGB to the terminal's palette on
@@ -1065,9 +1074,13 @@ impl App {
     ///
     /// With no explicit theme, the detected terminal/system light/dark
     /// scheme picks the default — `dsh-dark` (dark or detection failure)
-    /// or `dsh-light`. The all-`Reset` terminal-following default only
-    /// remains for 16-color terminals or an explicit `default` name (the
-    /// pre-#11 look, opt-in).
+    /// or `dsh-light`. Startup detection is env/desktop only
+    /// ([`detect_color_mode_no_tty`]): the OSC 11 terminal query needs raw
+    /// mode — on a canonical tty the reply is echoed to the screen and
+    /// line-buffered away — so [`refresh_terminal_theme`] re-runs the full
+    /// chain once the terminal is set up, before the first draw. The
+    /// all-`Reset` terminal-following default only remains for 16-color
+    /// terminals or an explicit `default` name (the pre-#11 look, opt-in).
     pub fn load_theme_config(&mut self) {
         self.themes.load_user_dir();
         self.config = Config::load();
@@ -1076,12 +1089,7 @@ impl App {
         // the Reset-based default.
         let level = detect_color_level();
         let palette_ok = level != ColorLevel::Ansi16;
-        // `DSH_THEME` (when set and non-empty) beats config.toml; naming
-        // the unregistered `default` keeps the Reset-based neutral.
-        let explicit = std::env::var("DSH_THEME")
-            .ok()
-            .filter(|name| !name.trim().is_empty())
-            .or_else(|| self.config.theme.clone());
+        let explicit = self.explicit_theme_name();
         if let Some(name) = &explicit
             && let Some(theme) = self.themes.find(name)
             && palette_ok
@@ -1091,14 +1099,39 @@ impl App {
             // No explicit theme: pick by the detected scheme. A failed
             // detection on a color terminal defaults to dsh-dark — never
             // the all-Reset theme (issue #11: OSC 11 unanswered left the
-            // app monochrome).
-            let name = match crate::theme::detect::detect_color_mode() {
+            // app monochrome). No tty query at startup (see the doc).
+            let name = match crate::theme::detect::detect_color_mode_no_tty() {
                 Some(crate::theme::detect::ColorMode::Light) => "dsh-light",
                 Some(crate::theme::detect::ColorMode::Dark) | None => "dsh-dark",
             };
             if let Some(theme) = self.themes.find(name) {
                 self.theme = theme.snapped(level);
             }
+        }
+    }
+
+    /// Post-raw-mode theme refinement: re-run the full detection chain now
+    /// that the tty is raw, where the OSC 11 query actually works (a
+    /// canonical tty echoes the reply to the screen and line-buffers it —
+    /// see [`detect_color_mode_no_tty`]). Called from `main` right after
+    /// `setup_terminal`, before the first draw, so the first frame already
+    /// carries the refined theme. Explicit choices (`DSH_THEME`, config
+    /// theme) are never overridden; a failed query keeps the startup
+    /// default (issue #11).
+    pub fn refresh_terminal_theme(&mut self) {
+        if self.explicit_theme_name().is_some() {
+            return;
+        }
+        let level = detect_color_level();
+        if level == ColorLevel::Ansi16 {
+            return; // 16-color terminals keep the Reset default.
+        }
+        let name = match crate::theme::detect::detect_color_mode() {
+            Some(crate::theme::detect::ColorMode::Light) => "dsh-light",
+            Some(crate::theme::detect::ColorMode::Dark) | None => "dsh-dark",
+        };
+        if let Some(theme) = self.themes.find(name) {
+            self.theme = theme.snapped(level);
         }
     }
 

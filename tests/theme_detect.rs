@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use dsh_tui::app::App;
 use dsh_tui::theme::detect::{
-    ColorMode, classify, detect_color_mode, parse_osc11_response, query_osc11,
+    ColorMode, classify, detect_color_mode, detect_color_mode_no_tty, parse_osc11_response,
+    query_osc11,
 };
 
 // ---------------------------------------------------------------------------
@@ -211,6 +212,19 @@ fn env_signal_via_colorfgbg() {
     });
 }
 
+#[test]
+fn no_tty_detection_uses_only_env_signals() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_env_var("GTK_THEME", None, || {
+        with_env_var("COLORFGBG", Some("15;0"), || {
+            assert_eq!(detect_color_mode_no_tty(), Some(ColorMode::Dark));
+        });
+        with_env_var("COLORFGBG", Some("15;255"), || {
+            assert_eq!(detect_color_mode_no_tty(), Some(ColorMode::Light));
+        });
+    });
+}
+
 // ---------------------------------------------------------------------------
 // App startup integration
 // ---------------------------------------------------------------------------
@@ -326,6 +340,79 @@ fn dsh_theme_env_overrides_config() {
                 let mut app = App::default();
                 app.load_theme_config();
                 assert_eq!(app.theme.name, "default", "Reset mode opt-in");
+            });
+        });
+    });
+}
+
+#[test]
+fn refresh_terminal_theme_refines_the_detected_theme() {
+    let dir = TempDir::new("refresh-dark");
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_config_root(dir.path(), |_config_root| {
+        with_env_var("COLORTERM", Some("truecolor"), || {
+            with_env_var("DSH_THEME", None, || {
+                with_env_var("GTK_THEME", Some("Adwaita:dark"), || {
+                    let mut app = App::default();
+                    app.load_theme_config();
+                    app.refresh_terminal_theme();
+                    assert_eq!(app.theme.name, "dsh-dark");
+                });
+                with_env_var("GTK_THEME", Some("Adwaita:light"), || {
+                    let mut app = App::default();
+                    app.load_theme_config();
+                    app.refresh_terminal_theme();
+                    assert_eq!(app.theme.name, "dsh-light");
+                });
+            });
+        });
+    });
+}
+
+#[test]
+fn refresh_terminal_theme_never_overrides_an_explicit_theme() {
+    let dir = TempDir::new("refresh-explicit");
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_config_root(dir.path(), |config_root| {
+        std::fs::create_dir_all(config_root).expect("config dir");
+        std::fs::write(config_root.join("config.toml"), "theme = \"nord\"\n")
+            .expect("write config");
+        with_env_var("COLORTERM", Some("truecolor"), || {
+            with_env_var("DSH_THEME", None, || {
+                // A light signal would flip detection to dsh-light — the
+                // explicit config choice must win.
+                with_env_var("GTK_THEME", Some("Adwaita:light"), || {
+                    let mut app = App::default();
+                    app.load_theme_config();
+                    app.refresh_terminal_theme();
+                    assert_eq!(app.theme.name, "nord");
+                });
+            });
+        });
+    });
+}
+
+#[test]
+fn refresh_terminal_theme_skips_16_color_terminals() {
+    let dir = TempDir::new("refresh-16");
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_config_root(dir.path(), |_config_root| {
+        with_env_var("COLORTERM", None, || {
+            with_env_var("TERM", Some("xterm"), || {
+                with_env_var("DSH_THEME", None, || {
+                    with_env_var("GTK_THEME", Some("Adwaita:light"), || {
+                        let mut app = App::default();
+                        app.load_theme_config();
+                        app.refresh_terminal_theme();
+                        assert_eq!(
+                            app.theme.name, "default",
+                            "16-color terminals keep the Reset-based default"
+                        );
+                    });
+                });
             });
         });
     });

@@ -96,6 +96,12 @@ async fn run_app(client: WireClient) -> Result<(), AppError> {
     let mut terminal = run::setup_terminal()?;
     let _guard = run::TerminalGuard;
 
+    // The tty is raw now — run the OSC 11 layer of theme detection (on a
+    // canonical tty the reply is echoed to the screen and line-buffered
+    // away, so the startup call in load_theme_config must skip it).
+    // Resolved before the first draw.
+    app.refresh_terminal_theme();
+
     let mut events = EventChannel::new();
     event::spawn_input_bridge(events.tx.clone());
     event::spawn_frame_bridge(client.mux_stream(), events.tx.clone());
