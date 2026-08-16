@@ -720,3 +720,88 @@ async fn mock_respond_ok(mock: &MockGateway) {
     mock.set_handler("respond", MockAction::Ok(r#"{"accepted":true}"#))
         .await;
 }
+
+/// #25: the OSC 52 selection-copy payload round-trips through a real PTY
+/// (the app's stdout → the master): arm selection with `v`, drag across
+/// "hello" with SGR mouse sequences, and assert the exact escape payload
+/// for the copied text arrives. The emulator-side response query
+/// (`ESC ] 52 ; c ; ? ESC \`) needs a terminal that answers from its own
+/// clipboard — the headless PTY master has none, so that half is
+/// capability-probed and SKIPPED (documented, not asserted): the emitted
+/// payload write is the assertable end-to-end round-trip.
+#[tokio::test(flavor = "multi_thread")]
+async fn osc52_selection_copy_payload_round_trips_through_the_pty() {
+    let mock = MockGateway::start().await;
+    mock.set_handler(
+        "session.list",
+        MockAction::Ok(
+            r#"{"type":"server-response","rpcId":"{rpcId}","result":{"ok":true,"value":{"items":[
+                {"sessionId":"sA","updatedAt":200.0,"running":false,"blank":false}
+            ]}}}"#,
+        ),
+    )
+    .await;
+    mock.set_history("sA", &history_template("m1", "hello world"))
+        .await;
+    // The harness boots the app in a 120-col PTY; the coordinate math
+    // derives from that geometry (and the sidebar/gap constants), so a
+    // harness resize can't silently break it — the wide tier is asserted
+    // in-test instead.
+    let cols = 120u16;
+    let sidebar = dsh_tui::ui::sidebar::SIDEBAR_WIDTH;
+    let gap = 1u16;
+    // The chat content's buffer x: the right pane starts after the
+    // sidebar + gap, then the chat's 2/2 margin.
+    let content_x = sidebar + gap + 2;
+    assert!(cols >= 80, "the SGR coordinate math assumes the wide tier");
+    let mut scenario = Scenario::boot(mock).await;
+    // The app boots focused on the composer; two Tabs reach the chat
+    // (Composer → Sidebar → Chat), then `v` arms selection mode.
+    scenario.app.send(b"\t\t");
+    assert!(
+        scenario.app.wait_for("hello world", Duration::from_secs(5)),
+        "the message renders: {}",
+        scenario.app.output()
+    );
+    scenario.app.send(b"v");
+    // SGR mouse (1-based coordinates; content row 0 = buffer row 1 =
+    // SGR row 2): press left at the content start, drag across 5 cells
+    // ("hello"), release.
+    scenario
+        .app
+        .send(format!("\x1b[<0;{};2M", content_x + 1).as_bytes());
+    scenario
+        .app
+        .send(format!("\x1b[<32;{};2M", content_x + 6).as_bytes());
+    scenario
+        .app
+        .send(format!("\x1b[<0;{};2m", content_x + 6).as_bytes());
+    // The copy writes `ESC ] 52 ; c ; <base64("hello")> ESC \` to stdout.
+    let payload = "\x1b]52;c;aGVsbG8=\x1b\\";
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut emitted = false;
+    while Instant::now() < deadline {
+        if scenario.app.output().contains(payload) {
+            emitted = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        emitted,
+        "the OSC 52 payload reached the terminal: {}",
+        scenario.app.output()
+    );
+
+    // The emulator-side response query: a real terminal answers with its
+    // clipboard content — headless, the master has no clipboard and no
+    // responder, so the probe stays unanswered and the response-assertion
+    // is skipped (the payload write above is the assertable round-trip).
+    scenario.app.send(b"\x1b]52;c;?\x1b\\");
+    std::thread::sleep(Duration::from_millis(300));
+    eprintln!(
+        "note: headless PTY has no OSC 52 responder — the response-query \
+         half of the round-trip is skipped (payload write asserted)"
+    );
+    scenario.app.quit(Duration::from_secs(3));
+}

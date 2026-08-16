@@ -56,11 +56,23 @@ pub struct RowCache {
     dirty: HashSet<NodeKey>,
     /// Width the cached rows were wrapped at (resize → full re-render, Q10).
     width: u16,
+    /// #22: bumped on every rows mutation (recollect, dirty re-render,
+    /// width clear) — the selection width cache's invalidation signal.
+    generation: u64,
 }
 
 impl RowCache {
     pub fn new() -> Self {
         RowCache::default()
+    }
+
+    /// The render generation: bumped whenever the cached rows change —
+    /// recollects, dirty re-renders, width clears. Consumers key derived
+    /// caches on it (the #22 selection width cache — a same-count width
+    /// change like a streaming append to the last line must invalidate
+    /// too, which a flat-line-count key would miss).
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Reconcile with the store's current node list for `session_id` at
@@ -92,6 +104,7 @@ impl RowCache {
             if !self.rows.is_empty() {
                 self.rows.clear();
                 changed = true;
+                self.generation = self.generation.wrapping_add(1);
             }
             self.dirty.clear();
             return changed;
@@ -101,6 +114,7 @@ impl RowCache {
             self.dirty.clear();
             self.width = width;
             changed = true;
+            self.generation = self.generation.wrapping_add(1);
         }
 
         let old_len = self.rows.len();
@@ -136,7 +150,11 @@ impl RowCache {
         self.rows = reordered;
         // #11: 1 blank row between messages — every row but the last.
         Self::ensure_inter_message_blank(&mut self.rows);
-        changed || self.rows.len() != old_len || !self.dirty.is_empty()
+        let changed_any = changed || self.rows.len() != old_len || !self.dirty.is_empty();
+        if changed_any {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        changed_any
     }
 
     /// #11 spacing: exactly one blank row between messages — attached to
@@ -170,6 +188,7 @@ impl RowCache {
         locale: Locale,
         images: &ImageCache,
     ) {
+        let mut rendered_any = false;
         for key in self.dirty.drain() {
             let Some(state) = store.session(session_id) else {
                 continue;
@@ -184,9 +203,13 @@ impl RowCache {
                 row.images = rendered.images;
                 row.code_ranges = rendered.code_ranges;
                 row.code_fill = rendered.code_fill;
+                rendered_any = true;
             }
             // Dirty re-render dropped the inter-message blank; restore it.
             Self::ensure_inter_message_blank(&mut self.rows);
+        }
+        if rendered_any {
+            self.generation = self.generation.wrapping_add(1);
         }
     }
 

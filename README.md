@@ -100,7 +100,9 @@ new events over the mux downlink.
 | `r` | rename the selected sidebar session (inline editor: type, `Enter` commit, `Esc` cancel) |
 | `f` | fork the selected sidebar session |
 | `a` | archive the selected sidebar session |
-| `v` | open the image viewer on the session's images (chat focus) |
+| `v` | arm mouse selection mode in the chat (`v select · esc cancel`; drag to select, release to copy) |
+| `i` | open the image viewer on the session's images (chat focus) |
+| `s` | toggle the narrow-terminal session drawer (below 80 columns) |
 | `q` | quit (chat or sidebar focus) |
 | `Ctrl+p` | launcher: fuzzy search over commands, cached skills, and settings actions |
 | `Ctrl+t` | theme picker (`j`/`k` move, `Enter` apply, `Esc` close) |
@@ -115,6 +117,30 @@ Composer editing: arrows / `Home` / `End` move the caret, `Backspace` /
 `Delete` edit, `Esc` returns to the chat. `Shift+Enter` inserts a newline
 (web parity; most terminals deliver it as plain `Enter`, so the modifier
 may not arrive — plain `Enter` submits).
+
+## Mouse
+
+Mouse capture is on (click-to-select sessions, wheel scrolls 3 lines per
+tick, status indicators). In the chat, `v` arms selection mode:
+
+- `v`, then drag: select text; release copies it to the clipboard
+  (OSC 52) and exits the mode; `Esc` cancels. The status line shows a
+  `copied · N chars` flash on success.
+- double-click a word: selects the word (CJK runs stay whole); dragging
+  after extends the selection from the word.
+- wheel while selecting scrolls the viewport — the selection stays
+  anchored to the text underneath.
+
+The chat's margins (the 2/2 padding) anchor at the clamped edge, so a
+drag always has a starting point. Below 80 columns, `s` opens the session
+drawer (full titles; `Esc`/click-outside closes); the `≡` affordance at
+the chat's top-left toggles it.
+
+**Terminal escape hatch**: while mouse capture is active, holding `Shift`
+while dragging or wheeling bypasses the app's capture — the terminal's
+own selection and scrolling take over (standard `xterm`/kitty behavior;
+the app never sees those events). Use that when you want the terminal's
+native copy instead of dsh-tui's.
 
 ## Configuration
 

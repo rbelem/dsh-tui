@@ -591,16 +591,54 @@ impl App {
                     (current, anchor)
                 };
                 let content = self.chat_content_rect();
-                let line_widths: Vec<u16> = self
-                    .row_cache
-                    .lines()
-                    .iter()
-                    .flat_map(|row| row.lines.iter())
-                    .map(|line| line.width() as u16)
-                    .collect();
+                // #22: the flat line-widths are cached per render, keyed by
+                // the viewport offset + the transcript's flat line count —
+                // both change exactly when the overlay's inputs do (scroll
+                // shifts the offset; any content change re-renders rows, so
+                // the generation moves). A live selection's overlay no
+                // longer rescan the whole transcript on every draw.
+                let line_widths: Vec<u16> = match &self.selection_widths_cache {
+                    // #22: keyed by the viewport offset + the row cache's
+                    // render generation — both change exactly when the
+                    // overlay's inputs do (scroll shifts the offset; ANY
+                    // content change — even a same-count streaming append
+                    // to the last line — bumps the generation, which a
+                    // flat-line-count key would miss).
+                    Some((offset, generation, widths))
+                        if *offset == self.view.offset
+                            && *generation == self.row_cache.generation() =>
+                    {
+                        widths.clone()
+                    }
+                    _ => {
+                        let widths: Vec<u16> = self
+                            .row_cache
+                            .lines()
+                            .iter()
+                            .flat_map(|row| row.lines.iter())
+                            .map(|line| line.width() as u16)
+                            .collect();
+                        self.selection_widths_cache = Some((
+                            self.view.offset,
+                            self.row_cache.generation(),
+                            widths.clone(),
+                        ));
+                        widths
+                    }
+                };
                 (start.row..=end.row)
                     .filter_map(|row| {
-                        let line_width = line_widths.get(self.view.offset + row as usize)?;
+                        // #21: rows are absolute cache-line indices — map
+                        // into the viewport (rows outside the visible
+                        // window highlight nothing, but stay part of the
+                        // anchored range the copy uses).
+                        let Some(screen_row) = row.checked_sub(self.view.offset) else {
+                            return None; // above the viewport
+                        };
+                        if screen_row as u16 >= content.height {
+                            return None; // below the viewport
+                        }
+                        let line_width = line_widths.get(row)?;
                         let col_start = if row == start.row { start.col } else { 0 };
                         let col_end = if row == end.row { end.col } else { u16::MAX };
                         let col_start = col_start.min(*line_width);
@@ -610,7 +648,7 @@ impl App {
                         }
                         Some(Rect {
                             x: content.x + col_start,
-                            y: content.y + row,
+                            y: content.y + screen_row as u16,
                             width: col_end - col_start,
                             height: 1,
                         })

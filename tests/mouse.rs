@@ -98,6 +98,16 @@ fn draw_force() -> AppEvent {
     AppEvent::Key(key(KeyCode::F(1)))
 }
 
+/// A chat-focus app with two sessions and s1 active (the selection tests'
+/// fixture; s1 receives the streamed messages).
+fn app_with_session() -> App {
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false), summary("s2", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat; // 'v'/'q' chat keys (boot is Composer)
+    app
+}
+
 /// Feed buffered events into a fresh channel and run the loop to completion
 /// (the quit event breaks it).
 async fn run_with(app: &mut App, term: &mut Terminal<TestBackend>, events: Vec<AppEvent>) {
@@ -681,4 +691,487 @@ async fn moved_events_do_not_schedule_draws() {
     )
     .await;
     assert_eq!(app.draws, 1, "Moved events do not schedule draws");
+}
+
+// ---------------------------------------------------------------------------
+// #21/#22/#23: text-anchored selection, the width cache, word select
+// ---------------------------------------------------------------------------
+
+/// #21: wheel during an active selection keeps the anchors on the TEXT —
+/// the dragged position maps through the scroll delta (extending over the
+/// underlying text), and mouse-up copies the text-anchored range even
+/// when the viewport moved past it.
+#[tokio::test]
+async fn wheel_extends_the_selection_over_the_text() {
+    let mut app = app_with_session();
+    for seq in 1..=40 {
+        app.store
+            .ingest(frame(
+                "s1",
+                ev(
+                    seq,
+                    "user/message",
+                    user_msg(&format!("m{seq}"), &format!("text-{seq}")),
+                ),
+            ))
+            .expect("ingest");
+    }
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('v'))),
+            draw_force(),
+            // The boot draw follow-clamps to the bottom (offset 53); the
+            // test starts from the top so the anchors are deterministic.
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)), // 53 → 0
+            down(25, 1),                                              // content (0,0) → abs line 0
+            drag(25, 4),                                              // content (3,0) → abs line 3
+            draw_force(),
+            wheel_down(60, 10), // scroll 3 lines: offset 0 → 3
+            wheel_down(60, 10), // offset 3 → 6
+            wheel_down(60, 10), // offset 6 → 9
+            wheel_down(60, 10), // offset 9 → 12
+            wheel_down(60, 10), // offset 12 → 15
+            draw_force(),
+            // The drag AFTER the wheel maps through the new offset: the
+            // same screen cell now anchors at abs line 18 (the wheel
+            // extended the selection over the underlying text).
+            drag(25, 4),
+            up(25, 4),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+
+    // The anchors stayed text-fixed through the wheel burst (rows are
+    // absolute); the copy covers the anchored range 0..18 — 19 entries
+    // (text-1..text-9 with 9 interleaved blanks, then the end row's
+    // empty column-0 slice) = 9×6 chars + 18 separators.
+    let flash = app.copied_flash.as_ref().expect("flash after release");
+    assert_eq!(
+        flash.0, "copied · 72 chars",
+        "the text-anchored range copied (not the screen highlight)"
+    );
+}
+
+/// #21: after scrolling, the overlay clips to the viewport — the anchored
+/// range above the window highlights nothing, and the drag position still
+/// maps through the offset.
+#[tokio::test]
+async fn text_anchored_overlay_clips_to_the_viewport() {
+    let mut app = app_with_session();
+    for seq in 1..=40 {
+        app.store
+            .ingest(frame(
+                "s1",
+                ev(
+                    seq,
+                    "user/message",
+                    user_msg(&format!("m{seq}"), &format!("text-{seq}")),
+                ),
+            ))
+            .expect("ingest");
+    }
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('v'))),
+            draw_force(),
+            // The boot draw follow-clamps to the bottom; scroll back to 0
+            // (18 × 3 = 54 ≥ 53) so the anchors are deterministic.
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)), // 53 → 0
+            down(25, 1),                                              // abs line 0
+            drag(25, 4),                                              // abs line 3
+            draw_force(),
+            wheel_down(60, 10), // offset → 3
+            wheel_down(60, 10), // offset → 6
+            wheel_down(60, 10), // offset → 9
+            wheel_down(60, 10), // offset → 12
+            wheel_down(60, 10), // offset → 15
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+
+    // The anchors are unchanged (text-fixed) — rows 0..3 — but the
+    // viewport now starts at line 15, so nothing highlights.
+    assert_eq!(
+        app.selection,
+        Some((
+            dsh_tui::app::CellPos { row: 0, col: 0 },
+            dsh_tui::app::CellPos { row: 3, col: 0 },
+        )),
+        "anchors text-fixed through the wheel"
+    );
+    for y in 0..30u16 {
+        for x in 0..120u16 {
+            if let Some(cell) = term.backend().buffer().cell((x, y))
+                && cell.modifier.contains(Modifier::REVERSED)
+            {
+                panic!("anchored range above the viewport must not highlight ({x},{y})");
+            }
+        }
+    }
+}
+
+/// #21: a down-click on the chat margins (the 2/2 padding + top blank row)
+/// in select mode anchors deterministically at the clamped edge — a drag
+/// can always start (the old behavior left the mode armed with a dead
+/// drag).
+#[tokio::test]
+async fn margin_click_anchors_deterministically() {
+    let mut app = app_with_session();
+    for seq in 1..=3 {
+        app.store
+            .ingest(frame(
+                "s1",
+                ev(seq, "user/message", user_msg(&format!("m{seq}"), "hi")),
+            ))
+            .expect("ingest");
+    }
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('v'))),
+            draw_force(),
+            // The left margin (content.x = 25): the anchor clamps to col 0.
+            down(24, 1),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert_eq!(
+        app.selection,
+        Some((
+            dsh_tui::app::CellPos { row: 0, col: 0 },
+            dsh_tui::app::CellPos { row: 0, col: 0 },
+        )),
+        "margin click anchors at the clamped edge"
+    );
+
+    // The drag works from the margin start (extends to abs line 2).
+    let mut app = app_with_session();
+    for seq in 1..=3 {
+        app.store
+            .ingest(frame(
+                "s1",
+                ev(seq, "user/message", user_msg(&format!("m{seq}"), "hi")),
+            ))
+            .expect("ingest");
+    }
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('v'))),
+            draw_force(),
+            down(24, 1), // margin anchor
+            drag(27, 3), // content (0,2), col 2 → abs line 2
+            up(27, 3),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let flash = app.copied_flash.as_ref().expect("flash");
+    // Lines 0..2: "hi", "", "hi" → "hi\n\nhi".
+    assert_eq!(flash.0, "copied · 6 chars", "margin-started drag copies");
+}
+
+/// #23: double-click selects the word under the cursor — selection intent
+/// is implicit (no `v` needed); mouse-up copies the word.
+#[tokio::test]
+async fn double_click_selects_the_word() {
+    let mut app = app_with_session();
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(1, "user/message", user_msg("m1", "hello world foo")),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            // "world" spans cells 6..11 of line 0 (content x = 25).
+            down(32, 1), // cell 7, inside "world"
+            down(32, 1), // the double-click
+            up(32, 1),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    // The up copies and exits the mode (like any drag); the flash proves
+    // the double-click selected the word.
+    assert!(!app.select_mode, "mode exits after the copy");
+    let flash = app.copied_flash.as_ref().expect("flash");
+    assert_eq!(flash.0, "copied · 5 chars", "the word copied");
+}
+
+/// #23: the word boundaries are CJK-safe — a double-click inside a CJK
+/// run selects the whole run (wide chars never split).
+#[tokio::test]
+async fn double_click_selects_a_cjk_run() {
+    let mut app = app_with_session();
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(1, "user/message", user_msg("m1", "你好 世界")),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            // "世界" spans cells 5..9 (wide chars); click on 世 (cell 5).
+            down(30, 1),
+            down(30, 1),
+            up(30, 1),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let flash = app.copied_flash.as_ref().expect("flash");
+    assert_eq!(flash.0, "copied · 2 chars", "the CJK run copied");
+}
+
+/// #23: a drag after the double-click extends the word selection WORD-WISE
+/// — the moving edge snaps to word boundaries (past mid-word → the next
+/// word edge; before mid-word → the word start); the anchor edge stays
+/// word-fixed.
+#[tokio::test]
+async fn drag_extends_from_the_word_selection() {
+    let mut app = app_with_session();
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(1, "user/message", user_msg("m1", "hello world foo")),
+        ))
+        .expect("ingest");
+    app.store
+        .ingest(frame("s1", ev(2, "user/message", user_msg("m2", "bar"))))
+        .expect("ingest");
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(32, 1), // "world" (line 0, cells 6..11)
+            down(32, 1), // double-click
+            // "bar" is cells 0..3 of line 2; col 2 is past its mid-point
+            // → the moving edge snaps to the word end (col 3).
+            drag(27, 3),
+            up(27, 3),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let flash = app.copied_flash.as_ref().expect("flash");
+    // The start row runs to its line end from the word anchor:
+    // "world foo" + blank + the snapped word "bar" → 9 + 1 + 1 + 3.
+    assert_eq!(
+        flash.0, "copied · 14 chars",
+        "past-mid-word drag snaps to the word end"
+    );
+
+    // Before mid-word (col 1 of "bar"): the edge snaps back to the word
+    // start (col 0) — that row contributes nothing.
+    let mut app = app_with_session();
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(1, "user/message", user_msg("m1", "hello world foo")),
+        ))
+        .expect("ingest");
+    app.store
+        .ingest(frame("s1", ev(2, "user/message", user_msg("m2", "bar"))))
+        .expect("ingest");
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(32, 1),
+            down(32, 1),
+            drag(26, 3), // col 1 of "bar" → snaps to the word start
+            up(26, 3),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let flash = app.copied_flash.as_ref().expect("flash");
+    assert_eq!(
+        flash.0, "copied · 11 chars",
+        "before-mid-word drag snaps to the word start"
+    );
+}
+
+/// #22: the selection overlay's line-widths are cached per render — the
+/// key tracks the scroll offset and the row cache's render generation, so
+/// a live selection doesn't rescan the transcript every draw.
+#[tokio::test]
+async fn selection_widths_are_cached_per_render() {
+    let mut app = app_with_session();
+    for seq in 1..=3 {
+        app.store
+            .ingest(frame(
+                "s1",
+                ev(seq, "user/message", user_msg(&format!("m{seq}"), "hi")),
+            ))
+            .expect("ingest");
+    }
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('v'))),
+            draw_force(),
+            down(26, 1),
+            drag(28, 3),
+            draw_force(), // the overlay render populates the cache
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let (offset, generation, widths) = app
+        .selection_widths_cache
+        .clone()
+        .expect("cache populated by the selection draw");
+    assert_eq!(offset, app.view.offset, "cached at the current offset");
+    assert_eq!(generation, app.row_cache.generation(), "generation keyed");
+    assert_eq!(widths.len(), 5, "one width per flat line");
+
+    // A later draw with the same state reuses the cached key.
+    let before = app.selection_widths_cache.clone();
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
+    )
+    .await;
+    assert_eq!(app.selection_widths_cache, before, "key unchanged");
+
+    // Scrolling moves the key's offset (the widths recompute for the new
+    // window).
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('k'))), // scroll up 1
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert_eq!(
+        app.selection_widths_cache.as_ref().expect("cache").0,
+        app.view.offset,
+        "the key follows the scroll offset"
+    );
+}
+
+/// #22 (reviewer follow-up): streaming growth under a live selection — a
+/// same-count width change (the last line grows without wrapping) must
+/// bust the width cache, so the highlight tracks the growing line.
+#[tokio::test]
+async fn streaming_growth_reclamps_the_highlight() {
+    let mut app = app_with_session();
+    app.store
+        .ingest(frame("s1", ev(1, "user/message", user_msg("m1", "hello"))))
+        .expect("ingest");
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('v'))),
+            draw_force(),
+            // Select cols 4..20 of line 0; the 5-wide line clamps the
+            // highlight to [4,5).
+            down(29, 1),
+            drag(45, 1),
+            draw_force(),
+            // Stream the same message id with longer text (a new seq
+            // replaces the node — the flat count stays 1, but the render
+            // generation bumps).
+            AppEvent::Frame(frame(
+                "s1",
+                ev(2, "user/message", user_msg("m1", "hello world foo bar")),
+            )),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    // The highlight now spans [4,19) of the 19-wide line — a stale
+    // (offset, flat-count) key would still clamp at 5 and leave col 15
+    // unhighlighted.
+    let highlighted = term
+        .backend()
+        .buffer()
+        .cell((25 + 15, 1))
+        .expect("cell at col 15")
+        .modifier
+        .contains(Modifier::REVERSED);
+    assert!(highlighted, "the highlight tracks the streamed line width");
 }

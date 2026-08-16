@@ -415,6 +415,18 @@ pub struct App {
     /// #30: the drawer discoverability hint was shown once (per app run) —
     /// the first open only, so it never nags.
     pub drawer_hint_shown: bool,
+    /// #22: the selection overlay's flat line-widths, cached per render
+    /// and keyed by (viewport offset, row-cache render generation) — a
+    /// live selection no longer rescans the whole transcript every draw.
+    /// `None` until the first selection render.
+    pub selection_widths_cache: Option<(usize, u64, Vec<u16>)>,
+    /// #23: the last chat left-click (time + cell) — the double-click
+    /// word-select detector.
+    pub last_click: Option<(Instant, u16, u16)>,
+    /// #23: the active selection started from a double-click word select —
+    /// while true, the drag's moving edge snaps to word boundaries (the
+    /// anchor edge stays word-fixed).
+    pub word_select: bool,
 }
 
 impl Default for App {
@@ -482,6 +494,9 @@ impl Default for App {
             terminal_width: 80,
             spinner_frame: 0,
             drawer_hint_shown: false,
+            selection_widths_cache: None,
+            last_click: None,
+            word_select: false,
         }
     }
 }
@@ -491,7 +506,11 @@ impl Default for App {
 /// top spacer); column 0 its first cell (after the 2/2 margin).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CellPos {
-    pub row: u16,
+    /// #21: the ABSOLUTE cache-line index of the cell (content space —
+    /// text-anchored, so scrolling during a selection keeps the anchors on
+    /// the underlying text; the overlay maps them into the viewport).
+    pub row: usize,
+    /// The cell's column within its line.
     pub col: u16,
 }
 
@@ -735,8 +754,12 @@ impl App {
         if self.config.keymap.matches("quit", key) {
             return Some(Action::Quit);
         }
-        // #19: below 32 cols only `q` (and the global ctrl+q/ctrl+c above)
-        // works — the too-small screen owns the terminal.
+        // #19/#27: below 32 cols only `q` (and the global ctrl+q/ctrl+c
+        // above) works — the too-small screen owns the terminal. This is
+        // the key path's overlay gate: the same surface is the first term
+        // of [`App::any_overlay_open`], but here `q` must still escape,
+        // so the branch stays separate (folding the predicate in would
+        // swallow the quit key).
         if self.terminal_width < crate::app::TOO_SMALL_WIDTH {
             if key.code == KeyCode::Char('q') && key.modifiers.is_empty() {
                 return Some(Action::Quit);
@@ -815,8 +838,10 @@ impl App {
         if self.sidebar_search.is_some() {
             return Some(self.handle_sidebar_search_key(key));
         }
-        // #19: the narrow-terminal drawer owns the keys while open — ↑/↓
-        // navigate, Enter selects (and closes), Esc/s close.
+        // #19/#27: the narrow-terminal drawer owns the keys while open —
+        // ↑/↓ navigate, Enter selects (and closes), Esc/s close. Precedence
+        // over the normal keys (it is NOT part of any_overlay_open — the
+        // mouse path must keep hit-testing drawer clicks).
         if self.drawer_open {
             return Some(self.handle_drawer_key(key));
         }
@@ -1786,30 +1811,36 @@ impl App {
     fn cancel_selection(&mut self) {
         self.selection = None;
         self.select_mode = false;
+        self.word_select = false;
         self.hint = None;
     }
 
     /// A mouse event (capture enabled at terminal setup). Popup-open and
     /// non-chat modes route everything to the popup: chat/sidebar/composer
     /// mouse and `v` are no-ops there.
-    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> Action {
-        use crossterm::event::{MouseButton, MouseEventKind};
-        // #19: below 32 cols the too-small screen owns the terminal — the
-        // stale wide-draw hit-test rects must not select or scroll.
-        if self.terminal_width < crate::app::TOO_SMALL_WIDTH {
-            return Action::None;
-        }
-        // Any overlay owns the surface: the theme picker, queue popup,
-        // launcher, new-session/search popups, the composer's seed popup,
-        // and the takeover/settings/image modes.
-        let popup_open = self.theme_picker.open
+    /// #20/#27: any overlay owns the surface — the too-small screen (<32),
+    /// the theme picker, queue popup, launcher, new-session/search popups,
+    /// the composer's seed popup, and the takeover/settings/image modes.
+    /// Mouse and paste no-op through every one of these. The DRAWER is
+    /// deliberately NOT an overlay here: drawer clicks must still
+    /// hit-test, and the key path gates it separately (with precedence).
+    pub fn any_overlay_open(&self) -> bool {
+        self.terminal_width < crate::app::TOO_SMALL_WIDTH
+            || self.theme_picker.open
             || self.queue_popup_open
             || self.launcher.is_some()
             || self.new_session.is_some()
             || self.sidebar_search.is_some()
             || self.composer.popup().is_some()
-            || !matches!(self.mode, Mode::Chat);
-        if popup_open {
+            || !matches!(self.mode, Mode::Chat)
+    }
+
+    pub fn handle_mouse(&mut self, event: crossterm::event::MouseEvent) -> Action {
+        use crossterm::event::{MouseButton, MouseEventKind};
+        // #27: one predicate gates every overlay (the too-small screen
+        // included — its stale wide-draw hit-test rects must not select
+        // or scroll).
+        if self.any_overlay_open() {
             return Action::None;
         }
         let column = event.column;
@@ -1880,36 +1911,186 @@ impl App {
         }
         // Chat: selection only while `v` mode is armed; otherwise a chat
         // click is a no-op (no click-to-position in v1).
-        if self.select_mode {
+        if Self::in_rect(self.chat_area, column, row) {
             let content = self.chat_content_rect();
-            if Self::in_rect(content, column, row) {
+            // #23: a second click within the double-click window on the
+            // same row (a couple of cells of jitter allowed) selects the
+            // word under the cursor — selection intent is implicit, so it
+            // works with or without `v` armed.
+            if let Some((at, last_col, last_row)) = self.last_click
+                && at.elapsed() < DOUBLE_CLICK_MS
+                && last_row == row
+                && column.abs_diff(last_col) <= 2
+            {
+                self.last_click = None; // consume the double-click
+                if let Some(range) = self.word_at(column, row) {
+                    self.select_mode = true;
+                    self.hint = None;
+                    self.word_select = true;
+                    self.selection = Some(range);
+                    return Action::None;
+                }
+            }
+            if self.select_mode {
+                // #21: anchor deterministically, text-anchored (the row is
+                // the absolute cache-line index — `view.offset`-free, so
+                // wheel scrolling mid-selection leaves the anchors on the
+                // text). Margin clicks (the 2/2 padding + top blank row)
+                // clamp to the nearest content cell, so a drag can always
+                // start — the old behavior left the mode armed with no
+                // anchor and the drag dead. A plain click also resets the
+                // word-wise drag state.
+                self.word_select = false;
                 let pos = CellPos {
-                    row: row - content.y,
-                    col: column - content.x,
+                    row: self.view.offset
+                        + row
+                            .saturating_sub(content.y)
+                            .min(content.height.saturating_sub(1))
+                            as usize,
+                    col: column
+                        .saturating_sub(content.x)
+                        .min(content.width.saturating_sub(1)),
                 };
                 self.selection = Some((pos, pos));
                 self.hint = None;
+                self.last_click = Some((Instant::now(), column, row));
                 return Action::None;
             }
+            // Not selecting: remember the click so a second one can form a
+            // double-click.
+            self.last_click = Some((Instant::now(), column, row));
         }
         Action::None
     }
 
+    /// #23: the word containing the clicked cell, as a (start, end) cell
+    /// range on the clicked absolute line (the end is exclusive, matching
+    /// the copy's `[col_start, col_end)` slice). Word chars are Unicode
+    /// alphanumerics + `_` (CJK ideographs are alphanumeric, so a CJK run
+    /// stays whole — and the cell math never splits a wide char); every
+    /// other char (whitespace + punctuation) is a separator. `None` past
+    /// the line's text (the caller falls back to a plain anchor).
+    fn word_at(&self, column: u16, row: u16) -> Option<(CellPos, CellPos)> {
+        let content = self.chat_content_rect();
+        let abs_row = self.view.offset
+            + row
+                .saturating_sub(content.y)
+                .min(content.height.saturating_sub(1)) as usize;
+        let click_cell = column.saturating_sub(content.x);
+        let line = self
+            .row_cache
+            .lines()
+            .iter()
+            .flat_map(|row| row.lines.iter())
+            .nth(abs_row)?;
+        let (col_start, col_end) = self.word_range(line, click_cell)?;
+        Some((
+            CellPos {
+                row: abs_row,
+                col: col_start,
+            },
+            CellPos {
+                row: abs_row,
+                col: col_end,
+            },
+        ))
+    }
+
+    /// The containing word's (start, end) cell range for `click_cell` on
+    /// `line` (the end is exclusive, matching the copy's `[col_start,
+    /// col_end)` slice). Word chars are Unicode alphanumerics + `_` (CJK
+    /// ideographs are alphanumeric, so a CJK run stays whole — and the
+    /// cell math never splits a wide char); every other char (whitespace +
+    /// punctuation) is a separator. `None` when the cell lands past the
+    /// line's text or on a separator.
+    fn word_range(&self, line: &ratatui::text::Line<'_>, click_cell: u16) -> Option<(u16, u16)> {
+        // (char start cell, width, word char?) — CJK-safe via the width.
+        let mut chars: Vec<(u16, u16, bool)> = Vec::new();
+        let mut cell = 0u16;
+        for span in &line.spans {
+            for ch in span.content.chars() {
+                let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                chars.push((cell, width, ch.is_alphanumeric() || ch == '_'));
+                cell += width;
+            }
+        }
+        let index = chars
+            .iter()
+            .position(|(start, width, _)| *start <= click_cell && click_cell < start + width)?;
+        if !chars[index].2 {
+            return None; // a separator cell — no word
+        }
+        let mut start = index;
+        while start > 0 && chars[start - 1].2 {
+            start -= 1;
+        }
+        let mut end = index + 1;
+        while end < chars.len() && chars[end].2 {
+            end += 1;
+        }
+        let col_start = chars[start].0;
+        let col_end = if end < chars.len() {
+            chars[end].0
+        } else {
+            // The word runs to the line end: the line's cell width.
+            chars
+                .iter()
+                .map(|(start, width, _)| start + width)
+                .max()
+                .unwrap_or(col_start)
+        };
+        Some((col_start, col_end))
+    }
+
+    /// #23: the word-wise drag snap — the nearest word boundary to
+    /// `click_cell` on `line`: inside a word, the nearer of its two edges
+    /// ("drag past mid-word snaps to the next word edge"); on a separator
+    /// or past the text, the cell itself is a boundary. CJK-safe via
+    /// [`App::word_range`]'s width math.
+    fn word_snap(&self, line: &ratatui::text::Line<'_>, click_cell: u16) -> u16 {
+        match self.word_range(line, click_cell) {
+            Some((start, end)) => {
+                if click_cell - start < end - click_cell {
+                    start
+                } else {
+                    end
+                }
+            }
+            None => click_cell,
+        }
+    }
     /// Left-button drag: extend the selection, clamped to the chat rect
-    /// (the queue/composer are never selected).
+    /// (the queue/composer are never selected). #23: a word-started
+    /// selection snaps the moving edge to word boundaries (standard
+    /// terminal behavior — the anchor edge stays word-fixed).
     fn mouse_drag(&mut self, column: u16, row: u16) -> Action {
         if self.selection.is_none() {
             return Action::None;
         }
         let content = self.chat_content_rect();
-        let pos = CellPos {
-            row: row
+        // #21: text-anchored — the drag position converts to an absolute
+        // cache-line row exactly like the anchor.
+        let abs_row = self.view.offset
+            + row
                 .saturating_sub(content.y)
-                .min(content.height.saturating_sub(1)),
-            col: column
-                .saturating_sub(content.x)
-                .min(content.width.saturating_sub(1)),
-        };
+                .min(content.height.saturating_sub(1)) as usize;
+        let mut col = column
+            .saturating_sub(content.x)
+            .min(content.width.saturating_sub(1));
+        if self.word_select {
+            // Snap the moving edge to the nearest word boundary on the
+            // drag row (mid-word drags land on the nearer edge).
+            if let Some(line) = self
+                .row_cache
+                .lines()
+                .iter()
+                .flat_map(|row| row.lines.iter())
+                .nth(abs_row)
+            {
+                col = self.word_snap(line, col);
+            }
+        }
+        let pos = CellPos { row: abs_row, col };
         if let Some((anchor, _)) = &mut self.selection {
             self.selection = Some((*anchor, pos));
         }
@@ -1923,6 +2104,7 @@ impl App {
             return Action::None;
         };
         self.selection = None;
+        self.word_select = false;
         let text = self.selected_text(anchor, current);
         if text.is_empty() {
             self.select_mode = false;
@@ -2065,7 +2247,10 @@ impl App {
             .collect();
         let mut out = Vec::new();
         for row in start.row..=end.row {
-            let Some(line) = flat.get(self.view.offset + row as usize) else {
+            // #21: rows are absolute cache-line indices — no offset
+            // adjustment (text-anchored: the copy covers the anchored
+            // range even when the viewport scrolled mid-selection).
+            let Some(line) = flat.get(row) else {
                 continue; // past the conversation's tail
             };
             let (col_start, col_end) = if row == start.row && row == end.row {
@@ -2100,19 +2285,10 @@ impl App {
     /// Paste: insert into the composer only while it is focused (and no
     /// popup owns the keyboard); everywhere else the payload is dropped.
     pub fn handle_paste(&mut self, text: String) -> Action {
-        // #19: below 32 cols the invisible composer must not receive
-        // paste either.
-        if self.terminal_width < crate::app::TOO_SMALL_WIDTH {
-            return Action::None;
-        }
-        if self.focus != Focus::Composer
-            || self.theme_picker.open
-            || self.queue_popup_open
-            || self.launcher.is_some()
-            || self.new_session.is_some()
-            || self.sidebar_search.is_some()
-            || !matches!(self.mode, Mode::Chat)
-        {
+        // #20/#27: one overlay predicate gates paste (the too-small
+        // screen's invisible composer included; the seed popup's composer
+        // is an overlay too — the #20 asymmetry fix).
+        if self.focus != Focus::Composer || self.any_overlay_open() {
             return Action::None;
         }
         for ch in text.chars() {
@@ -2752,6 +2928,10 @@ pub(crate) const COPY_FLASH_TTL: Duration = Duration::from_secs(2);
 /// #19: below this width the full-screen "terminal too small" screen takes
 /// over (only `q` quits; a resize back restores the prior screen live).
 pub(crate) const TOO_SMALL_WIDTH: u16 = 32;
+
+/// #23: the double-click window for word-select (a second click within
+/// this on the same row/cell counts as a double-click).
+pub const DOUBLE_CLICK_MS: Duration = Duration::from_millis(400);
 
 /// Toast text for a remotely resolved approval (no exclusivity, Q10).
 fn remote_approval_text(outcome: ApprovalOutcome, locale: crate::i18n::Locale) -> String {
