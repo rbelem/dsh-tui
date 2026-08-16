@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::client::{ClientError, DownlinkFrame};
@@ -172,10 +172,120 @@ pub fn is_answerable(frame: &MuxFrame) -> bool {
     )
 }
 
+/// Swallows a terminal's OSC 11 reply when it leaks into the key stream.
+///
+/// The startup background query (`theme::detect::osc11_background`) polls
+/// `/dev/tty` for ~150ms; a terminal that answers later (tmux, SSH, slow
+/// emulators) leaves the reply — `ESC ] 11 ; rgb:RRRR/GGGG/BBBB ESC \` —
+/// pending in the input queue. By the time the input bridge starts, that
+/// queue is drained into crossterm, which tokenizes the reply as keystrokes:
+/// Alt+`]` (the `ESC ]` prefix), the payload as plain chars, then Alt+`\`
+/// (the ST terminator; a BEL reply ends as Ctrl+G). Without a filter those
+/// would be typed into whatever is focused at startup — the composer.
+///
+/// This filter reassembles that shape: when the collected payload validates
+/// as a real OSC 11 reply (via
+/// [`parse_osc11_response`](crate::theme::detect::parse_osc11_response)),
+/// the whole run is dropped. Anything that does not match is replayed
+/// untouched, so genuine input is never lost — a false start is only
+/// buffered until the next event resolves it.
+#[derive(Debug, Default)]
+pub(crate) struct OscReplyFilter {
+    /// Key events collected since the leading Alt+`]` — the reply's body
+    /// (the `ESC ]` prefix and the ST/BEL terminator are separate events).
+    buffered: Vec<AppEvent>,
+    /// ASCII bytes of the buffered payload, for reply validation.
+    bytes: Vec<u8>,
+}
+
+/// A reply body is at most `11;rgb:` + 3×4 hex digits + 2 `/` = 26 chars;
+/// anything longer is ordinary input, not a reply.
+const MAX_OSC11_PAYLOAD: usize = 32;
+
+impl OscReplyFilter {
+    /// Feed one bridge event; returns the events the caller must forward.
+    /// Usually just `event` itself; empty when the event completed and
+    /// validated an OSC 11 reply (swallowed); possibly several events when
+    /// a would-be reply turned out to be ordinary input (the buffered run
+    /// is replayed, in order, before `event`).
+    pub(crate) fn filter(&mut self, event: AppEvent) -> Vec<AppEvent> {
+        let AppEvent::Key(key) = event else {
+            // Any non-key event breaks a partial reply: replay the run.
+            return self.replay(event);
+        };
+        if self.buffered.is_empty() {
+            // Idle: only a leading Alt+`]` opens a reply run (`ESC ]`).
+            return if is_osc11_start(&key) {
+                self.buffered.push(AppEvent::Key(key));
+                Vec::new()
+            } else {
+                vec![AppEvent::Key(key)]
+            };
+        }
+        if is_osc11_end(&key) {
+            // Terminator: is the collected payload a real OSC 11 reply?
+            let mut reply = Vec::with_capacity(self.bytes.len() + 4);
+            reply.extend_from_slice(b"\x1b]");
+            reply.extend_from_slice(&self.bytes);
+            reply.extend_from_slice(b"\x1b\\");
+            let is_reply = crate::theme::detect::parse_osc11_response(&reply).is_some();
+            let buffered = std::mem::take(&mut self.buffered);
+            self.bytes.clear();
+            if is_reply {
+                return Vec::new(); // a real reply: swallowed.
+            }
+            let mut out = buffered;
+            out.push(AppEvent::Key(key));
+            return out;
+        }
+        if is_osc11_payload(&key) && self.bytes.len() < MAX_OSC11_PAYLOAD {
+            if let KeyCode::Char(c) = key.code {
+                self.bytes.push(c as u8);
+            }
+            self.buffered.push(AppEvent::Key(key));
+            return Vec::new();
+        }
+        // A key that cannot be part of a reply breaks the run: replay.
+        self.replay(AppEvent::Key(key))
+    }
+
+    /// Replay any buffered run (in order), then `event`, and reset.
+    fn replay(&mut self, event: AppEvent) -> Vec<AppEvent> {
+        let mut out = std::mem::take(&mut self.buffered);
+        self.bytes.clear();
+        out.push(event);
+        out
+    }
+}
+
+/// The leading event of a leaked OSC reply: `ESC ]` parses as Alt+`]`.
+fn is_osc11_start(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char(']') && key.modifiers.contains(KeyModifiers::ALT)
+}
+
+/// The trailing event: the ST `ESC \` parses as Alt+`\`; a BEL (0x07)
+/// reply parses as Ctrl+G (crossterm's control-char mapping).
+fn is_osc11_end(key: &KeyEvent) -> bool {
+    (key.code == KeyCode::Char('\\') && key.modifiers.contains(KeyModifiers::ALT))
+        || (key.code == KeyCode::Char('g') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// A payload char of a leaked reply: plain text (Shift-capped hex included;
+/// crossterm adds SHIFT to uppercase chars).
+fn is_osc11_payload(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char(_))
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
 /// Spawn the crossterm input bridge: reads terminal events and forwards
 /// Key/Resize/Mouse/Paste. `crossterm::event::read` blocks, so the loop runs
 /// on the tokio blocking pool. Stops when the channel closes or the terminal
 /// errors.
+///
+/// Every event passes through an [`OscReplyFilter`] first: a late OSC 11
+/// reply (the startup background query, see [`OscReplyFilter`]) would
+/// otherwise be typed into the composer as `]11;rgb:...\`.
 ///
 /// Poll interval: 50ms — snappier wheel response than the historical 100ms
 /// (#12; the 10Hz bridge still coalesces wheel bursts into one draw per
@@ -183,6 +293,7 @@ pub fn is_answerable(frame: &MuxFrame) -> bool {
 pub fn spawn_input_bridge(tx: mpsc::UnboundedSender<AppEvent>) {
     tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
+            let mut osc = OscReplyFilter::default();
             loop {
                 // Poll with a timeout instead of blocking forever: the loop
                 // must be able to notice the channel closing so the app can
@@ -190,27 +301,22 @@ pub fn spawn_input_bridge(tx: mpsc::UnboundedSender<AppEvent>) {
                 // shutdown after Ctrl+Q).
                 match crossterm::event::poll(Duration::from_millis(50)) {
                     Ok(true) => match crossterm::event::read() {
-                        Ok(crossterm::event::Event::Key(key)) => {
-                            if tx.send(AppEvent::Key(key)).is_err() {
-                                break;
+                        Ok(event) => {
+                            let app_event = match event {
+                                crossterm::event::Event::Key(key) => AppEvent::Key(key),
+                                crossterm::event::Event::Mouse(mouse) => AppEvent::Mouse(mouse),
+                                crossterm::event::Event::Paste(text) => AppEvent::Paste(text),
+                                crossterm::event::Event::Resize(width, height) => {
+                                    AppEvent::Resize(width, height)
+                                }
+                                _ => continue, // focus gain/loss etc.
+                            };
+                            for filtered in osc.filter(app_event) {
+                                if tx.send(filtered).is_err() {
+                                    break;
+                                }
                             }
                         }
-                        Ok(crossterm::event::Event::Mouse(mouse)) => {
-                            if tx.send(AppEvent::Mouse(mouse)).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(crossterm::event::Event::Paste(text)) => {
-                            if tx.send(AppEvent::Paste(text)).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(crossterm::event::Event::Resize(width, height)) => {
-                            if tx.send(AppEvent::Resize(width, height)).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(_) => {}
                         Err(_) => break,
                     },
                     Ok(false) => {
@@ -267,4 +373,180 @@ pub fn spawn_host_bridge(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A comparable projection of an `AppEvent` — the enum itself cannot
+    /// derive `PartialEq` because of its `ClientError`-carrying variants.
+    #[derive(Debug, PartialEq)]
+    enum Token {
+        Key(KeyCode, KeyModifiers),
+        Mouse,
+        Paste(String),
+        Resize(u16, u16),
+        Other,
+    }
+
+    fn token(event: &AppEvent) -> Token {
+        match event {
+            AppEvent::Key(key) => Token::Key(key.code, key.modifiers),
+            AppEvent::Mouse(_) => Token::Mouse,
+            AppEvent::Paste(text) => Token::Paste(text.clone()),
+            AppEvent::Resize(w, h) => Token::Resize(*w, *h),
+            _ => Token::Other,
+        }
+    }
+
+    fn tokens(events: &[AppEvent]) -> Vec<Token> {
+        events.iter().map(token).collect()
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
+        AppEvent::Key(KeyEvent::new(code, modifiers))
+    }
+
+    /// A plain char, SHIFT-capped like crossterm's `char_code_to_event`.
+    fn plain(c: char) -> AppEvent {
+        let modifiers = if c.is_uppercase() {
+            KeyModifiers::SHIFT
+        } else {
+            KeyModifiers::empty()
+        };
+        key(KeyCode::Char(c), modifiers)
+    }
+
+    fn alt(c: char) -> AppEvent {
+        key(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    /// The event run crossterm emits for a leaked OSC 11 reply with body
+    /// `payload` (`ESC ]` → Alt+`]`, body chars, ST → Alt+`\`, or BEL →
+    /// Ctrl+G).
+    fn reply_events(payload: &str, st: bool) -> Vec<AppEvent> {
+        let mut events = vec![alt(']')];
+        events.extend(payload.chars().map(plain));
+        events.push(if st {
+            alt('\\')
+        } else {
+            key(KeyCode::Char('g'), KeyModifiers::CONTROL)
+        });
+        events
+    }
+
+    fn feed_all(filter: &mut OscReplyFilter, events: Vec<AppEvent>) -> Vec<AppEvent> {
+        let mut out = Vec::new();
+        for event in events {
+            out.extend(filter.filter(event));
+        }
+        out
+    }
+
+    #[test]
+    fn swallows_a_st_terminated_reply() {
+        // The exact shape the reporter saw: `]11;rgb:1f1f/1f1f/2828\`.
+        let events = reply_events("11;rgb:1f1f/1f1f/2828", true);
+        assert!(feed_all(&mut OscReplyFilter::default(), events).is_empty());
+    }
+
+    #[test]
+    fn swallows_a_bel_terminated_reply() {
+        let events = reply_events("11;rgb:0f0f/0f0f/0f0f", false);
+        assert!(feed_all(&mut OscReplyFilter::default(), events).is_empty());
+    }
+
+    #[test]
+    fn swallows_uppercase_hex_payload() {
+        let events = reply_events("11;rgb:FFFF/0000/0000", true);
+        assert!(feed_all(&mut OscReplyFilter::default(), events).is_empty());
+    }
+
+    #[test]
+    fn swallows_the_hash_form_reply() {
+        let events = reply_events("11;#1f1f28", true);
+        assert!(feed_all(&mut OscReplyFilter::default(), events).is_empty());
+    }
+
+    #[test]
+    fn ordinary_keys_pass_through() {
+        let events = vec![plain('h'), plain('i')];
+        let expected = tokens(&events);
+        let out = feed_all(&mut OscReplyFilter::default(), events);
+        assert_eq!(tokens(&out), expected);
+    }
+
+    #[test]
+    fn input_around_a_reply_flows_unchanged() {
+        let mut filter = OscReplyFilter::default();
+        // Before the reply: forwarded immediately.
+        let before = feed_all(&mut filter, vec![plain('x')]);
+        assert_eq!(
+            tokens(&before),
+            vec![Token::Key(KeyCode::Char('x'), KeyModifiers::empty())]
+        );
+        // The reply itself: swallowed.
+        assert!(feed_all(&mut filter, reply_events("11;rgb:1f1f/1f1f/2828", true)).is_empty());
+        // After: forwarded immediately.
+        let after = feed_all(&mut filter, vec![plain('y')]);
+        assert_eq!(
+            tokens(&after),
+            vec![Token::Key(KeyCode::Char('y'), KeyModifiers::empty())]
+        );
+    }
+
+    #[test]
+    fn a_false_start_is_replayed_in_order() {
+        // Alt+`]` + text that is not an OSC reply + Alt+`\`: nothing is
+        // lost, the whole run comes back in order.
+        let events = vec![alt(']'), plain('a'), plain('b'), alt('\\')];
+        let expected = tokens(&events);
+        let out = feed_all(&mut OscReplyFilter::default(), events);
+        assert_eq!(tokens(&out), expected);
+    }
+
+    #[test]
+    fn an_invalid_payload_is_replayed() {
+        let events = reply_events("11;rgb:zz/zz/zz", true);
+        let expected = tokens(&events);
+        let out = feed_all(&mut OscReplyFilter::default(), events);
+        assert_eq!(tokens(&out), expected);
+    }
+
+    #[test]
+    fn a_non_key_event_breaks_a_partial_reply() {
+        let mut filter = OscReplyFilter::default();
+        let mut out = feed_all(&mut filter, vec![alt(']'), plain('1')]);
+        assert!(out.is_empty()); // still buffered
+        out = feed_all(&mut filter, vec![AppEvent::Resize(100, 50)]);
+        assert_eq!(
+            tokens(&out),
+            vec![
+                Token::Key(KeyCode::Char(']'), KeyModifiers::ALT),
+                Token::Key(KeyCode::Char('1'), KeyModifiers::empty()),
+                Token::Resize(100, 50),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_oversized_run_breaks_and_replays() {
+        // A payload longer than any real reply: the run breaks at the cap
+        // and everything is replayed, nothing dropped.
+        let mut events = vec![alt(']')];
+        events.extend((0..40).map(|_| plain('a')));
+        events.push(alt('\\'));
+        let expected = tokens(&events);
+        let out = feed_all(&mut OscReplyFilter::default(), events);
+        assert_eq!(tokens(&out), expected);
+    }
+
+    #[test]
+    fn a_second_alt_close_bracket_breaks_a_partial_reply() {
+        let events = vec![alt(']'), alt(']'), plain('a'), alt('\\')];
+        let expected = tokens(&events);
+        let out = feed_all(&mut OscReplyFilter::default(), events);
+        assert_eq!(tokens(&out), expected);
+    }
 }
