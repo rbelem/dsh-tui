@@ -30,6 +30,12 @@ base64 = { version = "0.22", default-features = false, features = ["std"] }
 crossterm = "0.28"
 toml = "0.8"
 dirs = "6"
+# #5: syntax highlighting for fenced code blocks — the same stack as the
+# OpenAI codex TUI (syntect 5 + two-face). default-features = false +
+# regex-fancy keeps it pure Rust (no onig/C); two-face's `syntect-fancy`
+# pulls ~100 grammars with the same fancy-regex backend.
+syntect = { version = "5", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 
 [dev-dependencies]
 insta = "1"

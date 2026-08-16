@@ -439,6 +439,12 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
+        // #5: warm the syntax-highlighting grammar set once per process —
+        // the lazy OnceLock would otherwise stall the first fenced-code
+        // render for the ~200ms two-face dump load. App::default() is the
+        // construction point of every entry path (main + tests), and the
+        // OnceLock makes the cost one-time.
+        crate::render::highlight::warmup();
         App {
             store: SessionStore::new(),
             row_cache: RowCache::new(),

@@ -18,6 +18,7 @@
 //! (`TestBackend` in tests). The app shell comes in a later surface lane.
 
 pub mod chat_view;
+pub mod highlight;
 pub mod image;
 pub mod markdown;
 pub mod row_cache;

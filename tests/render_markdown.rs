@@ -311,6 +311,128 @@ fn fenced_code_uses_the_code_token_with_panel_fill_range() {
     assert_eq!(rendered[4], "after", "content follows: {rendered:?}");
 }
 
+// ---------------------------------------------------------------------------
+// #5: syntax highlighting in fenced code
+// ---------------------------------------------------------------------------
+
+/// A concrete palette theme with distinct colors per token, so highlighted
+/// spans are distinguishable from each other and from the fallback.
+fn highlight_theme() -> Theme {
+    Theme::from_toml_str(
+        r##"
+name = "highlight-golden"
+accent = "#111111"
+muted = "#222222"
+error = "#333333"
+warning = "#444444"
+success = "#555555"
+code = "#666666"
+bg = "#777777"
+text = "#888888"
+panel_bg = "#999999"
+border = "#aaaaaa"
+"##,
+    )
+    .expect("valid theme")
+}
+
+/// The fenced-body lines of a rendered markdown string (pre-wrap indices).
+fn fenced_lines(md: &str, theme: &Theme) -> Vec<Vec<ratatui::text::Span<'static>>> {
+    let (lines, code_ranges, _skill) = render_markdown(
+        md,
+        Style::default().fg(theme.text),
+        &render_ctx(
+            200,
+            theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
+        true,
+    );
+    assert_eq!(code_ranges.len(), 1, "one fence expected");
+    let (start, end) = code_ranges[0];
+    lines[start..end]
+        .iter()
+        .map(|line| line.spans.clone())
+        .collect()
+}
+
+#[test]
+fn fenced_code_highlights_known_languages_via_theme_tokens() {
+    let theme = highlight_theme();
+    // rust: keyword-ish storage types bold-text, function names code,
+    // strings success, operators accent, numbers warning.
+    let rust = fenced_lines(
+        "```rust\nfn main() { let n = 42; s!(\"hi\"); }\n```",
+        &theme,
+    );
+    let rust_spans = rust[0].clone();
+    let span = |needle: &str| {
+        rust_spans
+            .iter()
+            .find(|s| s.content.as_ref() == needle)
+            .unwrap_or_else(|| panic!("missing rust span {needle:?}: {rust_spans:?}"))
+    };
+    assert_eq!(span("fn").style.fg, Some(theme.text), "storage.type → text");
+    assert!(
+        span("fn").style.add_modifier.contains(Modifier::BOLD),
+        "storage.type → bold"
+    );
+    assert_eq!(span("main").style.fg, Some(theme.code), "function → code");
+    assert_eq!(span("42").style.fg, Some(theme.warning), "number → warning");
+    assert_eq!(span("hi").style.fg, Some(theme.success), "string → success");
+    // bash: support.function → code, comment → muted, string → success.
+    let bash = fenced_lines("```bash\necho \"hi\" # done\n```", &theme);
+    let bash_spans = bash[0].clone();
+    let span = |needle: &str| {
+        bash_spans
+            .iter()
+            .find(|s| s.content.as_ref() == needle)
+            .unwrap_or_else(|| panic!("missing bash span {needle:?}: {bash_spans:?}"))
+    };
+    assert_eq!(span("echo").style.fg, Some(theme.code), "builtin → code");
+    assert_eq!(span("#").style.fg, Some(theme.muted), "comment → muted");
+    assert_eq!(span("hi").style.fg, Some(theme.success), "string → success");
+    // json: keys → success, numbers/booleans → warning.
+    let json = fenced_lines("```json\n{\"a\": 1, \"b\": true}\n```", &theme);
+    let json_spans = json[0].clone();
+    let span = |needle: &str| {
+        json_spans
+            .iter()
+            .find(|s| s.content.as_ref() == needle)
+            .unwrap_or_else(|| panic!("missing json span {needle:?}: {json_spans:?}"))
+    };
+    assert_eq!(span("a").style.fg, Some(theme.success), "key → string");
+    assert_eq!(span("1").style.fg, Some(theme.warning), "number → warning");
+    assert_eq!(span("true").style.fg, Some(theme.warning), "bool → warning");
+}
+
+#[test]
+fn fenced_code_unknown_language_stays_byte_identical_to_plain_code() {
+    let theme = highlight_theme();
+    let md = "```xyzlang\nfn main() { println!(\"hi\"); }\n```";
+    let fences = fenced_lines(md, &theme);
+    assert_eq!(fences.len(), 1);
+    // One span per line, exactly the source line, in the code token —
+    // the pre-#5 rendering, byte for byte.
+    let expected = "fn main() { println!(\"hi\"); }";
+    assert_eq!(fences[0].len(), 1, "single span, not highlighted");
+    assert_eq!(fences[0][0].content.as_ref(), expected);
+    assert_eq!(fences[0][0].style.fg, Some(theme.code));
+    assert_eq!(fences[0][0].style.add_modifier, Modifier::empty());
+}
+
+#[test]
+fn fenced_code_without_language_stays_byte_identical_to_plain_code() {
+    let theme = highlight_theme();
+    let fences = fenced_lines("```\nplain text\n```", &theme);
+    assert_eq!(fences.len(), 1);
+    assert_eq!(fences[0].len(), 1, "single span, not highlighted");
+    assert_eq!(fences[0][0].content.as_ref(), "plain text");
+    assert_eq!(fences[0][0].style.fg, Some(theme.code));
+}
+
 #[test]
 fn render_node_wrapper_matches_the_full_render() {
     let theme = Theme::default();

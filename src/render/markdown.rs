@@ -1088,14 +1088,19 @@ fn cell_width(cell: &[Span<'_>]) -> usize {
 // code fences (#11)
 // ---------------------------------------------------------------------------
 
-/// One line per source line, all in the theme's `code` token (violet) — no
-/// box, no `│` prefix, no indent: the block body carries a `panel_bg` fill
-/// painted by the row cache at full content width. Per-language syntax
-/// highlighting was dropped with #11 (the single violet token is the design
-/// contract; `language` is kept for the signature). The style rides on the
-/// SPAN, not the line: the row cache's wrap pass only carries span styles.
-/// The final newline's empty split artifact is dropped.
-fn code_block_lines(code: &str, _language: Option<&str>, app_theme: &Theme) -> Vec<Line<'static>> {
+/// One line per source line. Known languages (#5) highlight through the
+/// scope classifier (`src/render/highlight.rs`) into the theme tokens,
+/// keeping the `panel_bg` fill painted by the row cache; unknown or absent
+/// languages keep the single all-`code` span (violet, the #11 design
+/// contract) — byte-identical to the pre-#5 rendering. The style rides on
+/// the SPAN, not the line: the row cache's wrap pass only carries span
+/// styles. The final newline's empty split artifact is dropped.
+fn code_block_lines(code: &str, language: Option<&str>, app_theme: &Theme) -> Vec<Line<'static>> {
+    if let Some(lines) =
+        language.and_then(|lang| crate::render::highlight::highlight_code(code, lang, app_theme))
+    {
+        return lines;
+    }
     let mut source: Vec<&str> = code.split('\n').collect();
     if source.last().is_some_and(|line| line.is_empty()) {
         source.pop();
