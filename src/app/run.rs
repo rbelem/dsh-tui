@@ -44,6 +44,32 @@ use crate::wire::skills::SkillListValue;
 /// shift; glyphs, not strings — i18n-safe).
 pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// #36: the wrapped height of `text` at `width` cells — greedy per-word
+/// packing, an UPPER bound of the paragraph wrap (div_ceil under-counts:
+/// word boundaries rarely pack perfectly). Mirrors ratatui's WordWrapper:
+/// a word wraps when it would exceed the line, and an over-wide word
+/// (CJK runs, long tokens) spans `ceil(w / width)` rows of its own.
+fn wrapped_height(text: &str, width: u16) -> usize {
+    let width = width as usize;
+    if width == 0 || text.is_empty() {
+        return 1;
+    }
+    let mut rows = 1usize;
+    let mut used = 0usize;
+    for word in text.split_whitespace() {
+        let w = UnicodeWidthStr::width(word);
+        if used > 0 && used + 1 + w > width {
+            rows += 1;
+            used = 0;
+        }
+        if w > width {
+            rows += w.div_ceil(width) - 1;
+        }
+        used += w + usize::from(used > 0);
+    }
+    rows
+}
+
 /// #19: truncate `text` to `max` display cells, appending a `…` ellipsis
 /// (CJK-safe: cut by cell width, never splitting a wide char).
 fn truncate_ellipsis(text: &str, max: usize) -> String {
@@ -369,14 +395,26 @@ impl App {
     {
         let size = term.size()?;
         self.terminal_width = size.width;
+        // #36: the approval dialog's transient notice (owned — a
+        // &self.current_notice() call inside the draw closure would
+        // collide with its field borrows).
+        let approval_notice = if matches!(self.mode, Mode::Approval(_)) {
+            self.current_notice().map(str::to_string)
+        } else {
+            None
+        };
+        let approval_notice = approval_notice.as_deref();
         // #19: below 32 cols the too-small screen replaces every surface
         // (takeovers included); a resize back restores it live.
         if size.width < crate::app::TOO_SMALL_WIDTH {
             return self.draw_too_small(term);
         }
         // Full-screen takeover: the chat surfaces stay live underneath
-        // (frames keep folding into the store) but are not drawn.
-        if !matches!(self.mode, Mode::Chat) {
+        // (frames keep folding into the store) but are not drawn. #36:
+        // the APPROVAL is no longer full-screen — it falls through to the
+        // chat draw and overlays the live chat as a dialog at the end;
+        // questions/settings/image keep the takeover.
+        if !matches!(self.mode, Mode::Chat | Mode::Approval(_)) {
             term.draw(|frame| {
                 let area = frame.area();
                 // Owned: the viewer arm borrows `self.image_cache` mutably,
@@ -384,15 +422,6 @@ impl App {
                 let notice = self.current_notice().map(str::to_string);
                 let notice = notice.as_deref();
                 match &self.mode {
-                    Mode::Approval(takeover) => frame.render_widget(
-                        ApprovalView {
-                            takeover,
-                            notice,
-                            theme: &self.theme,
-                            locale: self.locale,
-                        },
-                        area,
-                    ),
                     Mode::Question(takeover) => frame.render_widget(
                         QuestionView {
                             takeover,
@@ -422,6 +451,10 @@ impl App {
                         },
                         area,
                     ),
+                    // #36: the approval is not a takeover — the gate
+                    // above excludes it, so this arm is unreachable (the
+                    // dialog renders over the chat draw instead).
+                    Mode::Approval(_) => {}
                     Mode::Chat => {}
                 }
                 // The theme picker floats over the settings view too (it's
@@ -1047,6 +1080,59 @@ impl App {
                 if area.height > 0 {
                     frame.render_widget(popup, area);
                 }
+            }
+
+            // #36: the approval request overlays the live chat as a
+            // centered dialog — the popup treatment (Clear + bordered
+            // block + panel_bg interior; ApprovalView provides all of it,
+            // rendered into the dialog rect instead of the full frame).
+            // Width clamps to min(64, chat region − 4) per the #19 popup
+            // rule; height fits the wrapped content, capped at the chat
+            // region; centered over the chat (never the composer/status).
+            if let Mode::Approval(takeover) = &self.mode {
+                let notice = approval_notice;
+                let width = 64u16.min(chat_area.width.saturating_sub(4));
+                let inner_width = width.saturating_sub(4); // border 2 + padding 2
+                // #36: the estimate consumes the SAME lines the view
+                // renders (prefixes included — they drifted once, clipping
+                // the action line) and is an upper bound of the wrap.
+                let content_height = |compact: bool| {
+                    ApprovalView {
+                        takeover,
+                        notice,
+                        theme: &self.theme,
+                        locale: self.locale,
+                        compact,
+                    }
+                    .lines()
+                    .iter()
+                    .map(|line| wrapped_height(&line.to_string(), inner_width))
+                    .sum::<usize>()
+                };
+                // Tiny chat area: drop the reason/summary hints (never the
+                // y/n action line) before the height cap.
+                let compact = 2 + content_height(false) > chat_area.height as usize;
+                // The area includes the block's top/bottom border rows.
+                let height = ((2 + content_height(compact)) as u16)
+                    .min(chat_area.height)
+                    .max(3);
+                let area = Rect {
+                    x: chat_area.x + chat_area.width.saturating_sub(width) / 2,
+                    y: chat_area.y + chat_area.height.saturating_sub(height) / 2,
+                    width,
+                    height,
+                };
+                frame.render_widget(ratatui::widgets::Clear, area);
+                frame.render_widget(
+                    ApprovalView {
+                        takeover,
+                        notice,
+                        theme: &self.theme,
+                        locale: self.locale,
+                        compact,
+                    },
+                    area,
+                );
             }
         })?;
 

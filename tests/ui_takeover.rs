@@ -12,6 +12,8 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::json;
 
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+
 use dsh_tui::app::{App, AppEvent, EventChannel, Focus};
 use dsh_tui::client::WireClient;
 use dsh_tui::ui::takeover::Mode;
@@ -127,7 +129,119 @@ async fn approval_takeover_with_reason_120x30() {
     );
     assert!(view.contains("allow once"), "action line: {view}");
     assert!(view.contains("reject"), "action line: {view}");
-    assert!(!view.contains("Sessions"), "three-region layout replaced");
+    // #36: the approval overlays the LIVE chat as a dialog — the sidebar
+    // and the empty-state hero stay visible around it.
+    assert!(view.contains("Sessions"), "chat live under the dialog");
+}
+
+/// #36: at a narrow terminal the dialog clamps within it — width
+/// min(64, chat region − 4) and the content (action line included) fits.
+#[tokio::test]
+async fn approval_dialog_clamps_at_40_cols() {
+    let mut app = App::default();
+    let backend = TestBackend::new(40, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Answerable {
+                rpc_id: RpcId("rpc-a3".into()),
+                frame: approval_requested("a3", "read_file", Some("reads /etc")),
+            },
+            AppEvent::Key(ctrl(KeyCode::Char('c'))),
+        ],
+    )
+    .await;
+
+    let view = format!("{}", term.backend());
+    assert!(view.contains("approval"), "dialog title: {view}");
+    assert!(view.contains("read_file"), "tool name: {view}");
+    assert!(view.contains("allow once"), "action line fits: {view}");
+    // The dialog never exceeds the terminal: a 40-col dialog is 36 wide,
+    // centered at x=2 → the right border at col 37; col 39 stays clear.
+    let buffer = term.backend().buffer();
+    let right_border = buffer.cell((37, 5)).expect("right border cell").symbol();
+    assert_eq!(right_border, "│", "dialog box present at the clamp width");
+    let beyond = buffer.cell((39, 5)).expect("beyond cell").symbol();
+    assert_eq!(beyond, " ", "dialog never exceeds the terminal");
+}
+
+/// #36: mouse is inert while an approval dialog is open — a click on the
+/// chat under it must not select or toggle anything.
+#[tokio::test]
+async fn approval_dialog_mouse_is_inert() {
+    let mut app = App::default();
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Answerable {
+                rpc_id: RpcId("rpc-a4".into()),
+                frame: approval_requested("a4", "bash", Some("reads /etc")),
+            },
+            AppEvent::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)),
+            AppEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 40,
+                row: 10,
+                modifiers: KeyModifiers::NONE,
+            }),
+            AppEvent::Key(ctrl(KeyCode::Char('c'))),
+        ],
+    )
+    .await;
+
+    assert!(matches!(app.mode, Mode::Approval(_)), "still open");
+    assert_eq!(app.selection, None, "no selection from the chat click");
+    assert!(
+        !app.select_mode,
+        "the click did not arm or move selection state"
+    );
+}
+
+/// #36 must-fix: a long word-heavy reason must never clip the y/n action
+/// line — the height estimate consumes the same prefixed lines the view
+/// renders (an upper bound of the wrap) and, when the chat area can't fit
+/// the full body, drops the reason/summary hints instead of the action
+/// line.
+#[tokio::test]
+async fn approval_dialog_long_reason_keeps_the_action_line() {
+    let mut app = App::default();
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    // ~2,700 chars of single-width words: the reason alone needs more
+    // rows than the whole dialog area (div_ceil-style estimates under-cut
+    // it by several rows, which used to push the action line off-screen).
+    let reason = "frobnicate the frobnicator with a frobnicated frob ".repeat(90);
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Answerable {
+                rpc_id: RpcId("rpc-a5".into()),
+                frame: approval_requested("a5", "bash", Some(&reason)),
+            },
+            AppEvent::Key(ctrl(KeyCode::Char('c'))),
+        ],
+    )
+    .await;
+
+    let view = format!("{}", term.backend());
+    assert!(matches!(app.mode, Mode::Approval(_)), "dialog open");
+    assert!(
+        view.contains("allow once"),
+        "y/n action line on-screen: {view}"
+    );
+    assert!(view.contains("bash"), "tool name kept: {view}");
+    assert!(
+        !view.contains("reason:"),
+        "the oversized reason is dropped before the action line: {view}"
+    );
 }
 
 #[tokio::test]

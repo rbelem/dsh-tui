@@ -192,13 +192,67 @@ impl QuestionTakeover {
     }
 }
 
-/// The approval takeover body (full-screen).
+/// The approval dialog body (#36): the request rendered as a centered
+/// dialog over the live chat.
 pub struct ApprovalView<'a> {
     pub takeover: &'a ApprovalTakeover,
     /// Transient notice (toast/hint), rendered dim at the bottom.
     pub notice: Option<&'a str>,
     pub theme: &'a crate::theme::Theme,
     pub locale: Locale,
+    /// #36: drop the reason/summary hint lines when the chat area can't
+    /// fit the full body — the y/n action line survives tiny terminals.
+    pub compact: bool,
+}
+
+impl ApprovalView<'_> {
+    /// #36: the body's display lines — the single source both the
+    /// renderer and the dialog-height estimator consume (they drifted
+    /// once, clipping the action line). `compact` drops the reason and
+    /// tool-summary hints first, never the action line.
+    pub(crate) fn lines(&self) -> Vec<Line<'_>> {
+        let takeover = self.takeover;
+        let mut lines: Vec<Line> = vec![
+            Line::raw(""),
+            Line::styled(&takeover.tool_name, style::active(self.theme)),
+        ];
+        if !self.compact
+            && let Some(reason) = &takeover.reason
+        {
+            lines.push(Line::raw(trf(self.locale, "approval.reason", &[reason])));
+        }
+        lines.push(Line::raw(""));
+        let mut context = trf(
+            self.locale,
+            "approval.context",
+            &[takeover.session_id.as_ref()],
+        );
+        if let Some(call_id) = &takeover.call_id {
+            context.push_str(&trf(self.locale, "approval.context_call", &[call_id]));
+        }
+        lines.push(Line::styled(context, style::hint(self.theme)));
+        if !self.compact
+            && let Some(summary) = &takeover.tool_summary
+        {
+            lines.push(Line::styled(
+                trf(self.locale, "approval.tool_call", &[summary]),
+                style::hint(self.theme),
+            ));
+        }
+        // TODO: allow-always-preset + the full-access risk-ack second
+        // keypress (Q13) — needs the permissions projection in the store.
+        lines.push(Line::raw(""));
+        lines.push(Line::from(vec![
+            Span::styled("y", style::active(self.theme)),
+            Span::raw(tr(self.locale, "takeover.allow_once")),
+            Span::styled("n", style::active(self.theme)),
+            Span::raw(tr(self.locale, "takeover.reject")),
+        ]));
+        if let Some(notice) = self.notice {
+            lines.push(Line::styled(notice, style::hint(self.theme)));
+        }
+        lines
+    }
 }
 
 impl Widget for ApprovalView<'_> {
@@ -217,43 +271,7 @@ impl Widget for ApprovalView<'_> {
         // #11 popup treatment: panel_bg interior fill.
         buf.set_style(inner, style::panel_fill(self.theme));
 
-        let takeover = self.takeover;
-        let mut lines: Vec<Line> = vec![
-            Line::raw(""),
-            Line::styled(&takeover.tool_name, style::active(self.theme)),
-        ];
-        if let Some(reason) = &takeover.reason {
-            lines.push(Line::raw(trf(self.locale, "approval.reason", &[reason])));
-        }
-        lines.push(Line::raw(""));
-        let mut context = trf(
-            self.locale,
-            "approval.context",
-            &[takeover.session_id.as_ref()],
-        );
-        if let Some(call_id) = &takeover.call_id {
-            context.push_str(&trf(self.locale, "approval.context_call", &[call_id]));
-        }
-        lines.push(Line::styled(context, style::hint(self.theme)));
-        if let Some(summary) = &takeover.tool_summary {
-            lines.push(Line::styled(
-                trf(self.locale, "approval.tool_call", &[summary]),
-                style::hint(self.theme),
-            ));
-        }
-        // TODO: allow-always-preset + the full-access risk-ack second
-        // keypress (Q13) — needs the permissions projection in the store.
-        lines.push(Line::raw(""));
-        lines.push(Line::from(vec![
-            Span::styled("y", style::active(self.theme)),
-            Span::raw(tr(self.locale, "takeover.allow_once")),
-            Span::styled("n", style::active(self.theme)),
-            Span::raw(tr(self.locale, "takeover.reject")),
-        ]));
-        if let Some(notice) = self.notice {
-            lines.push(Line::styled(notice, style::hint(self.theme)));
-        }
-        Paragraph::new(lines)
+        Paragraph::new(self.lines())
             .wrap(Wrap { trim: false })
             .render(inner, buf);
     }
