@@ -115,8 +115,10 @@ new events over the mux downlink.
 
 Composer editing: arrows / `Home` / `End` move the caret, `Backspace` /
 `Delete` edit, `Esc` returns to the chat. `Shift+Enter` inserts a newline
-(web parity; most terminals deliver it as plain `Enter`, so the modifier
-may not arrive — plain `Enter` submits).
+(web parity; requires a CSI-u / kitty-keyboard-protocol terminal —
+kitty, WezTerm, Alacritty ≥0.13, foot, Ghostty, Windows Terminal ≥1.19.
+On legacy terminals Shift+Enter arrives as plain `Enter` and submits
+instead — graceful degradation, nothing breaks).
 
 ## Mouse
 

@@ -1996,31 +1996,42 @@ pub struct TerminalGuard;
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        use crossterm::event::{DisableBracketedPaste, DisableMouseCapture};
+        use crossterm::event::{
+            DisableBracketedPaste, DisableMouseCapture, PopKeyboardEnhancementFlags,
+        };
         use crossterm::execute;
         use crossterm::terminal::{LeaveAlternateScreen, disable_raw_mode};
         let _ = execute!(
             std::io::stdout(),
             DisableMouseCapture,
             DisableBracketedPaste,
+            PopKeyboardEnhancementFlags,
             LeaveAlternateScreen
         );
         let _ = disable_raw_mode();
     }
 }
 
-/// Production terminal setup: raw mode + alternate screen + mouse capture
-/// + bracketed paste.
+/// Production terminal setup: raw mode, alternate screen, mouse capture,
+/// bracketed paste, and the CSI-u keyboard enhancement that makes
+/// Shift+Enter distinct from plain Enter (`composer.newline`;
+/// `DISAMBIGUATE_ESCAPE_CODES` alone — the minimal surface). Legacy
+/// terminals ignore the push and Shift+Enter degrades to submit, exactly
+/// as before.
 pub fn setup_terminal()
 -> Result<Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>, AppError> {
-    use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
+    use crossterm::event::{
+        EnableBracketedPaste, EnableMouseCapture, KeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
+    };
     crossterm::terminal::enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     crossterm::execute!(
         stdout,
         crossterm::terminal::EnterAlternateScreen,
         EnableMouseCapture,
-        EnableBracketedPaste
+        EnableBracketedPaste,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
     )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout);
     Ok(Terminal::new(backend)?)

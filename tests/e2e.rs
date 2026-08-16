@@ -721,6 +721,40 @@ async fn mock_respond_ok(mock: &MockGateway) {
         .await;
 }
 
+/// Composer-newline regression: the terminal setup pushes the CSI-u
+/// keyboard enhancement that makes Shift+Enter distinct from plain Enter
+/// (`\x1b[>1u` — DISAMBIGUATE_ESCAPE_CODES), and the teardown pops it
+/// (`\x1b[<1u`). The push rides the setup byte stream right after the
+/// alternate screen; the pop lands in the output after Ctrl+Q. Legacy
+/// terminals ignore both sequences (Shift+Enter degrades to submit, as
+/// before — the app's behavior is unchanged either way).
+#[tokio::test(flavor = "multi_thread")]
+async fn keyboard_enhancement_flags_round_trip_through_the_pty() {
+    let mut scenario =
+        boot_and_attach(&history_template("m1", "hi"), &history_template("m2", "hi")).await;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut pushed = false;
+    while Instant::now() < deadline {
+        if scenario.app.output().contains("\x1b[>1u") {
+            pushed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        pushed,
+        "the CSI-u push (`\\x1b[>1u`) is in the setup stream: {}",
+        scenario.app.output()
+    );
+    let status = scenario.app.quit(Duration::from_secs(3));
+    assert!(
+        scenario.app.output().contains("\x1b[<1u"),
+        "the teardown pops the flags (`\\x1b[<1u`): {}",
+        scenario.app.output()
+    );
+    assert!(status.is_some(), "the app exited cleanly");
+}
+
 /// #25: the OSC 52 selection-copy payload round-trips through a real PTY
 /// (the app's stdout → the master): arm selection with `v`, drag across
 /// "hello" with SGR mouse sequences, and assert the exact escape payload
