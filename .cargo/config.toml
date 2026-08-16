@@ -1,8 +1,12 @@
-# Faster dev links: mold is provided by devbox.json on Linux (CI installs it
-# via apt in .github/workflows/ci.yml). Target-scoped so the macOS leg keeps
-# its default linker. Note: `-fuse-ld=mold` hard-fails at link time if mold is
-# not on PATH — devbox (or CI's apt mold) is the supported way to get it; the
-# documented fallback is lld (ships with rustup's llvm-tools-preview, which
-# the CI rust job already installs). See issue #13.
+# Faster dev links via a soft-fail mold wrapper (issues #13/#16): mold is used
+# when available (devbox.json provides it on Linux; CI installs it via apt in
+# .github/workflows/ci.yml) and the default cc driver is used otherwise, so a
+# bare shell without mold never fails. The wrapper appends `-fuse-ld=mold`
+# after rustc's own args (gcc honors the last flag). Target-scoped so the
+# macOS leg keeps its default linker and is unaffected.
+#
+# The relative linker path is resolved by cargo against the workspace root
+# (verified: `cargo build` from repo root and from src/ both pass an absolute
+# `-C linker`), so rustc's CWD is irrelevant for in-workspace builds.
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+linker = ".cargo/mold-linker.sh"
