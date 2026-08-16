@@ -108,8 +108,14 @@ pub fn render_node_full(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_
     let mut skill_header = None;
     let lines = match &node.data {
         NodeData::User { content, .. } => {
+            // The user-message tint (#38): the theme's `user_bg` behind the
+            // flat text — `None` keeps the plain fg(text) look. Style-layer
+            // only; the markdown structure is identical either way.
+            let user_style = Style::default()
+                .fg(theme.text)
+                .bg(theme.user_bg.unwrap_or_default());
             let (lines, ranges, skill) =
-                render_content_blocks(content, ctx, &mut image_rows, skill_fold);
+                render_content_blocks(content, user_style, ctx, &mut image_rows, skill_fold);
             code_ranges = ranges;
             skill_header = skill;
             lines
@@ -284,9 +290,11 @@ fn render_assistant_block(
 
 /// Render content blocks into lines; the returned code ranges index into
 /// the returned vec, and the skill-header line index (of the FIRST skill
-/// block, if any) is relative to the returned lines.
+/// block, if any) is relative to the returned lines. `text_style` styles
+/// text blocks (the user-message tint path passes the bg-carrying style).
 fn render_content_blocks(
     content: &[ContentBlock],
+    text_style: Style,
     ctx: &RenderContext<'_>,
     image_rows: &mut Vec<ImageRow>,
     skill_fold: bool,
@@ -296,9 +304,7 @@ fn render_content_blocks(
     let mut skill_header = None;
     for block in content {
         let (block_lines, block_ranges, block_skill) = match block {
-            ContentBlock::Text { text } => {
-                render_markdown(text, Style::default().fg(ctx.theme.text), ctx, skill_fold)
-            }
+            ContentBlock::Text { text } => render_markdown(text, text_style, ctx, skill_fold),
             ContentBlock::Reasoning { text } => render_markdown(
                 text,
                 Style::default()
@@ -425,8 +431,13 @@ fn render_tool_node(
     let mut code_ranges = Vec::new();
     let mut skill_header = None;
     if let Some(result) = result {
-        let (result_lines, result_ranges, result_skill) =
-            render_content_blocks(&result.content, ctx, image_rows, skill_fold);
+        let (result_lines, result_ranges, result_skill) = render_content_blocks(
+            &result.content,
+            Style::default().fg(theme.text),
+            ctx,
+            image_rows,
+            skill_fold,
+        );
         code_ranges.extend(
             result_ranges
                 .into_iter()

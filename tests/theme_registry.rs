@@ -249,6 +249,12 @@ fn known_palette_hexes_parse_to_rgb() {
     // #11 tokens: bundled themes carry explicit panel_bg/border values.
     assert_eq!(mocha.panel_bg, Color::Rgb(0x1e, 0x1e, 0x2e), "bg-derived");
     assert_eq!(mocha.border, Color::Rgb(0x58, 0x5b, 0x70), "muted-derived");
+    // #38: bundled themes carry the user-message tint (a bg step).
+    assert_eq!(
+        mocha.user_bg,
+        Some(Color::Rgb(0x26, 0x26, 0x38)),
+        "user_bg slightly lighter than bg on a dark theme"
+    );
 }
 
 #[test]
@@ -265,6 +271,11 @@ fn dsh_house_themes_parse_with_exact_palettes() {
     assert_eq!(dark.panel_bg, Color::Rgb(0x14, 0x14, 0x14));
     assert_eq!(dark.text, Color::Rgb(0xee, 0xee, 0xee));
     assert_eq!(dark.border, Color::Rgb(0x3c, 0x3c, 0x3c));
+    assert_eq!(
+        dark.user_bg,
+        Some(Color::Rgb(0x10, 0x10, 0x10)),
+        "dark: lighter than bg #0a0a0a"
+    );
     assert_ne!(dark.bg, Color::Rgb(0, 0, 0), "no pure black (issue #11)");
 
     let light = Theme::from_toml_str(include_str!("../themes/dsh-light.toml")).unwrap();
@@ -279,6 +290,11 @@ fn dsh_house_themes_parse_with_exact_palettes() {
     assert_eq!(light.panel_bg, Color::Rgb(0xf0, 0xed, 0xe8));
     assert_eq!(light.text, Color::Rgb(0x1a, 0x1a, 0x1a));
     assert_eq!(light.border, Color::Rgb(0xd8, 0xd4, 0xcc));
+    assert_eq!(
+        light.user_bg,
+        Some(Color::Rgb(0xf5, 0xf2, 0xed)),
+        "light: darker than bg #faf8f5"
+    );
 }
 
 #[test]
@@ -330,6 +346,8 @@ text = "#aabbcc"
         "panel_bg ← bg"
     );
     assert_eq!(theme.border, Color::Rgb(0x44, 0x55, 0x66), "border ← muted");
+    // #38: a theme without `user_bg` keeps flat user text (no tint).
+    assert_eq!(theme.user_bg, None, "user_bg ← no tint");
     // A bad explicit panel_bg is still rejected.
     let broken = bare.replace("bg = \"#778899\"", "bg = \"#778899\"\npanel_bg = \"nope\"");
     assert!(
@@ -356,6 +374,7 @@ fn default_theme_is_reset_based() {
     ] {
         assert_eq!(token, Color::Reset);
     }
+    assert_eq!(default.user_bg, None, "default theme has no user tint");
 }
 
 // ---------------------------------------------------------------------------
@@ -410,6 +429,7 @@ fn theme_colors_reach_rendered_cells() {
     let mut found_code = false;
     let mut found_text = false;
     let mut found_fill = false;
+    let mut found_user_bg = false;
     for y in 0..30u16 {
         for x in 0..120u16 {
             let Some(cell) = buffer.cell((x, y)) else {
@@ -427,11 +447,16 @@ fn theme_colors_reach_rendered_cells() {
                 // The code-block body carries the panel_bg fill (#11).
                 found_fill = true;
             }
+            if mocha.user_bg == Some(cell.bg) {
+                // The user paragraph carries the user_bg tint (#38).
+                found_user_bg = true;
+            }
         }
     }
     assert!(found_code, "unfenced code text carries theme.code");
     assert!(found_text, "user text carries theme.text");
     assert!(found_fill, "code block rows carry the panel_bg fill");
+    assert!(found_user_bg, "user text rows carry the user_bg tint");
 }
 
 #[test]

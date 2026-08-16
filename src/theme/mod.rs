@@ -2,7 +2,8 @@
 //! the Ctrl+T picker, and config persistence.
 //!
 //! Tokens (design contract): `accent`/`muted`/`error`/`warning`/`success`/
-//! `code`/`bg`/`text`, plus the #11 additions `panel_bg`/`border`. The
+//! `code`/`bg`/`text`, plus the #11 additions `panel_bg`/`border` and the
+//! user-message tint `user_bg`. The
 //! default theme is terminal-following — every token is `Reset`, preserving
 //! the modifiers-only look; palette themes render only on terminals that
 //! report truecolor ([`terminal_supports_color`]).
@@ -54,6 +55,10 @@ pub struct Theme {
     /// Subtle pane/box border color (#11). Distinct from `muted` so the
     /// palette can tune rule visibility independently of text.
     pub border: Color,
+    /// Background tint behind user-message text — a stepped shade of `bg`
+    /// (slightly lighter in dark themes, slightly darker in light ones).
+    /// `None` = flat text (the terminal-following default).
+    pub user_bg: Option<Color>,
 }
 
 impl Default for Theme {
@@ -73,15 +78,16 @@ impl Default for Theme {
             text: Color::Reset,
             panel_bg: Color::Reset,
             border: Color::Reset,
+            user_bg: None,
         }
     }
 }
 
 impl Theme {
-    /// Parse a theme from its TOML text (`name` + eight `#rrggbb` hexes).
-    /// The #11 tokens `panel_bg`/`border` are optional: a user theme without
-    /// them falls back to its `bg`/`muted` (backward-compatible migration —
-    /// existing user configs keep parsing and render unchanged).
+    /// Parse a theme from its TOML text (`name` + the `#rrggbb` hexes).
+    /// The optional tokens: `panel_bg`/`border` fall back to `bg`/`muted`,
+    /// `user_bg` to no tint (flat user text) — backward-compatible migration,
+    /// existing user configs keep parsing and render unchanged.
     pub fn from_toml_str(toml: &str) -> Result<Self, ThemeError> {
         let raw: ThemeToml = toml::from_str(toml)
             .map_err(|e| ThemeError::Invalid(format!("bad theme TOML: {e}")))?;
@@ -108,6 +114,12 @@ impl Theme {
                 Some(value) => parse("border", &value)?,
                 None => parse("muted", &raw.muted)?,
             },
+            // `user_bg` is optional with no fallback: absent = flat user
+            // text (a theme without it renders exactly as before).
+            user_bg: match raw.user_bg {
+                Some(value) => Some(parse("user_bg", &value)?),
+                None => None,
+            },
         })
     }
 }
@@ -125,6 +137,7 @@ struct ThemeToml {
     text: String,
     panel_bg: Option<String>,
     border: Option<String>,
+    user_bg: Option<String>,
 }
 
 /// Parse `#rrggbb` (the bundled themes' canonical form; 3-digit shorthands
