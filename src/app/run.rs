@@ -2062,7 +2062,9 @@ impl App {
             ("●", Style::default().fg(theme.success))
         };
         // #12: the `copied · N chars` flash replaces the indicator for its
-        // ~2s lifetime (a status-line flash — no toast system).
+        // ~2s lifetime (a status-line flash — no toast system). #38: while
+        // running, the busy-elapsed time renders after the spinner, muted
+        // like the ` · ` separators (idle draws nothing extra).
         let right = if let Some((text, at)) = &self.copied_flash
             && at.elapsed() < crate::app::COPY_FLASH_TTL
         {
@@ -2070,10 +2072,28 @@ impl App {
                 text.clone(),
                 Style::default().fg(theme.success),
             )]
+        } else if let Some(since) = self.busy_since {
+            vec![
+                Span::styled(indicator.0, indicator.1),
+                Span::styled(" · ", style::hint(theme)),
+                Span::styled(format_elapsed(since.elapsed()), style::hint(theme)),
+            ]
         } else {
             vec![Span::styled(indicator.0, indicator.1)]
         };
         (left, right)
+    }
+}
+
+/// Format a busy duration codex-style: `(2m 03s)` past a minute (seconds
+/// zero-padded), `(9s)` under it. `pub` for integration-test observability
+/// (like [`SPINNER_FRAMES`]).
+pub fn format_elapsed(elapsed: std::time::Duration) -> String {
+    let total = elapsed.as_secs();
+    if total < 60 {
+        format!("({total}s)")
+    } else {
+        format!("({}m {:02}s)", total / 60, total % 60)
     }
 }
 

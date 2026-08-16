@@ -412,6 +412,9 @@ pub struct App {
     /// #15: the running-spinner animation frame (advanced per tick; the
     /// status line cycles the braille frames while the session runs).
     pub spinner_frame: usize,
+    /// #38: when the current busy stretch started (`None` while idle) —
+    /// the status line shows the elapsed running time next to the spinner.
+    pub busy_since: Option<Instant>,
     /// #30: the drawer discoverability hint was shown once (per app run) —
     /// the first open only, so it never nags.
     pub drawer_hint_shown: bool,
@@ -497,6 +500,7 @@ impl Default for App {
             // pre-#19 key semantics; the first draw sets the real width.
             terminal_width: 80,
             spinner_frame: 0,
+            busy_since: None,
             drawer_hint_shown: false,
             selection_widths_cache: None,
             last_click: None,
@@ -666,10 +670,16 @@ impl App {
     /// actually busy — schedule the repaint that animates it. Idle draws
     /// nothing (the needs_draw gating stays untouched), so the animation
     /// causes no redraw churn when there is nothing to animate.
+    /// #38: the busy-elapsed clock syncs here (per tick): `busy_since`
+    /// latches when a session becomes running and clears when it stops —
+    /// one transition point, always in sync with the spinner.
     pub fn advance_spinner(&mut self) {
         self.spinner_frame = self.spinner_frame.wrapping_add(1);
         if matches!(self.mode, Mode::Chat) && self.session_running() {
+            self.busy_since.get_or_insert_with(Instant::now);
             self.needs_draw = true;
+        } else {
+            self.busy_since = None;
         }
     }
 

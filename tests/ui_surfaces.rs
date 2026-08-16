@@ -372,6 +372,99 @@ async fn status_indicators_carry_semantic_colors() {
 }
 
 // ---------------------------------------------------------------------------
+// busy elapsed (#38)
+// ---------------------------------------------------------------------------
+
+/// The busy-duration formatter: `(9s)` under a minute, `(2m 03s)` past it.
+#[test]
+fn elapsed_formatting() {
+    use dsh_tui::app::run::format_elapsed;
+    assert_eq!(format_elapsed(Duration::ZERO), "(0s)");
+    assert_eq!(format_elapsed(Duration::from_secs(9)), "(9s)");
+    assert_eq!(format_elapsed(Duration::from_secs(59)), "(59s)");
+    assert_eq!(format_elapsed(Duration::from_secs(60)), "(1m 00s)");
+    assert_eq!(format_elapsed(Duration::from_secs(123)), "(2m 03s)");
+    assert_eq!(format_elapsed(Duration::from_secs(3600 + 61)), "(61m 01s)");
+}
+
+/// The busy clock latches on the first tick while running, shows the elapsed
+/// next to the spinner, and clears when the session goes idle (#38).
+#[tokio::test]
+async fn busy_elapsed_shows_only_while_running() {
+    // Running: the spinner + ` · (0s)` in the right cluster.
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", true)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))), // first draw
+            AppEvent::Tick,                    // latches the busy clock
+            AppEvent::Key(key(KeyCode::F(1))), // draw with the elapsed
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(view.contains("(0s)"), "running shows the elapsed: {view}");
+    assert!(app.busy_since.is_some(), "busy clock latched while running");
+
+    // Idle: no elapsed, no clock.
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Tick,
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(!view.contains("(0s)"), "idle shows no elapsed: {view}");
+    assert!(app.busy_since.is_none(), "busy clock cleared while idle");
+
+    // Running → idle mid-run: the next tick clears the clock and the
+    // elapsed disappears from the status line.
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", true)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Tick,
+            AppEvent::HostFrame(dsh_tui::wire::events::HostFrame::HostSessionStatus {
+                session_id: SessionId("s1".into()),
+                running: false,
+            }),
+            AppEvent::Tick,
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(!view.contains("(0s)"), "elapsed cleared after idle: {view}");
+    assert!(app.busy_since.is_none(), "busy clock cleared when idle");
+}
+
+// ---------------------------------------------------------------------------
 // composer
 // ---------------------------------------------------------------------------
 
