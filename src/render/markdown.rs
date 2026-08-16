@@ -16,6 +16,15 @@
 //! row cache can paint the `panel_bg` fill at full content width (no box,
 //! no indent). One blank row around code blocks and before headings; links
 //! are the accent token.
+//!
+//! OSC 8 hyperlinks (#2): the installed ratatui 0.30.2 has no
+//! `Span::hyperlink` API (no HYPERLINK modifier, no style field — verified
+//! in the ratatui-core 0.1.2 sources it re-exports), so link spans carry a
+//! zero-width prefix — `ZWSP url ZWSP` ([`LINK_PREFIX`]) — that the chat
+//! view strips at draw time and turns into raw OSC 8 sequences in the cell
+//! symbols ([`crate::render::chat_view`]). Zero width keeps the wrap math
+//! exact, and `Buffer::set_stringn` drops zero-width graphemes, so the
+//! prefix is invisible even where a line is drawn without the injection.
 
 use std::collections::HashMap;
 
@@ -31,6 +40,10 @@ use crate::theme::Theme;
 
 /// Maximum width of a tool-arguments preview on the call line.
 const ARGS_PREVIEW_MAX: usize = 100;
+
+/// Zero-width marker wrapping a link's URL inside its span content:
+/// `ZWSP url ZWSP text`. See the module docs (OSC 8 hyperlinks, #2).
+pub const LINK_PREFIX: char = '\u{200B}';
 
 /// [`render_node_full`] output: the display lines plus the inline-image
 /// segments and the code-block line ranges. Segment/range line indices are
@@ -714,9 +727,10 @@ struct Sink {
     /// Half-open line ranges (into `lines`) that are fenced code — the
     /// `panel_bg` fill targets.
     code_ranges: Vec<(usize, usize)>,
-    /// Inside a link: the accent color applies (span-level, so nested
-    /// emphasis still works).
-    link: bool,
+    /// Inside a link: the destination URL (accent color applies; non-empty
+    /// URLs additionally wrap pushed spans in the OSC 8 prefix — see the
+    /// module docs, #2).
+    link: Option<String>,
     /// The line being assembled (blockquote/list markers prepended on flush).
     current: Vec<Span<'static>>,
     /// Open emphasis/strong/strikethrough/heading modifiers.
@@ -738,7 +752,7 @@ impl Sink {
             skill_header: None,
             lines: Vec::new(),
             code_ranges: Vec::new(),
-            link: false,
+            link: None,
             current: Vec::new(),
             modifiers: Vec::new(),
             quote_depth: 0,
@@ -889,9 +903,10 @@ impl Sink {
                 self.in_cell = true;
                 self.current.clear();
             }
-            pulldown_cmark::Tag::Link { .. } => {
-                // #11: links are the accent token.
-                self.link = true;
+            pulldown_cmark::Tag::Link { dest_url, .. } => {
+                // #11: links are the accent token; #2: the URL rides the
+                // span content as the OSC 8 prefix (see [`LINK_PREFIX`]).
+                self.link = Some(dest_url.to_string());
             }
             pulldown_cmark::Tag::Image { .. } => {}
             _ => {}
@@ -957,7 +972,7 @@ impl Sink {
                 self.in_cell = false;
             }
             pulldown_cmark::TagEnd::Link => {
-                self.link = false;
+                self.link = None;
             }
             pulldown_cmark::TagEnd::Image => {}
             _ => {}
@@ -965,12 +980,22 @@ impl Sink {
     }
 
     fn push_span(&mut self, span: Span<'static>) {
+        // #2: inside a link, wrap the span in the OSC 8 prefix so the chat
+        // view can emit the hyperlink around it. Empty URLs keep the plain
+        // accent styling (no prefix — rendering unchanged).
+        let span = match self.link.as_deref() {
+            Some(url) if !url.is_empty() => Span::styled(
+                format!("{LINK_PREFIX}{url}{LINK_PREFIX}{}", span.content),
+                span.style,
+            ),
+            _ => span,
+        };
         self.current.push(span);
     }
 
     fn style(&self) -> Style {
         let mut style = self.base;
-        if self.link {
+        if self.link.is_some() {
             style = style.fg(self.theme.accent);
         }
         for modifier in &self.modifiers {

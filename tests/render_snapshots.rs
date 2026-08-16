@@ -826,3 +826,106 @@ fn full_scenario_folds_five_nodes() {
     );
     assert!(matches!(&state.nodes[3].data, NodeData::Compaction { .. }));
 }
+
+#[test]
+fn links_inject_osc8_sequences_into_the_buffer() {
+    // #2: a markdown link renders its label plus raw OSC 8 hyperlink
+    // sequences in the first/last cell symbols (ratatui 0.30.2 has no
+    // Span::hyperlink API). Terminals without OSC 8 ignore the sequences.
+    let mut store = SessionStore::new();
+    ingest_all(
+        &mut store,
+        S,
+        vec![ev(
+            1,
+            "user/message",
+            user_msg(
+                "m1",
+                "Read the [docs](https://example.com) page",
+                user_source(),
+            ),
+        )],
+    );
+    let mut cache = RowCache::new();
+    cache.sync(
+        &store,
+        &sid(),
+        &render_ctx(
+            80,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
+    );
+    cache.render_dirty(
+        &store,
+        &sid(),
+        &render_ctx(
+            80,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
+    );
+    let backend = TestBackend::new(80, 10);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    terminal
+        .draw(|frame| {
+            frame.render_widget(
+                ChatView {
+                    store: &store,
+                    session_id: &sid(),
+                    offset: 0,
+                    row_cache: &mut cache,
+                    images: &mut ImageCache::default(),
+                },
+                frame.area(),
+            );
+        })
+        .expect("draw");
+    let cells: Vec<String> = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol().to_string())
+        .collect();
+    // The OSC 8 open sequence precedes the link's first cell, the close
+    // follows its last.
+    assert!(
+        cells
+            .iter()
+            .any(|s| s.contains("\x1b]8;;https://example.com\x1b\\")),
+        "missing OSC 8 open: {cells:?}"
+    );
+    assert!(
+        cells.iter().any(|s| s.contains("\x1b]8;;\x1b\\")),
+        "missing OSC 8 close: {cells:?}"
+    );
+    // The label renders across the injected cells: the first char rides
+    // the open cell, the middle chars are plain, the last rides the close
+    // cell.
+    assert!(
+        cells
+            .iter()
+            .any(|s| s.contains("\x1b]8;;https://example.com\x1b\\d")),
+        "open + first label char: {cells:?}"
+    );
+    assert!(
+        cells.iter().any(|s| s == "o") && cells.iter().any(|s| s == "c"),
+        "label middle: {cells:?}"
+    );
+    assert!(
+        cells.iter().any(|s| s == "s\x1b]8;;\x1b\\"),
+        "close + last label char: {cells:?}"
+    );
+    // The URL itself never shows as plain text.
+    assert!(
+        !cells
+            .iter()
+            .any(|s| s.contains("example.com") && !s.contains("\x1b]8;;")),
+        "URL leaked into the visible buffer: {cells:?}"
+    );
+}

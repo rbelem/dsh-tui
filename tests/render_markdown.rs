@@ -221,10 +221,58 @@ fn markdown_surface_covers_every_sink_branch() {
 }
 
 #[test]
+fn links_carry_the_osc8_prefix_and_empty_urls_stay_plain() {
+    let theme = Theme::default();
+    let (lines, _, _) = render_markdown(
+        "see [docs](https://example.com) and [plain]()",
+        Style::default().fg(theme.text),
+        &render_ctx(
+            80,
+            &theme,
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
+        true,
+    );
+    // #2: the link span carries the `ZWSP url ZWSP` OSC 8 prefix — zero
+    // width, so wrap math and layout are untouched.
+    let link = lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| s.content.as_ref().ends_with("docs")));
+    let link_span = link
+        .expect("link span")
+        .spans
+        .iter()
+        .find(|s| s.content.as_ref().ends_with("docs"))
+        .expect("span");
+    assert_eq!(
+        link_span.content.as_ref(),
+        "\u{200B}https://example.com\u{200B}docs"
+    );
+    assert_eq!(link_span.style.fg, Some(theme.accent));
+    // An empty URL keeps the accent styling but adds no prefix.
+    let plain = lines
+        .iter()
+        .find(|l| l.spans.iter().any(|s| s.content.as_ref() == "plain"));
+    let plain_span = plain
+        .expect("empty-url link")
+        .spans
+        .iter()
+        .find(|s| s.content.as_ref() == "plain")
+        .expect("span");
+    assert_eq!(plain_span.content.as_ref(), "plain");
+    assert_eq!(plain_span.style.fg, Some(theme.accent));
+}
+
+#[test]
 fn fenced_code_uses_the_code_token_with_panel_fill_range() {
     let theme = Theme::default();
+    // An unknown language: the block renders exactly as before #5 — the
+    // single all-`code` span (the known-language path is covered by the
+    // highlighting golden tests below).
     let (lines, code_ranges, _skill) = render_markdown(
-        "before\n```rs\nfn main() { println!(\"hi\"); }\n```\nafter",
+        "before\n```notalang\nfn main() { println!(\"hi\"); }\n```\nafter",
         Style::default().fg(theme.text),
         &render_ctx(
             80,

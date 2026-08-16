@@ -17,12 +17,16 @@
 //! pass, clipped to the visible window). Rows without cached bytes have no
 //! segments and draw their `[image]` caption placeholder unchanged.
 
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarState, StatefulWidget, Widget};
 
+use std::num::NonZeroU16;
+
 use crate::render::image::ImageCache;
+use crate::render::markdown::LINK_PREFIX;
 use crate::render::row_cache::RowCache;
 use crate::store::SessionStore;
 use crate::wire::session::SessionId;
@@ -87,7 +91,7 @@ impl Widget for ChatView<'_> {
                 if y >= area.bottom() {
                     break;
                 }
-                buf.set_line(inner.x, y, line, inner.width);
+                draw_line_with_links(buf, inner.x, y, line, inner.width);
                 y += 1;
             }
             // Image segments paint over their filler lines (text pass first).
@@ -125,5 +129,76 @@ impl Widget for ChatView<'_> {
                     &mut state,
                 );
         }
+    }
+}
+
+/// OSC 8 hyperlink open/close sequences. Emitted around every markdown
+/// link's cells (see [`draw_line_with_links`]); terminals without OSC 8
+/// support ignore the sequences and render the text unchanged — no
+/// terminal detection needed.
+fn osc8_open(url: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\")
+}
+
+fn osc8_close() -> &'static str {
+    "\x1b]8;;\x1b\\"
+}
+
+/// Split a span content into (visible text, link URL): a leading
+/// `ZWSP url ZWSP` prefix (set by the markdown sink, #2) marks the span as
+/// a markdown link; anything else is plain text.
+fn strip_link_prefix(content: &str) -> (&str, Option<&str>) {
+    let Some(rest) = content.strip_prefix(LINK_PREFIX) else {
+        return (content, None);
+    };
+    let Some((url, text)) = rest.split_once(LINK_PREFIX) else {
+        return (content, None);
+    };
+    (text, Some(url))
+}
+
+/// Draw one (pre-wrapped) line, injecting the OSC 8 hyperlink sequences
+/// around markdown link spans. `Buffer::set_stringn` strips control
+/// characters from span content, so the sequences cannot ride the content
+/// — instead the prefix is removed and the sequences are written straight
+/// into the first/last cell symbols, which the terminal backend prints
+/// verbatim. Ratatui 0.30.2 has no `Span::hyperlink` API, hence the raw
+/// sequences (see the markdown module docs, #2).
+fn draw_line_with_links(buf: &mut Buffer, x: u16, y: u16, line: &Line<'static>, width: u16) {
+    let mut x = x;
+    let mut remaining = width;
+    for span in &line.spans {
+        if remaining == 0 {
+            break;
+        }
+        let (text, url) = strip_link_prefix(&span.content);
+        let x0 = x;
+        let (x_end, _) = buf.set_span(
+            x,
+            y,
+            &Span::styled(text, line.style.patch(span.style)),
+            remaining,
+        );
+        let drawn = x_end.saturating_sub(x0);
+        if drawn > 0
+            && let Some(url) = url
+        {
+            // The open sequence precedes the first visible cell, the close
+            // follows the last — the hyperlink region is exactly the span.
+            // Both cells are forced to width 1: the diff derives a cell's
+            // width from its symbol, and the embedded sequences would
+            // otherwise make the cell look multi-width and swallow the
+            // following cells as trailing columns.
+            let first = buf[(x0, y)].symbol().to_string();
+            buf[(x0, y)]
+                .set_symbol(&format!("{}{}", osc8_open(url), first))
+                .set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
+            let last = buf[(x_end - 1, y)].symbol().to_string();
+            buf[(x_end - 1, y)]
+                .set_symbol(&format!("{last}{}", osc8_close()))
+                .set_diff_option(CellDiffOption::ForcedWidth(NonZeroU16::MIN));
+        }
+        x = x_end;
+        remaining = remaining.saturating_sub(drawn);
     }
 }
