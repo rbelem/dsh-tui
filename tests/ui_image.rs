@@ -258,6 +258,7 @@ fn inline_image_expands_and_draws_with_cached_bytes() {
                     offset: 0,
                     row_cache: &mut cache,
                     images: &mut images,
+                    live: None,
                 },
                 f.area(),
             );

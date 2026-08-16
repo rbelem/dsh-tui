@@ -16,14 +16,22 @@
 //! the ratatui-image widget over their blank filler lines (after the text
 //! pass, clipped to the visible window). Rows without cached bytes have no
 //! segments and draw their `[image]` caption placeholder unchanged.
+//!
+//! #39 live tool overlay: a running tool node's header row (the
+//! [`CachedRow::tool_header`] line) gets a per-tick spinner + elapsed
+//! indicator written straight into the buffer after its text — the cached
+//! lines stay static, so the animation costs no re-render (the caller
+//! supplies the frame + per-node elapsed via [`ChatView::live`]).
+
+use std::collections::HashMap;
+use std::num::NonZeroU16;
+use std::time::{Duration, Instant};
 
 use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Scrollbar, ScrollbarState, StatefulWidget, Widget};
-
-use std::num::NonZeroU16;
 
 use crate::render::image::ImageCache;
 use crate::render::markdown::LINK_PREFIX;
@@ -37,6 +45,37 @@ pub fn content_width(area_width: u16) -> u16 {
     area_width.saturating_sub(4)
 }
 
+/// The busy-spinner braille frames, cycled per tick on the status line AND
+/// on running tool headers (#39). All 1 cell wide — no layout shift;
+/// glyphs, not strings — i18n-safe.
+pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Format a busy duration codex-style: `(2m 03s)` past a minute (seconds
+/// zero-padded), `(9s)` under it. `pub` for integration-test observability
+/// (like [`SPINNER_FRAMES`]).
+pub fn format_elapsed(elapsed: Duration) -> String {
+    let total = elapsed.as_secs();
+    if total < 60 {
+        format!("({total}s)")
+    } else {
+        format!("({}m {:02}s)", total / 60, total % 60)
+    }
+}
+
+/// #39: the per-draw live chat state for running tool headers — the
+/// spinner frame index, the indicator styles (built by the caller from
+/// the active theme), plus, per running tool node key, the instant the
+/// caller first observed it running (elapsed is measured at draw time).
+/// `None` on `ChatView` draws with no live overlay.
+pub struct LiveChatState<'a> {
+    pub frame: usize,
+    pub running: &'a HashMap<String, Instant>,
+    /// The spinner glyph's style (accent).
+    pub spinner_style: Style,
+    /// The elapsed text's style (hint).
+    pub elapsed_style: Style,
+}
+
 /// Virtualized chat list over the cached rows of one session.
 pub struct ChatView<'a> {
     pub store: &'a SessionStore,
@@ -46,6 +85,9 @@ pub struct ChatView<'a> {
     pub row_cache: &'a mut RowCache,
     /// Decoded images for the inline segments (empty in v1 — module docs).
     pub images: &'a mut ImageCache,
+    /// #39: the live running/elapsed overlay for tool headers (`None`
+    /// when idle — no per-tick chrome).
+    pub live: Option<LiveChatState<'a>>,
 }
 
 impl Widget for ChatView<'_> {
@@ -92,6 +134,17 @@ impl Widget for ChatView<'_> {
                     break;
                 }
                 draw_line_with_links(buf, inner.x, y, line, inner.width);
+                // #39: the running tool's header carries the live
+                // spinner + elapsed indicator (buffer-only — the cached
+                // lines stay static, so the per-tick animation costs no
+                // re-render).
+                let line_index = y - row_top;
+                if usize::from(line_index) == row.tool_header.unwrap_or(usize::MAX)
+                    && let Some(live) = self.live.as_ref()
+                    && let Some(since) = live.running.get(&row.node_key)
+                {
+                    draw_live_indicator(buf, inner.x, y, inner.width, line, live, since.elapsed());
+                }
                 y += 1;
             }
             // Image segments paint over their filler lines (text pass first).
@@ -201,4 +254,61 @@ fn draw_line_with_links(buf: &mut Buffer, x: u16, y: u16, line: &Line<'static>, 
         x = x_end;
         remaining = remaining.saturating_sub(drawn);
     }
+}
+
+/// #39: write the live running indicator — ` ⠋ (12s)` — into the buffer
+/// immediately after a running tool header's drawn text (spinner in the
+/// accent style, elapsed in the hint style, both truncated to the line's
+/// remaining width). The header's drawn width is recomputed from its spans
+/// so the indicator lands right after the text even when the header was
+/// wrapped (a narrow terminal truncates the tail — the "subtle" ask).
+fn draw_live_indicator(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    header: &Line<'static>,
+    live: &LiveChatState<'_>,
+    elapsed: Duration,
+) {
+    let drawn = line_visible_width(header);
+    let mut cursor = x + drawn;
+    if cursor >= x + width {
+        return;
+    }
+    let spinner = SPINNER_FRAMES[live.frame % SPINNER_FRAMES.len()];
+    let remaining = (x + width) - cursor;
+    let (next, _) = buf.set_stringn(
+        cursor,
+        y,
+        format!(" {spinner}"),
+        usize::from(remaining),
+        live.spinner_style,
+    );
+    cursor = next;
+    if cursor < x + width {
+        let remaining = (x + width) - cursor;
+        buf.set_stringn(
+            cursor,
+            y,
+            format_elapsed(elapsed),
+            usize::from(remaining),
+            live.elapsed_style,
+        );
+    }
+}
+
+/// The rendered width of a (pre-wrapped) line: the sum of its spans'
+/// visible unicode widths, with markdown-link prefixes stripped (the OSC 8
+/// sequences ride the symbols and occupy no cells). The line was wrapped
+/// at the content width, so the result never exceeds it.
+fn line_visible_width(line: &Line<'static>) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    line.spans
+        .iter()
+        .map(|span| {
+            let (text, _) = strip_link_prefix(&span.content);
+            UnicodeWidthStr::width(text) as u16
+        })
+        .sum()
 }

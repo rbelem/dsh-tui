@@ -21,7 +21,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::event::{AnswerTag, AppEvent, EventChannel, QueueActionKind};
 use crate::app::{Action, App, AppError, AtCatalog, DRAW_INTERVAL, Focus};
 use crate::client::ClientError;
-use crate::render::chat_view::ChatView;
+use crate::render::chat_view::{ChatView, LiveChatState};
+use crate::store::node::NodeData;
 use crate::theme::Theme;
 use crate::theme::ThemePopup;
 use crate::ui::composer::{ComposerView, SeedPopup};
@@ -40,9 +41,9 @@ use crate::wire::session::{
 use crate::wire::skills::SkillListValue;
 
 /// #15: the running-spinner braille frames, cycled per tick in the status
-/// line's right cluster while a session runs (all 1 cell wide — no layout
-/// shift; glyphs, not strings — i18n-safe).
-pub const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// line's right cluster while a session runs. Defined (and re-exported
+/// from) the chat view, where the #39 tool-header indicator shares them.
+pub use crate::render::chat_view::{SPINNER_FRAMES, format_elapsed};
 
 /// #36: the wrapped height of `text` at `width` cells — greedy per-word
 /// packing, an UPPER bound of the paragraph wrap (div_ceil under-counts:
@@ -594,6 +595,37 @@ impl App {
                 self.view.offset = total.saturating_sub(chat_height as usize);
             }
         }
+        // #39: track running tool nodes (call present, no settled result)
+        // while the session has a turn in flight — the chat view paints a
+        // live spinner + elapsed on their headers. Pruned to the current
+        // running set, so a settled or removed tool stops animating; a
+        // dead session clears the map (no frozen spinner).
+        if self.session_running() {
+            let mut running = std::collections::HashSet::new();
+            if let Some(session_id) = &session_id
+                && let Some(state) = self.store.session(session_id)
+            {
+                for node in &state.nodes {
+                    if matches!(
+                        &node.data,
+                        NodeData::Tool {
+                            call: Some(_),
+                            result: None,
+                            ..
+                        }
+                    ) {
+                        running.insert(node.key.clone());
+                        self.running_tool_since
+                            .entry(node.key.clone())
+                            .or_insert_with(Instant::now);
+                    }
+                }
+            }
+            self.running_tool_since
+                .retain(|key, _| running.contains(key));
+        } else {
+            self.running_tool_since.clear();
+        }
         // #33: fold state lives only for currently cached nodes — pruned
         // when the node leaves the cache (removed, compacted, or an
         // inactive session). The retain runs against the post-sync rows,
@@ -783,6 +815,14 @@ impl App {
                         offset,
                         row_cache: &mut self.row_cache,
                         images: &mut self.image_cache,
+                        // #39: the live running/elapsed overlay for tool
+                        // headers (empty map = idle — no per-tick chrome).
+                        live: Some(LiveChatState {
+                            frame: self.spinner_frame,
+                            running: &self.running_tool_since,
+                            spinner_style: style::active(&self.theme),
+                            elapsed_style: style::hint(&self.theme),
+                        }),
                     },
                     chat_area,
                 );
@@ -2082,18 +2122,6 @@ impl App {
             vec![Span::styled(indicator.0, indicator.1)]
         };
         (left, right)
-    }
-}
-
-/// Format a busy duration codex-style: `(2m 03s)` past a minute (seconds
-/// zero-padded), `(9s)` under it. `pub` for integration-test observability
-/// (like [`SPINNER_FRAMES`]).
-pub fn format_elapsed(elapsed: std::time::Duration) -> String {
-    let total = elapsed.as_secs();
-    if total < 60 {
-        format!("({total}s)")
-    } else {
-        format!("({}m {:02}s)", total / 60, total % 60)
     }
 }
 

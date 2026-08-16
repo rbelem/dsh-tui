@@ -435,6 +435,11 @@ pub struct App {
     /// (absent = folded, the default; the row cache's render signature
     /// includes it, so a toggle re-renders that message's rows).
     pub skill_folds: HashMap<NodeKey, bool>,
+    /// #39: per running tool node key, the instant this app first observed
+    /// the tool running (call present, no settled result). Maintained per
+    /// draw while the session runs; the chat view reads it to paint the
+    /// live spinner + elapsed on the tool's header.
+    pub running_tool_since: HashMap<NodeKey, Instant>,
 }
 
 impl Default for App {
@@ -513,6 +518,7 @@ impl Default for App {
             last_click: None,
             word_select: false,
             skill_folds: HashMap::new(),
+            running_tool_since: HashMap::new(),
         }
     }
 }

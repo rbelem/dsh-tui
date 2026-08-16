@@ -11,7 +11,7 @@ use ratatui::backend::TestBackend;
 use serde_json::json;
 
 use dsh_tui::i18n::Locale;
-use dsh_tui::render::{ChatView, ImageCache, RowCache, render_markdown};
+use dsh_tui::render::{ChatView, ImageCache, LiveChatState, RowCache, render_markdown};
 use dsh_tui::store::SessionStore;
 use dsh_tui::store::node::{FoldState, NodeData};
 use dsh_tui::theme::Theme;
@@ -242,6 +242,19 @@ fn render_snapshot(
     height: u16,
     offset: usize,
 ) -> String {
+    render_snapshot_live(store, cache, width, height, offset, None)
+}
+
+/// [`render_snapshot`] with an optional #39 live overlay (the running-tool
+/// indicator).
+fn render_snapshot_live(
+    store: &SessionStore,
+    cache: &mut RowCache,
+    width: u16,
+    height: u16,
+    offset: usize,
+    live: Option<LiveChatState<'_>>,
+) -> String {
     cache.sync(
         store,
         &sid(),
@@ -275,6 +288,7 @@ fn render_snapshot(
                     offset,
                     row_cache: cache,
                     images: &mut ImageCache::default(),
+                    live,
                 },
                 frame.area(),
             );
@@ -450,7 +464,76 @@ fn collapsed_tool_renders_one_line_summary() {
     );
 }
 
+/// #39: a RUNNING tool node (call present, no settled result) renders its
+/// header with the live spinner + elapsed indicator when the draw supplies
+/// a live overlay — and stays plain without one (idle draws / settled
+/// tools never animate).
+#[test]
+fn running_tool_header_draws_live_indicator() {
+    let mut store = SessionStore::new();
+    store
+        .ingest(frame(
+            S,
+            ev(
+                1,
+                "tool/call",
+                json!({"turn": 1, "step": 1, "callId": "c1", "name": "bash", "arguments": "ls"}),
+            ),
+        ))
+        .expect("ingest");
+    let mut cache = RowCache::new();
 
+    let plain = render_snapshot(&store, &mut cache, 120, 8, 0);
+    assert!(plain.contains("[tool] bash"), "running header: {plain}");
+    assert!(
+        !plain.contains("(0s)") && !plain.contains("⠋"),
+        "no indicator without the overlay: {plain}"
+    );
+
+    let mut running = std::collections::HashMap::new();
+    running.insert("c1".to_string(), std::time::Instant::now());
+    let live = render_snapshot_live(
+        &store,
+        &mut cache,
+        120,
+        8,
+        0,
+        Some(LiveChatState {
+            frame: 0,
+            running: &running,
+            spinner_style: ratatui::style::Style::default(),
+            elapsed_style: ratatui::style::Style::default(),
+        }),
+    );
+    assert!(live.contains("⠋"), "spinner on the header: {live}");
+    assert!(live.contains("(0s)"), "elapsed on the header: {live}");
+    assert!(
+        live.contains("[tool] bash"),
+        "the header text stays: {live}"
+    );
+
+    // A node NOT in the running map (settled / unrelated) gets nothing.
+    let settled = build_full_store();
+    let mut cache = RowCache::new();
+    let empty = std::collections::HashMap::new();
+    let plain2 = render_snapshot_live(
+        &settled,
+        &mut cache,
+        120,
+        30,
+        0,
+        Some(LiveChatState {
+            frame: 0,
+            running: &empty,
+            spinner_style: ratatui::style::Style::default(),
+            elapsed_style: ratatui::style::Style::default(),
+        }),
+    );
+    assert!(
+        !plain2.contains("⠋"),
+        "settled tools never animate: {plain2}"
+    );
+}
 
 #[test]
 fn offset_scrolling_renders_from_viewport() {
@@ -885,6 +968,7 @@ fn links_inject_osc8_sequences_into_the_buffer() {
                     offset: 0,
                     row_cache: &mut cache,
                     images: &mut ImageCache::default(),
+                    live: None,
                 },
                 frame.area(),
             );

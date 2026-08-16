@@ -465,6 +465,92 @@ async fn busy_elapsed_shows_only_while_running() {
 }
 
 // ---------------------------------------------------------------------------
+// #39: running tool headers
+// ---------------------------------------------------------------------------
+
+/// The app tracks a running tool node (call present, no settled result)
+/// per draw while the session runs — the chat view paints its live
+/// spinner + elapsed on the header — and prunes the entry once the result
+/// settles (a dead session clears the map entirely).
+#[tokio::test]
+async fn running_tool_since_tracks_and_prunes() {
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", true)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                1,
+                "tool/call",
+                json!({"turn": 1, "step": 1, "callId": "c1", "name": "bash", "arguments": "ls"}),
+            ),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(
+        app.running_tool_since.contains_key("c1"),
+        "running tool tracked: {:?}",
+        app.running_tool_since.keys()
+    );
+    let view = format!("{}", term.backend());
+    assert!(
+        view.contains("[tool] bash ⠋"),
+        "live spinner on the running tool header: {view}"
+    );
+
+    // Settle the result → the next draw prunes the entry and the header
+    // indicator disappears (the tool row is folded by default now).
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(
+                2,
+                "tool/result",
+                json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "r1", "role": "user",
+                        "content": [{"type": "tool-result", "toolCallId": "c1", "content": [{"type": "text", "text": "out"}], "isError": false}],
+                        "source": {"kind": "tool", "callId": "c1"},
+                    },
+                }),
+            ),
+        ))
+        .expect("ingest");
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(
+        !app.running_tool_since.contains_key("c1"),
+        "settled tool pruned: {:?}",
+        app.running_tool_since.keys()
+    );
+    let view = format!("{}", term.backend());
+    assert!(
+        !view.contains("[tool] bash ⠋"),
+        "no indicator once settled: {view}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // composer
 // ---------------------------------------------------------------------------
 

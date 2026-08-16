@@ -119,6 +119,7 @@ fn render_with_theme(theme: &Theme, width: u16, height: u16) -> String {
                     offset: 0,
                     row_cache: &mut cache,
                     images: &mut ImageCache::default(),
+                    live: None,
                 },
                 f.area(),
             );
@@ -419,6 +420,7 @@ fn theme_colors_reach_rendered_cells() {
                     offset: 0,
                     row_cache: &mut cache,
                     images: &mut ImageCache::default(),
+                    live: None,
                 },
                 f.area(),
             );

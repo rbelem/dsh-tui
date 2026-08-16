@@ -363,6 +363,7 @@ async fn zh_markers_in_chat_content() {
                     offset: 0,
                     row_cache: &mut cache,
                     images: &mut ImageCache::default(),
+                    live: None,
                 },
                 f.area(),
             );
