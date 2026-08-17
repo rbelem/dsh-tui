@@ -905,6 +905,111 @@ async fn models_loaded_caches_only_the_active_session() {
 }
 
 // ---------------------------------------------------------------------------
+// #43: the permission segment (projections → status line 1)
+// ---------------------------------------------------------------------------
+
+/// The label mapping: `danger-full-access` special-cases to "Full access"
+/// (web parity); every other kebab value title-cases — unknown modes
+/// included (never hidden for an unknown value, only for a missing one).
+#[test]
+fn permission_display_maps_values() {
+    use dsh_tui::app::run::permission_display;
+    assert_eq!(permission_display("danger-full-access"), "Full access");
+    assert_eq!(permission_display("read-only"), "Read Only");
+    assert_eq!(permission_display("workspace-write"), "Workspace Write");
+    assert_eq!(permission_display("some-new-mode"), "Some New Mode");
+    assert_eq!(permission_display(""), "", "empty value maps to empty");
+}
+
+/// The projection read: present `permissions.currentValue` → Some label;
+/// a missing projection, a missing/unparseable `currentValue`, or an
+/// empty value → None (the segment hides gracefully).
+#[test]
+fn permission_label_reads_the_projection() {
+    use dsh_tui::app::run::permission_label;
+    use dsh_tui::wire::session::SessionProjectionsBlock;
+    let projections =
+        |values: serde_json::Map<String, serde_json::Value>| SessionProjectionsBlock {
+            as_of_seq: 1,
+            values,
+        };
+    // Present: currentValue rides the permissions projection.
+    let mut full = summary("s1", false);
+    full.projections = Some(projections(serde_json::Map::from_iter([(
+        "permissions".into(),
+        serde_json::json!({"options": [], "currentValue": "danger-full-access"}),
+    )])));
+    assert_eq!(permission_label(&full).as_deref(), Some("Full access"));
+    // No projection block at all (older gateways) → hidden.
+    let bare = summary("s2", false);
+    assert_eq!(permission_label(&bare), None);
+    // Projection present but no currentValue → hidden.
+    let mut no_value = summary("s3", false);
+    no_value.projections = Some(projections(serde_json::Map::from_iter([(
+        "permissions".into(),
+        serde_json::json!({"options": [{"value": "read-only"}]}),
+    )])));
+    assert_eq!(permission_label(&no_value), None);
+    // Unparseable shapes (a string, not an object; a non-string
+    // currentValue) → hidden.
+    let mut scalar = summary("s4", false);
+    scalar.projections = Some(projections(serde_json::Map::from_iter([(
+        "permissions".into(),
+        serde_json::json!("read-only"),
+    )])));
+    assert_eq!(permission_label(&scalar), None);
+    let mut non_str = summary("s5", false);
+    non_str.projections = Some(projections(serde_json::Map::from_iter([(
+        "permissions".into(),
+        serde_json::json!({"currentValue": 42}),
+    )])));
+    assert_eq!(permission_label(&non_str), None);
+    // An empty currentValue → hidden (an empty segment renders nothing).
+    let mut empty = summary("s6", false);
+    empty.projections = Some(projections(serde_json::Map::from_iter([(
+        "permissions".into(),
+        serde_json::json!({"currentValue": ""}),
+    )])));
+    assert_eq!(permission_label(&empty), None);
+}
+
+/// Without the projection the status line 1 renders model/effort/context
+/// and NOT a permission segment.
+#[tokio::test]
+async fn permission_segment_hides_without_the_projection() {
+    use dsh_tui::wire::session::ModelSelection;
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false)]; // no projections block
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    app.session_model = Some(ModelSelection {
+        provider: "p".into(),
+        model: "m-one".into(),
+        reasoning_effort: Some("high".into()),
+    });
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(
+        view.contains("Model: m-one"),
+        "the meta line renders: {view}"
+    );
+    assert!(
+        !view.contains("Full access") && !view.contains("Read Only"),
+        "no permission segment without the projection: {view}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // composer
 // ---------------------------------------------------------------------------
 

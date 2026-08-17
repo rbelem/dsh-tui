@@ -36,7 +36,8 @@ use crate::wire::questions::{AskUserQuestionAnswer, QuestionAnswerItem};
 use crate::wire::rpc::{RpcReceipt, RpcReceiptReason};
 use crate::wire::session::{
     PromptContentPart, PromptMode, SessionHistoryValue, SessionId, SessionModelsValue,
-    SessionSearchItem, SessionSearchValue, SessionUpdateQueueValue, UpdateQueueAction,
+    SessionSearchItem, SessionSearchValue, SessionSummary, SessionUpdateQueueValue,
+    UpdateQueueAction,
 };
 use crate::wire::skills::SkillListValue;
 
@@ -2314,6 +2315,14 @@ impl App {
     fn status_meta_line(&self, theme: &Theme) -> Vec<Span<'static>> {
         let body = |text: String| Span::styled(text, Style::default().fg(theme.text));
         let mut segments: Vec<String> = Vec::new();
+        // #43: the permission segment rides FIRST (the web header's
+        // `Full access | Model: …` order), from the active session's
+        // `permissions` projection (`currentValue`). Display-only — no
+        // RPC, no /permission execution; hidden when the projection is
+        // absent (older gateways) or its value is unparseable.
+        if let Some(label) = self.active_summary().and_then(permission_label) {
+            segments.push(label);
+        }
         if let Some(selection) = &self.session_model {
             segments.push(crate::i18n::trf(
                 self.locale,
@@ -2354,6 +2363,17 @@ impl App {
         }
     }
 
+    /// The active session's summary row (the sidebar list — summaries
+    /// carry the projections block, where the #43 permission value and the
+    /// #41 title/preset live). `None` with no active session or when the
+    /// list hasn't seen it yet.
+    fn active_summary(&self) -> Option<&SessionSummary> {
+        let active = self.active_session.as_ref()?;
+        self.sessions
+            .iter()
+            .find(|summary| &summary.session_id == active)
+    }
+
     /// #41: the session header line — `Session: <title> | Agent preset:
     /// <preset> | Background jobs: <n>` — built from the active session's
     /// summary (title projection, else the id) and the store's live
@@ -2362,11 +2382,7 @@ impl App {
     /// segment. `None` with no active session — the caller's header area
     /// is zero-rowed there anyway.
     fn header_line(&self) -> Option<String> {
-        let active = self.active_session.as_ref()?;
-        let summary = self
-            .sessions
-            .iter()
-            .find(|summary| &summary.session_id == active)?;
+        let summary = self.active_summary()?;
         let title =
             crate::ui::sidebar::title_of(summary).unwrap_or_else(|| summary.session_id.0.clone());
         let mut segments = vec![crate::i18n::trf(self.locale, "header.session", &[&title])];
@@ -2387,6 +2403,50 @@ impl App {
             ));
         }
         Some(segments.join(" | "))
+    }
+}
+
+/// #43: the permission display label for a projection `currentValue` —
+/// `danger-full-access` special-cases to "Full access" (the web's label);
+/// every other kebab value title-cases (`read-only` → `Read Only`,
+/// `workspace-write` → `Workspace Write`, unknown modes degrade the same
+/// way — never hidden for an unknown value, only for a missing one).
+pub fn permission_display(value: &str) -> String {
+    if value == "danger-full-access" {
+        return "Full access".into();
+    }
+    value
+        .split('-')
+        .filter(|word| !word.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect::<String>(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// #43: the active session's permission label from its `permissions`
+/// projection (`values["permissions"].currentValue` — the projection rides
+/// every `session.list` row on the live gateway; the TUI was discarding
+/// it). `None` when the projection, its `currentValue`, or the summary
+/// itself is absent (older gateways) — the status segment hides.
+pub fn permission_label(summary: &SessionSummary) -> Option<String> {
+    let current = summary
+        .projections
+        .as_ref()?
+        .values
+        .get("permissions")?
+        .get("currentValue")?
+        .as_str()?;
+    let label = permission_display(current);
+    if label.is_empty() {
+        None // an empty currentValue renders no segment
+    } else {
+        Some(label)
     }
 }
 

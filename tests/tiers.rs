@@ -279,6 +279,22 @@ async fn status_at_39_is_indicators_only() {
 async fn wide_tier_shows_header_meta_and_full_stats_bar() {
     let mut app = app_with_session();
     app.sessions[0].agent_preset = Some("Standard Mode".into());
+    // #43: the `permissions` projection rides every session.list row —
+    // the permission segment reads `currentValue` from it.
+    app.sessions[0].projections = Some(dsh_tui::wire::session::SessionProjectionsBlock {
+        as_of_seq: 1,
+        values: serde_json::Map::from_iter([(
+            "permissions".into(),
+            serde_json::json!({
+                "options": [
+                    {"value": "read-only"},
+                    {"value": "workspace-write"},
+                    {"value": "danger-full-access"},
+                ],
+                "currentValue": "danger-full-access",
+            }),
+        )]),
+    });
     // #43: the cached model selection (what a session.models fetch lands).
     app.session_model = Some(dsh_tui::wire::session::ModelSelection {
         provider: "deepseek".into(),
@@ -377,10 +393,11 @@ async fn wide_tier_shows_header_meta_and_full_stats_bar() {
         header.contains("Session: s1 | Agent preset: Standard Mode | Background jobs: 1"),
         "header: {header}"
     );
-    // Status line 1 = the model/effort/context row (second-to-last).
+    // Status line 1 = the permission/model/effort/context row
+    // (second-to-last). The permission segment leads, web order.
     let meta = lines[lines.len() - 2];
     assert!(
-        meta.contains("Model: deepseek-v4-flash | Effort: high"),
+        meta.contains("Full access | Model: deepseek-v4-flash | Effort: high"),
         "meta: {meta}"
     );
     // used = input(10) + cache_read(5) = 15 of the 50-token window → 30%.
