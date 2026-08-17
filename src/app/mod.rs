@@ -139,6 +139,10 @@ pub enum Action {
     /// Sidebar `a`: archive the session (spawned `workspace.archiveSession`;
     /// the result lands as [`AppEvent::ArchiveDone`]).
     ArchiveSession(SessionId),
+    /// 6g: the Add-button path editor committed this path (spawned
+    /// `workspace.create`; the result lands as
+    /// [`AppEvent::WorkspaceCreateDone`]).
+    CreateWorkspace(String),
     /// New-session picker Enter: create under this workspace (`None` = no
     /// workspace; the run loop spawns `session.create`, the result lands as
     /// [`AppEvent::SessionCreateDone`]).
@@ -269,6 +273,16 @@ pub struct SidebarSearchState {
     pub sending: bool,
 }
 
+/// 6f: the view-options popup state (the sidebar's `Options` button): the
+/// cursor over the four choices (group by workspace/flat, order by
+/// manual/updated). Enter toggles the section under the cursor. The
+/// choices themselves live on [`App::sidebar_flat`] / [`App::order_by_updated`]
+/// — in-memory only, no config persistence.
+#[derive(Debug, Default)]
+pub struct ViewOptionsState {
+    pub selected: usize,
+}
+
 /// The application state: store + render cache + viewport + UI surfaces.
 pub struct App {
     pub store: SessionStore,
@@ -294,6 +308,25 @@ pub struct App {
     /// state, no persistence) — archived sessions then render as rows and
     /// join j/k navigation.
     pub archived_expanded: bool,
+    /// 6b: the permanent sidebar (≥80 cols) is collapsed to the 1-col `»`
+    /// gutter (`s` or the brand row's `«` toggles; app-lifetime state).
+    /// Below 80 the drawer takes over regardless.
+    pub sidebar_collapsed: bool,
+    /// 6f: force the flat (single title-less list) sidebar even when
+    /// workspaces exist — the Options popup's "In one list" choice.
+    /// In-memory only (no config persistence).
+    pub sidebar_flat: bool,
+    /// 6f: order workspaces (and their sessions) by `updated_at` desc —
+    /// the Options popup's "Last updated" choice. In-memory only.
+    pub order_by_updated: bool,
+    /// 6f: the view-options popup (`Options` button) — None while closed.
+    /// Owns the keyboard while open.
+    pub view_options: Option<ViewOptionsState>,
+    /// 6g: the inline workspace-path editor (the `Add` button): a Composer
+    /// seeded with a path; Enter commits `workspace.create` (spawned via
+    /// the back-channel), Esc cancels, and sidebar navigation is inert
+    /// while it's open (mirrors `rename_editor`).
+    pub workspace_editor: Option<Composer>,
     /// Which surface holds the keyboard focus.
     pub focus: Focus,
     /// Ctrl+W vim pane-prefix armed: the next h/j/k/l key moves focus,
@@ -468,6 +501,11 @@ impl Default for App {
             workspace_order: Vec::new(),
             archived_session_ids: Vec::new(),
             archived_expanded: false,
+            sidebar_collapsed: false,
+            sidebar_flat: false,
+            order_by_updated: false,
+            view_options: None,
+            workspace_editor: None,
             focus: Focus::Composer,
             pane_prefix: false,
             composer: Composer::new(),
@@ -875,6 +913,12 @@ impl App {
         if self.sidebar_search.is_some() {
             return Some(self.handle_sidebar_search_key(key));
         }
+        // 6f: the view-options popup owns the keyboard while open (the
+        // sidebar's `Options` button opens it; Ctrl+Q/Ctrl+C above stay
+        // global).
+        if self.view_options.is_some() {
+            return Some(self.handle_view_options_key(key));
+        }
         // #19/#27: the narrow-terminal drawer owns the keys while open —
         // ↑/↓ navigate, Enter selects (and closes), Esc/s close. Precedence
         // over the normal keys (it is NOT part of any_overlay_open — the
@@ -883,13 +927,16 @@ impl App {
             return Some(self.handle_drawer_key(key));
         }
         // #19: `s` (rebindable via `[keymap] drawer-toggle`) toggles the
-        // drawer in the drawer tier (<80 cols). Focus-gated so the
-        // composer keeps typing `s`.
-        if self.config.keymap.matches("drawer-toggle", key)
-            && self.focus != Focus::Composer
-            && self.terminal_width < 80
-        {
-            return Some(self.toggle_drawer());
+        // drawer overlay in the drawer tier (<80 cols). 6b: at ≥80 the
+        // SAME key toggles the permanent sidebar between the full pane
+        // and the collapsed 1-col gutter (unified key). Focus-gated so
+        // the composer keeps typing `s`.
+        if self.config.keymap.matches("drawer-toggle", key) && self.focus != Focus::Composer {
+            return Some(if self.terminal_width < 80 {
+                self.toggle_drawer()
+            } else {
+                self.toggle_sidebar_collapse()
+            });
         }
         // Ctrl+W arms the vim pane prefix; the next h/j/k/l moves focus
         // (Sidebar/Chat/Composer), any other key disarms it.
@@ -969,6 +1016,49 @@ impl App {
             self.focus = self.drawer_prior_focus;
             self.hint = self.drawer_prior_hint.take();
         }
+    }
+
+    /// 6b: `s` at ≥80 (or the brand row's `«`) toggles the permanent
+    /// sidebar between the full pane and the 1-column `»` gutter. The
+    /// sidebar pane is gone while collapsed, so its focus moves to the
+    /// chat. (Below 80 the same key is the drawer toggle, #19.)
+    fn toggle_sidebar_collapse(&mut self) -> Action {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        if self.sidebar_collapsed && self.focus == Focus::Sidebar {
+            self.focus = Focus::Chat;
+        }
+        Action::None
+    }
+
+    /// 6f: the view-options popup's bindings: `j`/`k` (or arrows) move the
+    /// cursor across the four choices, `Enter` toggles the section under
+    /// it (workspace ↔ flat; manual ↔ last-updated), `Esc` closes.
+    /// Everything else is inert while the popup is open.
+    fn handle_view_options_key(&mut self, key: KeyEvent) -> Action {
+        use crossterm::event::KeyCode;
+        let Some(state) = &mut self.view_options else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                state.selected = state.selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                state.selected = (state.selected + 1).min(3);
+            }
+            KeyCode::Enter => {
+                // The first two choices are the group-by section; the last
+                // two the order-by section.
+                if state.selected <= 1 {
+                    self.sidebar_flat = !self.sidebar_flat;
+                } else {
+                    self.order_by_updated = !self.order_by_updated;
+                }
+            }
+            KeyCode::Esc => self.view_options = None,
+            _ => {}
+        }
+        Action::None
     }
 
     /// The drawer's key handling while open: ↑/↓ navigate the session
@@ -1453,15 +1543,49 @@ impl App {
 
     /// The sidebar's group model: workspace groups (in durable order) →
     /// ungrouped → archived (collapsed unless `archived_expanded` — the
-    /// `e` toggle, app-lifetime state).
+    /// `e` toggle, app-lifetime state). 6f: the Options popup's display
+    /// transforms apply here — `sidebar_flat` forces the single title-less
+    /// list even when workspaces exist; `order_by_updated` re-sorts
+    /// workspaces (and each workspace's sessions) by `updated_at` desc,
+    /// ignoring the durable order. Both in-memory only.
     pub fn sidebar_groups(&self) -> Vec<crate::ui::sidebar::SidebarGroup> {
+        let workspaces: Vec<crate::wire::workspace::WorkspaceView> = if self.order_by_updated {
+            let mut sorted = self.workspaces.clone();
+            sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            for ws in &mut sorted {
+                // Sessions within a workspace follow the same rule: the
+                // most recently updated first (the host's session_ids
+                // order is display-only here).
+                ws.session_ids.sort_by(|a, b| {
+                    let ta = self
+                        .sessions
+                        .iter()
+                        .find(|s| &s.session_id == a)
+                        .map(|s| s.updated_at);
+                    let tb = self
+                        .sessions
+                        .iter()
+                        .find(|s| &s.session_id == b)
+                        .map(|s| s.updated_at);
+                    tb.partial_cmp(&ta).unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            sorted
+        } else {
+            self.workspaces.clone()
+        };
         crate::ui::sidebar::build_groups(
             &self.sessions,
-            &self.workspaces,
-            &self.workspace_order,
+            &workspaces,
+            if self.order_by_updated {
+                &[]
+            } else {
+                &self.workspace_order
+            },
             &self.archived_session_ids,
             self.locale,
             self.archived_expanded,
+            self.sidebar_flat,
         )
     }
 
@@ -1861,9 +1985,10 @@ impl App {
                 Some(Action::Scroll(-half))
             }
             // #12: Esc cancels an armed selection (the status hint says
-            // `v select · esc cancel`).
+            // `v select · esc cancel`) — and a plain-drag selection in
+            // progress (no `v` arm needed for that path).
             KeyCode::Esc => {
-                if self.select_mode {
+                if self.select_mode || self.selection.is_some() {
                     self.cancel_selection();
                 }
                 Some(Action::None)
@@ -2079,7 +2204,7 @@ impl App {
         }
         if Self::in_rect(self.sidebar_area, column, row) {
             self.cancel_selection();
-            let action = self.sidebar_click(row);
+            let action = self.sidebar_click(column, row);
             // A drawer session click selects AND closes (#19); the
             // permanent sidebar has no drawer to close.
             if self.drawer_open {
@@ -2093,8 +2218,10 @@ impl App {
             self.composer_click(column, row);
             return Action::Focus(Focus::Composer);
         }
-        // Chat: selection only while `v` mode is armed; otherwise a chat
-        // click is a no-op (no click-to-position in v1).
+        // Chat: a left-button drag starts a selection DIRECTLY — no `v`
+        // pre-arm needed (the `v` key stays as the keyboard arming path).
+        // Clicks on the action rows (tool/skill headers) below toggle or
+        // navigate and NEVER start a selection.
         if Self::in_rect(self.chat_area, column, row) {
             let content = self.chat_content_rect();
             // #31: a click on a skill-list header row toggles that
@@ -2119,6 +2246,15 @@ impl App {
                 self.cancel_selection();
                 return Action::None;
             }
+            // #45: a click on a think-section header row toggles that
+            // node's think fold (default expanded; the folded node shows
+            // the header only) — an action click, so it never starts a
+            // selection.
+            if let Some(node_key) = self.row_cache.think_header_at(abs_line).map(str::to_string) {
+                self.row_cache.toggle_think_fold(&node_key);
+                self.cancel_selection();
+                return Action::None;
+            }
             // #23: a second click within the double-click window on the
             // same row (a couple of cells of jitter allowed) selects the
             // word under the cursor — selection intent is implicit, so it
@@ -2137,34 +2273,29 @@ impl App {
                     return Action::None;
                 }
             }
-            if self.select_mode {
-                // #21: anchor deterministically, text-anchored (the row is
-                // the absolute cache-line index — `view.offset`-free, so
-                // wheel scrolling mid-selection leaves the anchors on the
-                // text). Margin clicks (the 2/2 padding + top blank row)
-                // clamp to the nearest content cell, so a drag can always
-                // start — the old behavior left the mode armed with no
-                // anchor and the drag dead. A plain click also resets the
-                // word-wise drag state.
-                self.word_select = false;
-                let pos = CellPos {
-                    row: self.view.offset
-                        + row
-                            .saturating_sub(content.y)
-                            .min(content.height.saturating_sub(1))
-                            as usize,
-                    col: column
-                        .saturating_sub(content.x)
-                        .min(content.width.saturating_sub(1)),
-                };
-                self.selection = Some((pos, pos));
-                self.hint = None;
-                self.last_click = Some((Instant::now(), column, row));
-                return Action::None;
-            }
-            // Not selecting: remember the click so a second one can form a
-            // double-click.
+            // #21: anchor deterministically, text-anchored (the row is
+            // the absolute cache-line index — `view.offset`-free, so
+            // wheel scrolling mid-selection leaves the anchors on the
+            // text). Margin clicks (the 2/2 padding + top blank row)
+            // clamp to the nearest content cell, so a drag can always
+            // start. A plain left click on a chat row anchors a selection
+            // directly (no `v` pre-arm); the drag extends it and mouse-up
+            // copies and exits. A plain click also resets the word-wise
+            // drag state.
+            self.word_select = false;
+            let pos = CellPos {
+                row: self.view.offset
+                    + row
+                        .saturating_sub(content.y)
+                        .min(content.height.saturating_sub(1)) as usize,
+                col: column
+                    .saturating_sub(content.x)
+                    .min(content.width.saturating_sub(1)),
+            };
+            self.selection = Some((pos, pos));
+            self.hint = None;
             self.last_click = Some((Instant::now(), column, row));
+            return Action::None;
         }
         Action::None
     }
@@ -2358,11 +2489,21 @@ impl App {
         if inner_height == 0 {
             return;
         }
-        let (rows, _) =
-            crate::ui::sidebar::display_layout(&groups, self.sidebar.selected, inner_height);
-        // The visible window is `inner_height - 3` rows; scroll only when
-        // the list is taller than it.
-        if rows.len() <= inner_height.saturating_sub(3) as usize {
+        let (list_top, reserved_bottom) = if self.drawer_open {
+            (2, 1)
+        } else {
+            (crate::ui::sidebar::LIST_TOP, 2)
+        };
+        let (rows, _) = crate::ui::sidebar::display_layout(
+            &groups,
+            self.sidebar.selected,
+            inner_height,
+            list_top,
+            reserved_bottom,
+        );
+        // The visible window is `inner_height - list_top - reserved_bottom`
+        // rows; scroll only when the list is taller than it.
+        if rows.len() <= inner_height.saturating_sub(list_top + reserved_bottom) as usize {
             return;
         }
         let len = crate::ui::sidebar::SidebarGroup::visible_len(&groups);
@@ -2372,8 +2513,19 @@ impl App {
     /// A click on a sidebar row: select that session (switching when it is
     /// not already active). Clicking the active row is a no-op — a click
     /// never steals the composer's focus. A group header click toggles the
-    /// group's collapse.
-    fn sidebar_click(&mut self, row: u16) -> Action {
+    /// group's collapse. 6a–6h: the pane's chrome rows — the brand row's
+    /// `«` collapses the sidebar, New Session opens the picker, the
+    /// buttons row opens search/options/the Add editor, and the Settings
+    /// row opens the settings view (the Ctrl+, action). The collapsed
+    /// 1-col gutter is one big reopen affordance.
+    fn sidebar_click(&mut self, column: u16, row: u16) -> Action {
+        // 6b: the collapsed gutter is a single reopen affordance — any
+        // click in the 1-col strip expands the sidebar back (it has no
+        // other content).
+        if self.sidebar_collapsed && self.terminal_width >= 80 {
+            self.sidebar_collapsed = false;
+            return Action::None;
+        }
         let area = self.sidebar_area;
         if area.height == 0 || area.width == 0 {
             return Action::None;
@@ -2383,14 +2535,76 @@ impl App {
             vertical: 0,
         });
         let line_index = row.saturating_sub(inner.y);
-        // Header + blank row above; the footer line below — no rows there.
-        if line_index < 2 || line_index >= inner.height.saturating_sub(1) {
+        let col = column.saturating_sub(inner.x);
+        // 6h: the Settings row (the last inner row; the footer is below
+        // it) opens the settings view — same action as Ctrl+, — only in
+        // the permanent pane (the drawer's chrome is compact).
+        if !self.drawer_open && line_index == inner.height.saturating_sub(2) {
+            self.mode = Mode::Settings(crate::ui::settings::SettingsState::new());
+            self.hint = None;
+            return Action::FetchSettings;
+        }
+        if !self.drawer_open {
+            // The pane's fixed chrome rows above the list window (6a–6e).
+            match line_index {
+                // 6a/6b: the brand row — its right-end `«` collapses the
+                // sidebar (the brand text itself is inert).
+                0 => {
+                    if col >= inner.width.saturating_sub(1) {
+                        self.toggle_sidebar_collapse();
+                    }
+                    return Action::None;
+                }
+                // 6c: the New Session button — the `n` picker action.
+                1 => {
+                    self.open_new_session_picker();
+                    return Action::None;
+                }
+                // 6d: the Workspaces section header (inert, like the
+                // group headers).
+                3 => return Action::None,
+                // 6e: Search / Options / Add — the column hit-testing is
+                // derived from the rendered label widths (locale-aware;
+                // gaps inert), so zh geometry routes correctly too.
+                4 => {
+                    return match crate::ui::sidebar::action_button_at(col, self.locale) {
+                        crate::ui::sidebar::SidebarAction::Search => {
+                            self.sidebar_search = Some(SidebarSearchState::default());
+                            Action::None
+                        }
+                        crate::ui::sidebar::SidebarAction::Options => {
+                            self.view_options = Some(ViewOptionsState::default());
+                            Action::None
+                        }
+                        crate::ui::sidebar::SidebarAction::Add => {
+                            self.open_workspace_editor();
+                            Action::None
+                        }
+                        crate::ui::sidebar::SidebarAction::None => Action::None,
+                    };
+                }
+                _ => {}
+            }
+        }
+        // The list window: rows from LIST_TOP (pane) or +2 (drawer) up to
+        // the reserved settings/footer rows.
+        let (list_top, reserved_bottom) = if self.drawer_open {
+            (2, 1)
+        } else {
+            (crate::ui::sidebar::LIST_TOP, 2)
+        };
+        if line_index < list_top || line_index >= inner.height.saturating_sub(reserved_bottom) {
             return Action::None;
         }
         let groups = self.sidebar_groups();
-        let (rows, start) =
-            crate::ui::sidebar::display_layout(&groups, self.sidebar.selected, inner.height);
-        let Some(display) = rows.get(start + (line_index - 2) as usize) else {
+        let (rows, start) = crate::ui::sidebar::display_layout(
+            &groups,
+            self.sidebar.selected,
+            inner.height,
+            list_top,
+            reserved_bottom,
+        );
+        let Some(display) = rows.get(start + (line_index - list_top) as usize) else {
             return Action::None;
         };
         match display {
@@ -2594,6 +2808,43 @@ impl App {
     /// expanded archived group's rows are reachable like any other.
     fn handle_sidebar_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::KeyCode;
+        // 6g: the inline workspace-path editor (the `Add` button): typing
+        // edits, Enter commits (spawned `workspace.create`), Esc cancels,
+        // and every other key is inert while it's open (mirrors the
+        // rename editor).
+        if self.workspace_editor.is_some() {
+            match key.code {
+                KeyCode::Char(c) => {
+                    if let Some(editor) = &mut self.workspace_editor {
+                        editor.insert_char(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some(editor) = &mut self.workspace_editor {
+                        editor.backspace();
+                    }
+                }
+                KeyCode::Enter => {
+                    // A create in flight (the `create.sending` hint row):
+                    // further Enters are inert.
+                    if self.sidebar_action_sending {
+                        return Some(Action::None);
+                    }
+                    let path = self
+                        .workspace_editor
+                        .take()
+                        .map(|mut editor| editor.take())
+                        .unwrap_or_default();
+                    if path.trim().is_empty() {
+                        return Some(Action::None); // empty path: cancel
+                    }
+                    return Some(Action::CreateWorkspace(path));
+                }
+                KeyCode::Esc => self.workspace_editor = None,
+                _ => {}
+            }
+            return Some(Action::None);
+        }
         // Inline rename editor (`r`): typing edits, Enter commits, Esc
         // cancels, and every other key is inert while it's open (mirrors
         // the queue editor).
@@ -2734,6 +2985,15 @@ impl App {
             editor.insert_char(c);
         }
         self.rename_editor = Some((summary.session_id.clone(), editor));
+    }
+
+    /// 6g: open the inline workspace-path editor (the `Add` button): a
+    /// fresh Composer — the path hint shows while empty — and the sidebar
+    /// takes focus (the editor owns the keys while open, mirroring the
+    /// rename editor).
+    fn open_workspace_editor(&mut self) {
+        self.focus = Focus::Sidebar;
+        self.workspace_editor = Some(Composer::new());
     }
 
     /// The picker's entries: workspaces in display order (the durable

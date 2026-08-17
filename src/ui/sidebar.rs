@@ -2,15 +2,21 @@
 //!
 //! Layout (#11): a full-height left pane with NO box — it is separated from
 //! the chat by the `panel_bg` fill vs the main `bg` (plus the top-level
-//! 1-cell spacing gap). Content: the "Sessions" header, one blank row, the
-//! groups (header = workspace title, sessions nested under it), then an
+//! 1-cell spacing gap). Content (web parity, 6): the brand row with the
+//! `«` collapse affordance, the New Session button, the "Workspaces"
+//! header with the Search/Options/Add buttons row, then the groups
+//! (header = workspace title, sessions nested under it), then an
 //! "ungrouped" group for sessions no workspace claims, then the archived
 //! group at the foot — collapsed to a "archived (N)" header by default (its
 //! sessions are listed but hidden — out of j/k navigation); `e` in the
 //! sidebar expands it for the app lifetime (no persistence) and its sessions
-//! render as rows. With no workspaces and no archived sessions the list
-//! renders FLAT (no group headers) — exactly the pre-grouping look. A muted
-//! `dsh-tui` footer line anchors the bottom.
+//! render as rows. A Settings row and the muted `dsh-tui` footer anchor the
+//! bottom. With no workspaces and no archived sessions the list renders
+//! FLAT (no group headers) — exactly the pre-grouping look; the Options
+//! popup (6f) forces that flat look (and reorders by last-updated)
+//! in-memory. Below 80 columns the drawer overlay renders the compact
+//! header + list + footer look (no chrome), and at ≥80 the sidebar can
+//! collapse to a 1-column `»` gutter (6b).
 //!
 //! Rows: the active session carries a bold `●` marker at all times; the
 //! selection row is bold with an accent `▎` stripe, but only while the
@@ -41,10 +47,71 @@ use crate::wire::workspace::WorkspaceView;
 /// screen; the drawer shows full titles on demand).
 pub const SIDEBAR_WIDTH: u16 = 22;
 
+/// 6b: the collapsed sidebar's width — a 1-column `»` reopen gutter
+/// (web-parity collapse, ≥80 cols only).
+pub const SIDEBAR_GUTTER_WIDTH: u16 = 1;
+
+/// 6: the pane's fixed chrome rows above the list window: brand (0),
+/// New Session (1), blank (2), the Workspaces header (3), the
+/// Search/Options/Add buttons row (4), blank (5). The list starts here;
+/// the Settings row and the footer sit below the window.
+pub const LIST_TOP: u16 = 6;
+
 /// Sidebar width for a terminal `total` columns wide (tiered, #19): the
-/// permanent 22-col pane at ≥80, nothing below (the drawer replaces it).
-pub fn sidebar_width(total: u16) -> u16 {
-    if total >= 80 { SIDEBAR_WIDTH } else { 0 }
+/// permanent 22-col pane at ≥80 (6b: collapsed to the 1-col gutter when
+/// `collapsed`), nothing below (the drawer replaces it).
+pub fn sidebar_width(total: u16, collapsed: bool) -> u16 {
+    if total >= 80 {
+        if collapsed {
+            SIDEBAR_GUTTER_WIDTH
+        } else {
+            SIDEBAR_WIDTH
+        }
+    } else {
+        0
+    }
+}
+
+/// 6e: the click target of the Search/Options/Add buttons row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarAction {
+    None,
+    Search,
+    Options,
+    Add,
+}
+
+/// 6e: the action under a click on the buttons row, `col` relative to
+/// the row's start. The spans are the RENDERED label widths (unicode-
+/// width — zh labels are 2 CJK cells each), single-space separated; the
+/// gaps between spans are inert. The app's mouse handler routes through
+/// this so the hit-test geometry always matches the renderer.
+pub fn action_button_at(col: u16, locale: Locale) -> SidebarAction {
+    use unicode_width::UnicodeWidthStr;
+    let search = tr(locale, "sidebar.search").width() as u16;
+    let options = tr(locale, "sidebar.options").width() as u16;
+    let add = tr(locale, "sidebar.add_workspace").width() as u16;
+    let mut x = 0u16;
+    if col < x + search {
+        return SidebarAction::Search;
+    }
+    x += search;
+    if col == x {
+        return SidebarAction::None; // the gap
+    }
+    x += 1;
+    if col < x + options {
+        return SidebarAction::Options;
+    }
+    x += options;
+    if col == x {
+        return SidebarAction::None; // the gap
+    }
+    x += 1;
+    if col < x + add {
+        return SidebarAction::Add;
+    }
+    SidebarAction::None
 }
 
 /// One sidebar group: a header (workspace title or an i18n label) plus the
@@ -106,6 +173,9 @@ pub fn build_groups(
     archived: &[SessionId],
     locale: Locale,
     archived_expanded: bool,
+    // 6f: force the flat (one title-less list) look even when workspaces
+    // exist — the Options popup's "In one list" choice. In-memory only.
+    flat: bool,
 ) -> Vec<SidebarGroup> {
     if sessions.is_empty() {
         return Vec::new();
@@ -118,7 +188,7 @@ pub fn build_groups(
         .filter(|index| is_archived(*index))
         .collect();
 
-    if workspaces.is_empty() && archived_group_sessions.is_empty() {
+    if (flat || workspaces.is_empty()) && archived_group_sessions.is_empty() {
         // Flat mode: the pre-grouping look, one title-less group.
         return vec![SidebarGroup {
             title: None,
@@ -130,57 +200,71 @@ pub fn build_groups(
 
     let mut groups = Vec::new();
     let mut claimed = vec![false; sessions.len()];
-    let index_of: std::collections::HashMap<&SessionId, usize> = sessions
-        .iter()
-        .enumerate()
-        .map(|(index, summary)| (&summary.session_id, index))
-        .collect();
-    // Workspace display order: the durable order first (ids that still
-    // exist), then any workspace the order frame doesn't know about.
-    let mut ordered: Vec<&WorkspaceView> = workspace_order
-        .iter()
-        .filter_map(|id| workspaces.iter().find(|ws| &ws.workspace_id == id))
-        .collect();
-    ordered.extend(
-        workspaces
+    if flat {
+        // 6f: flat with archived sessions — one title-less group of the
+        // live sessions, then the collapsed archived footer (archived
+        // sessions stay out of navigation, like the grouped look).
+        if !live.is_empty() {
+            groups.push(SidebarGroup {
+                title: None,
+                collapsed: false,
+                is_archived: false,
+                sessions: live,
+            });
+        }
+    } else {
+        let index_of: std::collections::HashMap<&SessionId, usize> = sessions
             .iter()
-            .filter(|ws| !workspace_order.contains(&ws.workspace_id)),
-    );
-    for workspace in ordered {
-        // Members in the workspace's OWN session_ids order (the host
-        // maintains it — workspaceInsertSessionBefore), first claim wins.
-        let members: Vec<usize> = workspace
-            .session_ids
-            .iter()
-            .filter_map(|id| index_of.get(id).copied())
-            .filter(|index| !is_archived(*index) && !claimed[*index])
+            .enumerate()
+            .map(|(index, summary)| (&summary.session_id, index))
             .collect();
-        for index in &members {
-            claimed[*index] = true;
+        // Workspace display order: the durable order first (ids that still
+        // exist), then any workspace the order frame doesn't know about.
+        let mut ordered: Vec<&WorkspaceView> = workspace_order
+            .iter()
+            .filter_map(|id| workspaces.iter().find(|ws| &ws.workspace_id == id))
+            .collect();
+        ordered.extend(
+            workspaces
+                .iter()
+                .filter(|ws| !workspace_order.contains(&ws.workspace_id)),
+        );
+        for workspace in ordered {
+            // Members in the workspace's OWN session_ids order (the host
+            // maintains it — workspaceInsertSessionBefore), first claim wins.
+            let members: Vec<usize> = workspace
+                .session_ids
+                .iter()
+                .filter_map(|id| index_of.get(id).copied())
+                .filter(|index| !is_archived(*index) && !claimed[*index])
+                .collect();
+            for index in &members {
+                claimed[*index] = true;
+            }
+            if members.is_empty() {
+                continue;
+            }
+            groups.push(SidebarGroup {
+                title: Some(workspace.title.clone()),
+                collapsed: false,
+                is_archived: false,
+                sessions: members,
+            });
         }
-        if members.is_empty() {
-            continue;
-        }
-        groups.push(SidebarGroup {
-            title: Some(workspace.title.clone()),
-            collapsed: false,
-            is_archived: false,
-            sessions: members,
-        });
-    }
 
-    let ungrouped: Vec<usize> = live
-        .iter()
-        .copied()
-        .filter(|index| !claimed[*index])
-        .collect();
-    if !ungrouped.is_empty() {
-        groups.push(SidebarGroup {
-            title: Some(tr(locale, "sidebar.ungrouped").to_string()),
-            collapsed: false,
-            is_archived: false,
-            sessions: ungrouped,
-        });
+        let ungrouped: Vec<usize> = live
+            .iter()
+            .copied()
+            .filter(|index| !claimed[*index])
+            .collect();
+        if !ungrouped.is_empty() {
+            groups.push(SidebarGroup {
+                title: Some(tr(locale, "sidebar.ungrouped").to_string()),
+                collapsed: false,
+                is_archived: false,
+                sessions: ungrouped,
+            });
+        }
     }
     if !archived_group_sessions.is_empty() {
         groups.push(SidebarGroup {
@@ -248,12 +332,16 @@ pub enum DisplayRow {
 /// visible row. The window is selection-driven (the selected row stays
 /// visible, sitting at the edge while scrolling), so the mouse hit-test
 /// reproduces exactly what the renderer draws. `inner_height` is the pane's
-/// content height (the "Sessions" header row, the blank row under it, and
-/// the footer line are outside the window).
+/// content height; `list_top` is the first list row (the chrome rows above
+/// it — header/buttons — are outside the window) and `reserved_bottom` the
+/// rows below it (settings + footer in the permanent pane, footer only in
+/// the drawer).
 pub fn display_layout(
     groups: &[SidebarGroup],
     selected: usize,
     inner_height: u16,
+    list_top: u16,
+    reserved_bottom: u16,
 ) -> (Vec<DisplayRow>, usize) {
     let mut rows: Vec<DisplayRow> = Vec::new();
     let mut ordinal = 0;
@@ -276,7 +364,7 @@ pub fn display_layout(
             ordinal += 1;
         }
     }
-    let visible = inner_height.saturating_sub(3) as usize;
+    let visible = inner_height.saturating_sub(list_top + reserved_bottom) as usize;
     let start = selected_display.saturating_sub(visible.saturating_sub(1));
     (rows, start)
 }
@@ -291,6 +379,13 @@ pub struct SidebarView<'a> {
     /// The inline rename editor (`r`): while open it replaces the selected
     /// session row with an editable line (mirrors the queue editor).
     pub editor: Option<&'a Composer>,
+    /// 6g: the inline workspace-path editor (the `Add` button): while open
+    /// it replaces the Search/Options/Add buttons row.
+    pub workspace_editor: Option<&'a Composer>,
+    /// True in the `<80` drawer overlay: the compact header + list + footer
+    /// look (no brand/New Session/buttons/Settings chrome — the drawer is
+    /// the narrow-terminal fallback, 6b keeps its behavior unchanged).
+    pub drawer: bool,
     pub theme: &'a crate::theme::Theme,
     pub locale: Locale,
 }
@@ -311,16 +406,93 @@ impl Widget for SidebarView<'_> {
         if inner.width == 0 {
             return;
         }
-        // The "Sessions" header, then 1 blank row; rows start at inner.y+2.
-        buf.set_line(
-            inner.x,
-            inner.y,
-            &Line::styled(tr(self.locale, "sidebar.header"), style::hint(self.theme)),
-            inner.width,
-        );
+        // The list window's reserved rows depend on the surface: the
+        // permanent pane (≥80) carries the web-parity chrome — brand +
+        // collapse (6a), New Session (6c), the Workspaces header (6d),
+        // the Search/Options/Add row (6e) — plus a Settings row (6h)
+        // above the footer; the drawer keeps the compact header + list +
+        // footer look (its rows start right below the header + blank).
+        let (list_top, reserved_bottom) = if self.drawer { (2, 1) } else { (LIST_TOP, 2) };
+        if self.drawer {
+            // The "Workspaces" header, then 1 blank row; rows start at
+            // inner.y+2 (the pre-6 look).
+            buf.set_line(
+                inner.x,
+                inner.y,
+                &Line::styled(tr(self.locale, "sidebar.header"), style::hint(self.theme)),
+                inner.width,
+            );
+        } else {
+            // 6a: the brand row — bold/accent, with the `«` collapse
+            // affordance at the row's right end (hint style, clickable).
+            buf.set_line(
+                inner.x,
+                inner.y,
+                &Line::styled(tr(self.locale, "sidebar.brand"), style::active(self.theme)),
+                inner.width.saturating_sub(1),
+            );
+            buf.set_stringn(
+                inner.x + inner.width - 1,
+                inner.y,
+                "«",
+                1,
+                style::hint(self.theme),
+            );
+            // 6c: the full-width New Session button row.
+            buf.set_line(
+                inner.x,
+                inner.y + 1,
+                &Line::styled(
+                    format!("+ {}", tr(self.locale, "sidebar.new_session")),
+                    style::active(self.theme),
+                ),
+                inner.width,
+            );
+            // 6d: the Workspaces section header.
+            buf.set_line(
+                inner.x,
+                inner.y + 3,
+                &Line::styled(tr(self.locale, "sidebar.header"), style::hint(self.theme)),
+                inner.width,
+            );
+            // 6e: the Search / Options / Add row — or 6g: the workspace
+            // path editor replaces it while open (mirrors the rename
+            // editor's inline line).
+            if let Some(editor) = self.workspace_editor {
+                let line = Line::from(vec![
+                    Span::styled("▎", style::selection_stripe(self.theme)),
+                    Span::styled(" > ", style::active(self.theme)),
+                    Span::styled(
+                        if editor.buffer().is_empty() {
+                            tr(self.locale, "create.workspace_hint").to_string()
+                        } else {
+                            editor.buffer().to_string()
+                        },
+                        style::active(self.theme),
+                    ),
+                    Span::styled("|", style::hint(self.theme)),
+                ]);
+                buf.set_line(inner.x, inner.y + 4, &line, inner.width);
+            } else {
+                buf.set_line(
+                    inner.x,
+                    inner.y + 4,
+                    &Line::styled(
+                        format!(
+                            "{} {} {}",
+                            tr(self.locale, "sidebar.search"),
+                            tr(self.locale, "sidebar.options"),
+                            tr(self.locale, "sidebar.add_workspace"),
+                        ),
+                        style::hint(self.theme),
+                    ),
+                    inner.width,
+                );
+            }
+        }
 
         if self.sessions.is_empty() {
-            let y = inner.y + 2;
+            let y = inner.y + list_top;
             if y < inner.bottom() {
                 buf.set_line(
                     inner.x,
@@ -344,15 +516,32 @@ impl Widget for SidebarView<'_> {
             return;
         }
 
+        // 6h: the Settings row (the permanent pane only) — the footer's
+        // neighbor; a click opens the settings view.
+        if !self.drawer {
+            buf.set_line(
+                inner.x,
+                inner.bottom() - 2,
+                &Line::styled(tr(self.locale, "sidebar.settings"), style::hint(self.theme)),
+                inner.width,
+            );
+        }
+
         // Flatten groups into display rows (shared with the mouse
         // hit-testing — a click must land on the same row the renderer
         // drew). The window is selection-driven.
-        let (rows, start) = display_layout(self.groups, self.selected, inner.height);
+        let (rows, start) = display_layout(
+            self.groups,
+            self.selected,
+            inner.height,
+            list_top,
+            reserved_bottom,
+        );
         let grouped = self.groups.iter().any(|group| group.title.is_some());
         for (row_index, row) in rows.iter().enumerate().skip(start) {
-            let line_index = row_index - start + 2;
-            if line_index as u16 >= inner.height.saturating_sub(1) {
-                break; // the footer row is reserved
+            let line_index = row_index - start + list_top as usize;
+            if line_index as u16 >= inner.height.saturating_sub(reserved_bottom) {
+                break; // the settings/footer rows are reserved
             }
             let y = inner.y + line_index as u16;
             match row {
@@ -520,10 +709,56 @@ mod tests {
         }
     }
 
+    /// 6e: the buttons-row hit-test spans the RENDERED label widths —
+    /// en and zh geometries both route, and the gaps are inert.
+    #[test]
+    fn action_button_ranges_match_the_locale() {
+        // en: "Search"(0-5) gap(6) "Options"(7-13) gap(14) "Add"(15-17).
+        assert_eq!(action_button_at(0, Locale::En), SidebarAction::Search);
+        assert_eq!(action_button_at(5, Locale::En), SidebarAction::Search);
+        assert_eq!(
+            action_button_at(6, Locale::En),
+            SidebarAction::None,
+            "en gap"
+        );
+        assert_eq!(action_button_at(7, Locale::En), SidebarAction::Options);
+        assert_eq!(action_button_at(13, Locale::En), SidebarAction::Options);
+        assert_eq!(
+            action_button_at(14, Locale::En),
+            SidebarAction::None,
+            "en gap"
+        );
+        assert_eq!(action_button_at(15, Locale::En), SidebarAction::Add);
+        assert_eq!(action_button_at(17, Locale::En), SidebarAction::Add);
+        assert_eq!(
+            action_button_at(18, Locale::En),
+            SidebarAction::None,
+            "past the row"
+        );
+                // zh: "搜索"(0-3) gap(4) "选项"(5-8) gap(9) "添加"(10-13) — the
+        // CJK labels are 2 chars × 2 cells = 4 wide, so the ranges differ.
+        assert_eq!(action_button_at(0, Locale::Zh), SidebarAction::Search);
+        assert_eq!(action_button_at(3, Locale::Zh), SidebarAction::Search);
+        assert_eq!(
+            action_button_at(4, Locale::Zh),
+            SidebarAction::None,
+            "zh gap"
+        );
+        assert_eq!(action_button_at(5, Locale::Zh), SidebarAction::Options);
+        assert_eq!(action_button_at(8, Locale::Zh), SidebarAction::Options);
+        assert_eq!(
+            action_button_at(9, Locale::Zh),
+            SidebarAction::None,
+            "zh gap"
+        );
+        assert_eq!(action_button_at(10, Locale::Zh), SidebarAction::Add);
+        assert_eq!(action_button_at(13, Locale::Zh), SidebarAction::Add);
+    }
+
     #[test]
     fn flat_when_no_workspaces_or_archived() {
         let sessions = vec![summary("s1"), summary("s2")];
-        let groups = build_groups(&sessions, &[], &[], &[], Locale::En, false);
+        let groups = build_groups(&sessions, &[], &[], &[], Locale::En, false, false);
         assert_eq!(
             groups,
             vec![SidebarGroup {
@@ -550,7 +785,15 @@ mod tests {
         // The durable order puts beta first; s4 is ungrouped, s5 archived.
         let order = vec![WorkspaceId("wB".into()), WorkspaceId("wA".into())];
         let archived = vec![SessionId("s5".into())];
-        let groups = build_groups(&sessions, &workspaces, &order, &archived, Locale::En, false);
+        let groups = build_groups(
+            &sessions,
+            &workspaces,
+            &order,
+            &archived,
+            Locale::En,
+            false,
+            false,
+        );
         let titles: Vec<_> = groups.iter().map(|g| g.title.as_deref()).collect();
         assert_eq!(
             titles,
@@ -582,7 +825,7 @@ mod tests {
             workspace("wB", "beta", &["s1"]), // also claims s1 — loses
             workspace("wC", "gamma", &[]),    // empty — dropped
         ];
-        let groups = build_groups(&sessions, &workspaces, &[], &[], Locale::En, false);
+        let groups = build_groups(&sessions, &workspaces, &[], &[], Locale::En, false, false);
         let titles: Vec<_> = groups.iter().map(|g| g.title.as_deref()).collect();
         assert_eq!(titles, vec![Some("alpha")]);
     }
@@ -592,7 +835,15 @@ mod tests {
         let sessions = vec![summary("s1")];
         let workspaces = vec![workspace("wA", "alpha", &["s1"])];
         let archived = vec![SessionId("s1".into())];
-        let groups = build_groups(&sessions, &workspaces, &[], &archived, Locale::En, false);
+        let groups = build_groups(
+            &sessions,
+            &workspaces,
+            &[],
+            &archived,
+            Locale::En,
+            false,
+            false,
+        );
         let titles: Vec<_> = groups.iter().map(|g| g.title.as_deref()).collect();
         assert_eq!(titles, vec![Some("▸ archived (1)")]);
         assert_eq!(SidebarGroup::visible_len(&groups), 0);
@@ -602,16 +853,50 @@ mod tests {
     fn archived_group_expands_into_navigation() {
         let sessions = vec![summary("s1"), summary("s2"), summary("s3")];
         let archived = vec![SessionId("s3".into())];
-        let groups = build_groups(&sessions, &[], &[], &archived, Locale::En, true);
+        let groups = build_groups(&sessions, &[], &[], &archived, Locale::En, true, false);
         assert_eq!(groups.len(), 2, "ungrouped + archived");
         assert!(!groups[1].collapsed, "expanded: the rows join navigation");
         assert_eq!(groups[1].title.as_deref(), Some("▸ archived (1)"));
         assert_eq!(SidebarGroup::visible_len(&groups), 3);
         assert_eq!(SidebarGroup::visible_session(&groups, 2), Some(2));
         // Collapsed again: the archived row drops out of navigation.
-        let collapsed = build_groups(&sessions, &[], &[], &archived, Locale::En, false);
+        let collapsed = build_groups(&sessions, &[], &[], &archived, Locale::En, false, false);
         assert!(collapsed[1].collapsed);
         assert_eq!(SidebarGroup::visible_len(&collapsed), 2);
         assert_eq!(SidebarGroup::visible_session(&collapsed, 2), None);
+    }
+
+    /// 6f: the Options popup's flat flag forces the single title-less
+    /// list even when workspaces exist; archived sessions still land in
+    /// the collapsed footer (out of navigation).
+    #[test]
+    fn flat_forces_the_single_list_over_workspaces() {
+        let sessions = vec![summary("s1"), summary("s2"), summary("s3")];
+        let workspaces = vec![
+            workspace("wA", "alpha", &["s1"]),
+            workspace("wB", "beta", &["s2"]),
+        ];
+        let archived = vec![SessionId("s3".into())];
+        let groups = build_groups(
+            &sessions,
+            &workspaces,
+            &[],
+            &archived,
+            Locale::En,
+            false,
+            true, // flat
+        );
+        let titles: Vec<_> = groups.iter().map(|g| g.title.as_deref()).collect();
+        assert_eq!(
+            titles,
+            vec![None, Some("▸ archived (1)")],
+            "one title-less group + the archived footer"
+        );
+        assert_eq!(groups[0].sessions, vec![0, 1], "live sessions flat");
+        assert_eq!(SidebarGroup::visible_len(&groups), 2, "s3 stays hidden");
+        // No workspaces + flat stays the same single-group look.
+        let bare = build_groups(&sessions, &[], &[], &[], Locale::En, false, true);
+        assert_eq!(bare.len(), 1);
+        assert_eq!(bare[0].sessions, vec![0, 1, 2]);
     }
 }

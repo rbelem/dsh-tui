@@ -1,7 +1,8 @@
 //! Mouse support tests (issue #12): sidebar click-to-select + group-header
 //! toggle, wheel scroll (3 lines/event, clamped), composer click-to-cursor,
-//! `v` + drag + release → OSC 52 copy + status flash, selection clamping to
-//! the chat rect, popup-open gating, and paste-into-composer.
+//! plain drag + release → OSC 52 copy + status flash (no `v` pre-arm; the
+//! `v` keyboard path is kept), selection clamping to the chat rect,
+//! popup-open gating, and paste-into-composer.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::Terminal;
@@ -142,8 +143,8 @@ async fn sidebar_click_selects_the_row() {
         &mut term,
         vec![
             draw_force(), // draws: hit-test areas stored
-            down(2, 3),   // flat list: row 3 = s2
-            up(2, 3),
+            down(2, 7),   // flat list: row 7 = s2 (chrome rows 0-5)
+            up(2, 7),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
@@ -172,8 +173,8 @@ async fn sidebar_click_on_the_active_row_is_a_noop() {
         &mut term,
         vec![
             draw_force(),
-            down(2, 2), // row 2 = s1 (the active row)
-            up(2, 2),
+            down(2, 6), // row 6 = s1 (the active row)
+            up(2, 6),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
@@ -202,8 +203,8 @@ async fn sidebar_click_toggles_the_archived_group_header() {
         &mut term,
         vec![
             draw_force(),
-            down(2, 4), // row 4 = the "▸ archived (1)" header
-            up(2, 4),
+            down(2, 8), // row 8 = the "▸ archived (1)" header
+            up(2, 8),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
@@ -437,7 +438,9 @@ async fn v_toggle_shows_the_select_hint() {
 }
 
 #[tokio::test]
-async fn drag_selects_and_release_copies_via_osc52() {
+async fn v_armed_drag_selects_and_release_copies_via_osc52() {
+    // The `v` keyboard path: arming then dragging selects exactly like a
+    // plain drag (kept as the keyboard-arming regression test).
     let mut app = App::default();
     app.focus = Focus::Chat;
     app.active_session = Some(SessionId("s1".into()));
@@ -490,8 +493,170 @@ async fn drag_selects_and_release_copies_via_osc52() {
     }
 }
 
+/// A plain left-button drag (NO `v` arm) selects across rows — the
+/// highlight renders while the drag is live (buffer REVERSED cells), and
+/// mouse-up copies the text and exits (the status flash proves the copy).
 #[tokio::test]
-async fn drag_without_v_is_a_noop() {
+async fn plain_drag_selects_across_rows_and_copies_on_release() {
+    let mut app = App::default();
+    app.focus = Focus::Chat;
+    app.active_session = Some(SessionId("s1".into()));
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(1, "user/message", user_msg("m1", "hello world")),
+        ))
+        .expect("ingest");
+    app.store
+        .ingest(frame(
+            "s1",
+            ev(2, "user/message", user_msg("m2", "second line")),
+        ))
+        .expect("ingest");
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    // Phase 1: down + drag + a draw — the live selection highlights.
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(26, 1), // content (0, 1): "e" of "hello world"
+            drag(31, 4), // content (2, 6): inside "second line" (abs row
+            // 2; the session header docks row 0 and the inter-message
+            // blank is abs row 1 → screen row 4) — extends across two rows
+            draw_force(), // the overlay renders now
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+
+    let (anchor, current) = app.selection.expect("plain drag selected");
+    assert_eq!(anchor.row, 0, "anchor on the first row");
+    assert_eq!(current.row, 2, "drag extended across two rows");
+    assert!(!app.select_mode, "no v arm involved");
+    // The highlight: REVERSED cells on both rows (buffer rows 1 and 3).
+    let highlighted = |x: u16, y: u16| {
+        term.backend()
+            .buffer()
+            .cell((x, y))
+            .is_some_and(|cell| cell.modifier.contains(Modifier::REVERSED))
+    };
+    assert!(highlighted(25 + 5, 2), "row 0 highlighted");
+    assert!(highlighted(25 + 2, 4), "row 2 highlighted");
+
+    // Phase 2: mouse-up copies and exits; the flash shows in the status
+    // line buffer.
+    app.running = true;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            up(31, 4),
+            draw_force(),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    // "ello world" + blank + "second" → 10 + 1 + 1 + 6 = 18 chars.
+    let flash = app
+        .copied_flash
+        .as_ref()
+        .expect("copied flash after release");
+    assert_eq!(flash.0, "copied · 18 chars", "flash text");
+    assert_eq!(app.selection, None, "selection cleared after copy");
+    let view = format!("{}", term.backend());
+    assert!(view.contains("copied · 18 chars"), "flash rendered: {view}");
+    for y in 0..30u16 {
+        for x in 0..120u16 {
+            if let Some(cell) = term.backend().buffer().cell((x, y))
+                && cell.modifier.contains(Modifier::REVERSED)
+            {
+                panic!("REVERSED survives the copy at ({x},{y})");
+            }
+        }
+    }
+}
+
+/// The sidebar's action rows (6e): the Search / Options / Add spans under
+/// the Workspaces header route by column — Search opens the search mode,
+/// Options opens the view-options popup (j/k/Enter/Esc semantics), Add
+/// opens the workspace path editor. Each phase runs on a fresh App: an
+/// open popup gates subsequent mouse events (any_overlay_open).
+#[tokio::test]
+async fn sidebar_action_buttons_route_search_options_add() {
+    // Options: the popup opens, j+Enter toggles the flat grouping, Esc
+    // closes. The buttons row is screen row 4 (the sidebar inner has a
+    // horizontal-only margin); the Options span is cols 8-14 of it.
+    let mut app = App::default();
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(12, 4),
+            AppEvent::Key(key(KeyCode::Char('j'))),
+            AppEvent::Key(key(KeyCode::Enter)),
+            AppEvent::Key(key(KeyCode::Esc)),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(app.view_options.is_none(), "Esc closed the popup");
+    assert!(
+        app.sidebar_flat,
+        "Enter on the flat choice toggled grouping"
+    );
+
+    // Search span (col 3 of the row). Quit with the popup still open —
+    // the quit binding precedes the popup key-gates.
+    let mut app = App::default();
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(5, 4),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(
+        app.sidebar_search.is_some(),
+        "Search span opened the search mode"
+    );
+
+    // Add span (right of Options — col 16 of the row).
+    let mut app = App::default();
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(18, 4),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(
+        app.workspace_editor.is_some(),
+        "Add span opened the workspace path editor"
+    );
+}
+
+/// A plain left CLICK (down + up, no drag) selects nothing — the anchor
+/// collapses to an empty range and mouse-up drops it without copying.
+#[tokio::test]
+async fn plain_click_without_drag_copies_nothing() {
     let mut app = App::default();
     app.focus = Focus::Chat;
     app.active_session = Some(SessionId("s1".into()));
@@ -509,14 +674,14 @@ async fn drag_without_v_is_a_noop() {
         vec![
             draw_force(),
             down(26, 1),
-            drag(60, 10),
-            up(60, 10),
+            up(26, 1),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
     .await;
-    assert_eq!(app.selection, None, "no selection without v");
-    assert_eq!(app.copied_flash, None, "no copy without v");
+    assert_eq!(app.selection, None, "no selection after a plain click");
+    assert_eq!(app.copied_flash, None, "no copy without a drag");
+    assert!(!app.select_mode);
 }
 
 // ---------------------------------------------------------------------------
@@ -542,7 +707,6 @@ async fn drag_into_the_composer_clamps_at_the_chat_boundary() {
         &mut app,
         &mut term,
         vec![
-            AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             down(26, 1),
             drag(26, 28), // the composer row: clamped to content row 23
@@ -726,7 +890,6 @@ async fn wheel_extends_the_selection_over_the_text() {
         &mut app,
         &mut term,
         vec![
-            AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             // The boot draw follow-clamps to the bottom (offset 53); the
             // test starts from the top so the anchors are deterministic.
@@ -803,7 +966,6 @@ async fn text_anchored_overlay_clips_to_the_viewport() {
         &mut app,
         &mut term,
         vec![
-            AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             // The boot draw follow-clamps to the bottom; scroll back to 0
             // (18 × 3 = 54 ≥ 53) so the anchors are deterministic.
@@ -882,7 +1044,6 @@ async fn margin_click_anchors_deterministically() {
         &mut app,
         &mut term,
         vec![
-            AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             // The left margin (content.x = 25): the anchor clamps to col 0.
             down(24, 1),
@@ -915,7 +1076,6 @@ async fn margin_click_anchors_deterministically() {
         &mut app,
         &mut term,
         vec![
-            AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             down(24, 1), // margin anchor
             drag(27, 4), // content (0,2), col 2 → abs line 2
@@ -1087,7 +1247,6 @@ async fn selection_widths_are_cached_per_render() {
         &mut app,
         &mut term,
         vec![
-            AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             down(26, 1),
             drag(28, 3),
@@ -1150,7 +1309,6 @@ async fn streaming_growth_reclamps_the_highlight() {
         &mut app,
         &mut term,
         vec![
-            AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             // Select cols 4..20 of line 0; the 5-wide line clamps the
             // highlight to [4,5).
@@ -1318,7 +1476,8 @@ async fn wrapped_skill_header_click_lands_on_the_header_row() {
     );
 
     // One row above the header is an intro wrap line — clicking it does
-    // not toggle (and without `v` it starts no selection either).
+    // not toggle; it is a plain chat row, so the click anchors a
+    // selection (plain-drag selection, no `v` arm needed).
     app.running = true;
     run_with(
         &mut app,
@@ -1335,7 +1494,10 @@ async fn wrapped_skill_header_click_lands_on_the_header_row() {
         view.contains("▾ 2 skills"),
         "the row above the header does not toggle: {view}"
     );
-    assert_eq!(app.selection, None, "no selection from the miss");
+    assert!(
+        app.selection.is_some(),
+        "the miss row anchors a plain-drag selection"
+    );
 }
 
 // ---------------------------------------------------------------------------

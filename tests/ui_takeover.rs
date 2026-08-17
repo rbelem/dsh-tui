@@ -131,7 +131,7 @@ async fn approval_takeover_with_reason_120x30() {
     assert!(view.contains("reject"), "action line: {view}");
     // #36: the approval overlays the LIVE chat as a dialog — the sidebar
     // and the empty-state hero stay visible around it.
-    assert!(view.contains("Sessions"), "chat live under the dialog");
+    assert!(view.contains("Workspaces"), "chat live under the dialog");
 }
 
 /// #36: at a narrow terminal the dialog clamps within it — width

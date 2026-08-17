@@ -29,8 +29,8 @@ use crate::wire::settings::{
 };
 use crate::wire::skills::{SkillListRequest, SkillListValue};
 use crate::wire::workspace::{
-    WorkspaceArchiveSessionRequest, WorkspaceArchiveSessionValue, WorkspaceListRequest,
-    WorkspaceListValue,
+    WorkspaceArchiveSessionRequest, WorkspaceArchiveSessionValue, WorkspaceCreateRequest,
+    WorkspaceCreateValue, WorkspaceListRequest, WorkspaceListValue,
 };
 
 impl WireClient {
@@ -240,6 +240,17 @@ impl WireClient {
     /// id set. The full value is returned (both halves feed app state).
     pub async fn workspace_list(&self) -> Result<WorkspaceListValue, ClientError> {
         self.call("workspace.list", WorkspaceListRequest {}).await
+    }
+
+    /// `workspace.create` — adopt an existing directory as a workspace
+    /// (the Add button's path editor, 6g). The value carries the row plus
+    /// whether it was newly created (a pre-existing path is re-adopted).
+    pub async fn workspace_create(
+        &self,
+        path: String,
+    ) -> Result<WorkspaceCreateValue, ClientError> {
+        self.call("workspace.create", WorkspaceCreateRequest { path })
+            .await
     }
 
     /// `workspace.archiveSession` — archive one session; the value is the

@@ -97,6 +97,11 @@ pub enum AppEvent {
         session_id: SessionId,
         result: Result<WorkspaceArchiveSessionValue, ClientError>,
     },
+    /// A spawned sidebar `workspace.create` finished (6g: the Add button's
+    /// path editor).
+    WorkspaceCreateDone {
+        result: Result<crate::wire::workspace::WorkspaceCreateValue, ClientError>,
+    },
     /// A spawned sidebar-search `session.search` finished (`/`). `query`
     /// echoes the POSTed text so a stale result (the buffer moved on while
     /// the POST was in flight) is detected and re-searched.

@@ -136,7 +136,7 @@ async fn drawer_tier_at_70_cols() {
     assert!(app.drawer_open, "s opened the drawer");
     assert_eq!(app.focus, Focus::Sidebar, "opening moves focus into it");
     let view = format!("{}", term.backend());
-    assert!(view.contains("Sessions"), "drawer header: {view}");
+    assert!(view.contains("Workspaces"), "drawer header: {view}");
     assert!(view.contains("● s1"), "drawer rows: {view}");
     // The drawer is min(width, 30) cols: at 70 it is 30 wide — its top
     // border row starts at col 0 and the `≡` affordance doubles as the
@@ -182,8 +182,10 @@ async fn drawer_closes_via_esc_click_outside_and_session_select() {
             draw_force(),
             AppEvent::Key(key(KeyCode::Char('s'))),
             draw_force(),
-            // The drawer inner starts at (1,1); rows from y=3 (header,
-            // blank): row 4 = s2 (flat list).
+            // The drawer inner starts at (1,1); its compact layout is
+            // header (y=1), blank (y=2), rows from y=3 — but the drawer
+            // keeps the pre-6 chrome: header (y=1), blank (y=2), rows
+            // from y=3. Row 4 = s2 (flat list).
             mouse_down(5, 4),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
@@ -424,6 +426,61 @@ async fn wide_tier_shows_header_meta_and_full_stats_bar() {
     assert!(status.ends_with('●'), "indicator: {status}");
 }
 
+/// The context segment renders with just the used tokens when no
+/// `request/context` window was ever observed (used = input + cache-read;
+/// the pct needs a window, so it is omitted — #5).
+#[tokio::test]
+async fn context_segment_shows_used_tokens_without_a_window() {
+    let mut app = app_with_session();
+    app.sessions[0].agent_preset = Some("Standard Mode".into());
+    let ev_at = |seq: i64, time: f64, r#type: &str, data: serde_json::Value| {
+        let mut event = ev(seq, r#type, data);
+        event.time = time;
+        event
+    };
+    // The wide-tier fixture WITHOUT the request/context event.
+    for event in [
+        ev_at(1, 1.0, "user/message", user_msg("m1", "hi")),
+        ev_at(2, 10.0, "turn/start", json!({"turn": 1})),
+        ev_at(
+            3,
+            10.3,
+            "assistant/chunk",
+            json!({"turn": 1, "step": 1, "chunk": {"type": "text-delta", "index": 0, "text": "H"}}),
+        ),
+        ev_at(
+            4,
+            10.4,
+            "assistant/message",
+            json!({"turn": 1, "step": 1, "message": {"id": "a1", "role": "assistant", "content": [{"type": "text", "text": "Hi"}], "source": {"kind": "model", "provider": "p", "model": "m"}}, "usage": {"inputTokens": 10, "outputTokens": 100, "cacheReadTokens": 5}}),
+        ),
+        ev_at(
+            5,
+            110.0,
+            "turn/end",
+            json!({"turn": 1, "reason": {"kind": "completed"}}),
+        ),
+    ] {
+        app.store.ingest(frame("s1", event)).expect("ingest");
+    }
+    let backend = TestBackend::new(200, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    let lines: Vec<&str> = view
+        .lines()
+        .map(|line| line.trim_matches('"').trim())
+        .collect();
+    let meta = lines[lines.len() - 2];
+    assert!(meta.contains("Context: 15 tok"), "meta: {meta}");
+    assert!(!meta.contains("% used"), "no window → no pct: {meta}");
+}
+
 // ---------------------------------------------------------------------------
 // acceptance 3: the too-small screen at 31 with live restore
 // ---------------------------------------------------------------------------
@@ -548,20 +605,25 @@ async fn wide_tier_keeps_the_permanent_sidebar() {
     )
     .await;
     let view = format!("{}", term.backend());
-    assert!(view.contains("Sessions"), "permanent sidebar: {view}");
+    assert!(view.contains("Workspaces"), "permanent sidebar: {view}");
     assert!(view.contains("● s1"), "sidebar rows: {view}");
-    // `s` is inert at ≥80 (the permanent sidebar exists; no drawer).
+    // 6b: `s` at ≥80 is the unified collapse key — it toggles the pane
+    // to the 1-col `»` gutter (no drawer at this tier, no hint).
     app.running = true;
     app.focus = Focus::Chat;
     assert_eq!(
         app.handle_key(key(KeyCode::Char('s'))),
-        None,
-        "s is a no-op at ≥80"
+        Some(Action::None),
+        "s collapses the sidebar at ≥80"
     );
+    assert!(app.sidebar_collapsed, "collapsed to the gutter");
     assert!(!app.drawer_open);
     assert_eq!(app.hint, None, "#30: no drawer hint at ≥80");
-    // The affordance does not render.
+    // The affordance does not render at ≥80 (it is the drawer-tier's).
     assert!(!view.contains('≡'), "no affordance at ≥80: {view}");
+    // And the same key reopens it.
+    assert_eq!(app.handle_key(key(KeyCode::Char('s'))), Some(Action::None));
+    assert!(!app.sidebar_collapsed, "s reopens the pane");
 }
 
 // ---------------------------------------------------------------------------
@@ -638,7 +700,7 @@ async fn drawer_header_click_does_not_select() {
             draw_force(),
             AppEvent::Key(key(KeyCode::Char('s'))),
             draw_force(),
-            mouse_down(5, 1), // the "Sessions" header row
+            mouse_down(5, 1), // the "Workspaces" header row
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )

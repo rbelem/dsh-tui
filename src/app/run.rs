@@ -191,6 +191,9 @@ impl App {
                                 Some(Action::ArchiveSession(session_id)) => {
                                     self.archive_session(session_id, event_tx.clone())
                                 }
+                                Some(Action::CreateWorkspace(path)) => {
+                                    self.create_workspace(path, event_tx.clone())
+                                }
                                 Some(Action::CreateSession { workspace_id }) => {
                                     self.create_session(workspace_id, event_tx.clone())
                                 }
@@ -231,6 +234,11 @@ impl App {
                         }
                         Some(AppEvent::ArchiveDone { session_id, result }) => {
                             self.on_archive_done(session_id, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::WorkspaceCreateDone { result }) => {
+                            self.on_workspace_create_done(result);
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
@@ -323,11 +331,16 @@ impl App {
                             // + restore the prior focus so no stale drawer
                             // state leaks across a boundary (<32
                             // round-trips included; same-tier resizes keep
-                            // the drawer).
-                            if drawer_tier(width) != drawer_tier(self.terminal_width)
-                                && self.drawer_open
-                            {
-                                self.close_drawer();
+                            // the drawer). 6f/6g: the pane-only sidebar
+                            // popups (view options) and the Add editor drop
+                            // with the tier too — their surfaces don't
+                            // exist below 80.
+                            if drawer_tier(width) != drawer_tier(self.terminal_width) {
+                                if self.drawer_open {
+                                    self.close_drawer();
+                                }
+                                self.view_options = None;
+                                self.workspace_editor = None;
                             }
                             self.view.viewport_height = height;
                             self.row_cache.invalidate_all();
@@ -496,7 +509,7 @@ impl App {
 
         let size = term.size()?;
         let full = Rect::new(0, 0, size.width, size.height);
-        let sidebar_width = sidebar_width(size.width);
+        let sidebar_width = sidebar_width(size.width, self.sidebar_collapsed);
         // #11 pane construction: an explicit 1-cell gap column between the
         // sidebar and the main pane — the frame-wide `bg` fill (drawn first
         // in the closure) shows through it, so the panes are separated by
@@ -534,7 +547,7 @@ impl App {
             self.queue_popup_open = false;
         }
         let queue_height = u16::from(!queue_empty);
-        let composer_height = (self.composer.line_count() as u16 + 1).clamp(2, 8);
+        let composer_height = self.composer.layout_height(size.height / 2);
         // #41: the session header (title · preset · jobs) docks ABOVE the
         // chat — one row, hidden when no session is active (the empty-state
         // rule: no header over the hero). #38/#39: the status area is now
@@ -811,6 +824,11 @@ impl App {
             .as_ref()
             .map(|state| state.results.clone())
             .unwrap_or_default();
+        // 6f: view-options popup data (same precompute rule; the current
+        // choices are Copy fields, read disjoint from the closure).
+        let view_options_selected = self.view_options.as_ref().map(|state| state.selected);
+        let sidebar_flat = self.sidebar_flat;
+        let order_by_updated = self.order_by_updated;
 
         term.draw(|frame| {
             // #11: frame-wide `bg` fill first — the chat/status/queue paint
@@ -823,19 +841,35 @@ impl App {
                 .buffer_mut()
                 .set_style(area, Style::new().bg(self.theme.bg));
             if sidebar_width > 0 {
-                frame.render_widget(
-                    SidebarView {
-                        sessions: &self.sessions,
-                        groups: &sidebar_groups,
-                        active: self.active_session.as_ref(),
-                        selected: self.sidebar.selected,
-                        focused: self.focus == Focus::Sidebar,
-                        editor: self.rename_editor.as_ref().map(|(_, editor)| editor),
-                        theme: &self.theme,
-                        locale: self.locale,
-                    },
-                    sidebar_area,
-                );
+                if self.sidebar_collapsed {
+                    // 6b: the collapsed gutter — the `»` reopen affordance,
+                    // vertically centered (the whole 1-col strip is a click
+                    // target in the app's mouse handling).
+                    let y = sidebar_area.y + sidebar_area.height.saturating_sub(1) / 2;
+                    frame.buffer_mut().set_stringn(
+                        sidebar_area.x,
+                        y,
+                        "»",
+                        1,
+                        crate::ui::style::hint(&self.theme),
+                    );
+                } else {
+                    frame.render_widget(
+                        SidebarView {
+                            sessions: &self.sessions,
+                            groups: &sidebar_groups,
+                            active: self.active_session.as_ref(),
+                            selected: self.sidebar.selected,
+                            focused: self.focus == Focus::Sidebar,
+                            editor: self.rename_editor.as_ref().map(|(_, editor)| editor),
+                            workspace_editor: self.workspace_editor.as_ref(),
+                            drawer: false,
+                            theme: &self.theme,
+                            locale: self.locale,
+                        },
+                        sidebar_area,
+                    );
+                }
             }
             if let Some(session_id) = &session_id {
                 frame.render_widget(
@@ -997,6 +1031,8 @@ impl App {
                         selected: self.sidebar.selected,
                         focused: true, // the drawer owns focus while open
                         editor: self.rename_editor.as_ref().map(|(_, editor)| editor),
+                        workspace_editor: None, // the drawer has no Add button
+                        drawer: true,
                         theme: &self.theme,
                         locale: self.locale,
                     },
@@ -1159,6 +1195,28 @@ impl App {
                     results: &sidebar_search_results,
                     selected,
                     sending,
+                    theme: &self.theme,
+                    locale: self.locale,
+                };
+                let (width, height) = popup.size(sidebar_area.width, sidebar_area.height);
+                let area = Rect {
+                    x: sidebar_area.x + sidebar_area.width.saturating_sub(width) / 2,
+                    y: sidebar_area.y + sidebar_area.height.saturating_sub(height) / 2,
+                    width,
+                    height: height.min(sidebar_area.height),
+                };
+                if area.height > 0 {
+                    frame.render_widget(popup, area);
+                }
+            }
+
+            // 6f: the view-options popup (`Options` button): a centered
+            // overlay over the sidebar pane, sized like the search popup.
+            if let Some(selected) = view_options_selected {
+                let popup = crate::ui::view_options::ViewOptionsPopup {
+                    selected,
+                    flat: sidebar_flat,
+                    order_updated: order_by_updated,
                     theme: &self.theme,
                     locale: self.locale,
                 };
@@ -1455,6 +1513,70 @@ impl App {
                     ));
                 self.set_toast(crate::i18n::tr(self.locale, "toast.archived"));
                 let _ = session_id;
+            }
+            Err(error) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.sidebar_action_failed",
+                &[&error.to_string()],
+            )),
+        }
+    }
+
+    /// 6g: spawn `workspace.create` for the Add button's path editor; the
+    /// result lands as [`AppEvent::WorkspaceCreateDone`]. One sidebar
+    /// action in flight at a time (the shared `sidebar_action_sending`
+    /// guard — the editor's hint row shows "creating…" while it's set).
+    fn create_workspace(&mut self, path: String, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self.sidebar_action_sending {
+            return;
+        }
+        self.sidebar_action_sending = true;
+        tokio::spawn(async move {
+            let result = client.workspace_create(path).await;
+            let _ = event_tx.send(AppEvent::WorkspaceCreateDone { result });
+        });
+    }
+
+    /// 6g: apply a finished `workspace.create`: fold the returned
+    /// WorkspaceView into the sidebar list — a NEW workspace appends to
+    /// `workspaces` and the durable order, a pre-existing one upserts in
+    /// place (its session membership may have changed) — and close the
+    /// editor. Errors toast through the shared sidebar-action failure
+    /// surface.
+    fn on_workspace_create_done(
+        &mut self,
+        result: Result<crate::wire::workspace::WorkspaceCreateValue, ClientError>,
+    ) {
+        self.sidebar_action_sending = false;
+        self.workspace_editor = None;
+        match result {
+            Ok(value) => {
+                if value.created {
+                    if !self
+                        .workspaces
+                        .iter()
+                        .any(|ws| ws.workspace_id == value.workspace.workspace_id)
+                    {
+                        self.workspaces.push(value.workspace.clone());
+                    }
+                    if !self.workspace_order.contains(&value.workspace.workspace_id) {
+                        self.workspace_order
+                            .push(value.workspace.workspace_id.clone());
+                    }
+                } else if let Some(existing) = self
+                    .workspaces
+                    .iter_mut()
+                    .find(|ws| ws.workspace_id == value.workspace.workspace_id)
+                {
+                    *existing = value.workspace;
+                }
+                self.sidebar
+                    .clamp(crate::ui::sidebar::SidebarGroup::visible_len(
+                        &self.sidebar_groups(),
+                    ));
             }
             Err(error) => self.set_toast(crate::i18n::trf(
                 self.locale,
@@ -2309,9 +2431,11 @@ impl App {
     /// cluster (raw ` | ` separators, per the web header's form). Each
     /// segment hides independently: model/effort absent until the
     /// `session.models` fetch lands (or the gateway lacks it); context
-    /// absent until the session reports a window AND has usage. The
-    /// "Full access" permission badge is deliberately absent — verified
-    /// not on the wire. `Vec::new()` (the caller skips the row).
+    /// absent until the session reports usage (the context segment shows
+    /// with or without a window — the `request/context` event often never
+    /// arrives, so a window-less session still renders `Context: N tok`).
+    /// The "Full access" permission badge is deliberately absent —
+    /// verified not on the wire. `Vec::new()` (the caller skips the row).
     fn status_meta_line(&self, theme: &Theme) -> Vec<Span<'static>> {
         let body = |text: String| Span::styled(text, Style::default().fg(theme.text));
         let mut segments: Vec<String> = Vec::new();
@@ -2340,20 +2464,29 @@ impl App {
         {
             let stats = crate::store::session_stats(state);
             let used = stats.input_tokens + stats.cache_read_tokens;
-            if let Some(window) = stats.context_window
-                && window > 0
-                && used > 0
-            {
-                let pct = (used as f64 * 100.0 / window as f64).floor() as i64;
-                // The template carries the `%` — pass the bare numbers.
-                segments.push(crate::i18n::trf(
-                    self.locale,
-                    "status1.context",
-                    &[
-                        &crate::render::chat_view::format_tokens_abs(used),
-                        &pct.to_string(),
-                    ],
-                ));
+            if used > 0 {
+                if let Some(window) = stats.context_window
+                    && window > 0
+                {
+                    let pct = (used as f64 * 100.0 / window as f64).floor() as i64;
+                    // The template carries the `%` — pass the bare numbers.
+                    segments.push(crate::i18n::trf(
+                        self.locale,
+                        "status1.context",
+                        &[
+                            &crate::render::chat_view::format_tokens_abs(used),
+                            &pct.to_string(),
+                        ],
+                    ));
+                } else {
+                    // No window (the `request/context` event never
+                    // arrived): the usage-only form.
+                    segments.push(crate::i18n::trf(
+                        self.locale,
+                        "status1.context_used",
+                        &[&crate::render::chat_view::format_tokens_abs(used)],
+                    ));
+                }
             }
         }
         if segments.is_empty() {

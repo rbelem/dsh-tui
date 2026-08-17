@@ -17,6 +17,7 @@ pub mod settings;
 pub mod sidebar;
 pub mod style;
 pub mod takeover;
+pub mod view_options;
 
 pub use composer::{Composer, ComposerView, PopupKind, SeedPopup};
 pub use hero::HeroView;

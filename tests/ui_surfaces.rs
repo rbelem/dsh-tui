@@ -119,7 +119,13 @@ async fn sidebar_with_sessions_120x30() {
     .await;
 
     let view = format!("{}", term.backend());
-    assert!(view.contains("Sessions"), "header: {view}");
+    // 6: the web-parity chrome — brand row, New Session button, the
+    // Workspaces section header (the old "Sessions" label).
+    assert!(view.contains("DeepSeek Harness"), "brand: {view}");
+    assert!(view.contains("+ New Session"), "new session button: {view}");
+    assert!(view.contains("Workspaces"), "section header: {view}");
+    assert!(view.contains("Search Options Add"), "buttons row: {view}");
+    assert!(view.contains("Settings"), "settings row: {view}");
     assert!(view.contains("● s1"), "active marker: {view}");
     assert!(view.contains("s2 · running"), "running suffix: {view}");
     assert!(
@@ -160,8 +166,12 @@ async fn sidebar_collapses_below_60_columns() {
 
     let view = format!("{}", term.backend());
     assert!(
-        !view.contains("Sessions"),
+        !view.contains("Workspaces"),
         "sidebar hidden at 50 cols: {view}"
+    );
+    assert!(
+        !view.contains("DeepSeek Harness"),
+        "brand hidden at 50 cols: {view}"
     );
 }
 
@@ -193,11 +203,11 @@ async fn sidebar_chat_gap_column_at_80x24() {
     // must be a plain space (bg contrast), never a border glyph.
     let gap = buffer.cell((22, 2)).expect("gap cell at the header row");
     assert_eq!(gap.symbol(), " ", "gap shows bg, not a rule: {gap:?}");
-    let header = buffer.cell((2, 0)).expect("sidebar header start");
+    let header = buffer.cell((2, 0)).expect("sidebar brand start");
     assert_eq!(
         header.symbol(),
-        "S",
-        "2/2 padding: header at col 2: {header:?}"
+        "D",
+        "2/2 padding: the brand starts at col 2: {header:?}"
     );
     let edge = buffer.cell((21, 2)).expect("sidebar edge cell");
     assert_eq!(

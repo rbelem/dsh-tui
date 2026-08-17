@@ -19,7 +19,7 @@ use dsh_tui::i18n::Locale;
 use dsh_tui::store::SessionStore;
 use dsh_tui::wire::events::HostFrame;
 use dsh_tui::wire::session::{SessionId, SessionSummary, WorkspaceId};
-use dsh_tui::wire::workspace::WorkspaceView;
+use dsh_tui::wire::workspace::{WorkspaceCreateValue, WorkspaceView};
 
 // ---------------------------------------------------------------------------
 // fixture helpers
@@ -37,6 +37,79 @@ fn summary(id: &str) -> SessionSummary {
         agent_preset: None,
         projections: None,
     }
+}
+
+fn workspace_view(id: &str, title: &str) -> WorkspaceView {
+    WorkspaceView {
+        workspace_id: WorkspaceId(id.into()),
+        path: format!("/tmp/{id}"),
+        title: title.into(),
+        session_ids: vec![],
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+    }
+}
+
+/// A finished `workspace.create` folds the returned row into the sidebar:
+/// a new workspace appends to `workspaces` and the durable order, the
+/// editor closes and the sending flag clears (6g).
+#[tokio::test]
+async fn workspace_create_done_folds_new_workspace_in() {
+    let mut app = App::default();
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::WorkspaceCreateDone {
+                result: Ok(WorkspaceCreateValue {
+                    workspace: workspace_view("wNew", "new-ws"),
+                    created: true,
+                }),
+            },
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(
+        app.workspaces
+            .iter()
+            .any(|ws| ws.workspace_id == WorkspaceId("wNew".into())),
+        "workspace folded in"
+    );
+    assert!(
+        app.workspace_order.contains(&WorkspaceId("wNew".into())),
+        "durable order appended"
+    );
+    assert!(app.workspace_editor.is_none(), "editor closed");
+    assert!(!app.sidebar_action_sending, "sending flag cleared");
+}
+
+/// A failed `workspace.create` toasts through the shared sidebar-action
+/// failure surface and closes the editor too (6g).
+#[tokio::test]
+async fn workspace_create_done_failure_toasts() {
+    let mut app = App::default();
+    app.focus = Focus::Chat;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::WorkspaceCreateDone {
+                result: Err(dsh_tui::client::ClientError::Transport("boom".into())),
+            },
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let toast = app.toast.as_ref().expect("failure toast");
+    assert!(toast.0.contains("boom"), "toast text: {}", toast.0);
+    assert!(app.workspace_editor.is_none(), "editor closed on error");
+    assert!(!app.sidebar_action_sending, "sending flag cleared on error");
 }
 
 fn workspace(id: &str, title: &str, session_ids: &[&str]) -> WorkspaceView {
