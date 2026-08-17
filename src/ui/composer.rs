@@ -72,6 +72,15 @@ impl Composer {
         self.buffer.split('\n').count()
     }
 
+    /// The strip height in rows this buffer needs: the line count plus the
+    /// top rule, floored at 2 and capped at `max` (the caller's ceiling).
+    /// The buffer is unbounded — past `max` the strip stops growing and the
+    /// caret-follow scroll ([`Composer::caret_layout`] + the paragraph
+    /// scroll) keeps the caret visible beyond the visible strip.
+    pub fn layout_height(&self, max: u16) -> u16 {
+        (self.line_count() as u16 + 1).min(max).max(2)
+    }
+
     /// Insert one char at the caret; any buffer change re-arms the popup.
     pub fn insert_char(&mut self, c: char) {
         self.buffer.insert(self.caret, c);
@@ -313,7 +322,7 @@ impl Widget for ComposerView<'_> {
         if inner.height == 0 || inner.width == 0 {
             return;
         }
-        let (_, _, scroll) = self.composer.caret_layout(inner.width);
+        let (row, _, scroll) = self.composer.caret_layout(inner.width);
         if self.composer.is_empty() {
             Paragraph::new(Line::styled(
                 tr(self.locale, "composer.placeholder"),
@@ -321,8 +330,13 @@ impl Widget for ComposerView<'_> {
             ))
             .render(inner, buf);
         } else {
+            // #46: vertical caret-follow — the strip is capped by the
+            // caller's `layout_height` ceiling, so a buffer taller than
+            // the strip scrolls to keep the caret row as the bottom
+            // visible line (the horizontal scroll stays the caret's).
+            let vscroll = row.saturating_sub(inner.height.saturating_sub(1));
             Paragraph::new(self.composer.buffer().to_string())
-                .scroll((0, scroll))
+                .scroll((vscroll, scroll))
                 .render(inner, buf);
         }
     }
@@ -542,5 +556,60 @@ mod tests {
         assert_eq!(row, 0);
         assert_eq!(col, 4, "caret stays inside the area");
         assert_eq!(scroll, 6);
+    }
+
+    #[test]
+    fn caret_follow_scrolls_tall_buffers_vertically() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut c = Composer::new();
+        for i in 0..200 {
+            for ch in format!("line-{i}").chars() {
+                c.insert_char(ch);
+            }
+            if i < 199 {
+                c.newline();
+            }
+        }
+        let backend = TestBackend::new(30, 3);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| {
+            f.render_widget(
+                ComposerView {
+                    composer: &c,
+                    focused: false,
+                    theme: &crate::theme::Theme::default(),
+                    locale: Locale::En,
+                },
+                f.area(),
+            )
+        })
+        .unwrap();
+        let text = format!("{}", term.backend());
+        // Inner height 2 (the top border): a 200-line buffer scrolls so
+        // the caret row (line-199) is the bottom visible line — never the
+        // top of the buffer with the caret off-screen.
+        assert!(text.contains("line-199"), "caret line visible: {text}");
+        assert!(text.contains("line-198"), "the line above it: {text}");
+        assert!(
+            !text.contains("line-0"),
+            "buffer start scrolled away: {text}"
+        );
+    }
+
+    #[test]
+    fn layout_height_floors_grows_and_caps() {
+        assert_eq!(
+            Composer::new().layout_height(8),
+            2,
+            "empty buffer keeps the 2-row floor"
+        );
+        let three = composer("a\nb\nc");
+        assert_eq!(three.layout_height(8), 4, "line count + the top rule");
+        // 200 newlines: the strip grows with content up to the ceiling.
+        let book = composer(&"x\n".repeat(199));
+        assert_eq!(book.line_count(), 200);
+        assert_eq!(book.layout_height(8), 8, "capped at the caller ceiling");
+        assert_eq!(book.layout_height(250), 201, "grows to the ceiling");
     }
 }

@@ -8,6 +8,7 @@
 
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::style::Modifier;
 use serde_json::json;
 
 use dsh_tui::i18n::Locale;
@@ -564,6 +565,274 @@ fn offset_past_end_clamps_to_bottom_not_top() {
         !snapshot.contains("Check this out"),
         "head still visible: {snapshot}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #45: think-section fold (reasoning blocks)
+// ---------------------------------------------------------------------------
+
+/// A store with one streamed assistant node whose blocks are
+/// [text, reasoning] — the think-section fixture.
+fn think_store() -> SessionStore {
+    let mut store = SessionStore::new();
+    ingest_all(
+        &mut store,
+        S,
+        vec![
+            ev(1, "user/message", user_msg("m1", "hello", user_source())),
+            ev(2, "step/start", json!({"turn": 1, "step": 1})),
+            ev(
+                3,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "block-start", "index": 0, "blockType": "text"}),
+                ),
+            ),
+            ev(
+                4,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "text-delta", "index": 0, "text": "the answer"}),
+                ),
+            ),
+            ev(
+                5,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "block-start", "index": 1, "blockType": "reasoning"}),
+                ),
+            ),
+            ev(
+                6,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "reasoning-delta", "index": 1, "text": "deep secret chain of thought"}),
+                ),
+            ),
+        ],
+    );
+    store
+}
+
+/// #45: an assistant node with reasoning opens a think section — a header
+/// row above the reasoning content, expanded by default (web parity).
+/// Folding via the chat-view layer hides the reasoning content, keeps the
+/// header, and the header row resolves through the click seam.
+#[test]
+fn think_section_renders_expanded_and_folds() {
+    let store = think_store();
+    let mut cache = RowCache::new();
+
+    // Default: expanded — header + reasoning content.
+    let expanded = render_snapshot(&store, &mut cache, 120, 30, 0);
+    assert!(expanded.contains("▾ Think"), "header: {expanded}");
+    assert!(
+        expanded.contains("deep secret chain of thought"),
+        "reasoning visible by default: {expanded}"
+    );
+
+    // Fold via the chat-view layer; the next sync sees the signature
+    // change and re-renders: header stays, content goes.
+    cache.toggle_think_fold(&"1:1".to_string());
+    assert!(cache.think_folded(&"1:1".to_string()));
+    let folded = render_snapshot(&store, &mut cache, 120, 30, 0);
+    assert!(folded.contains("▸ Think"), "folded header: {folded}");
+    assert!(
+        !folded.contains("deep secret chain of thought"),
+        "reasoning hidden while folded: {folded}"
+    );
+    assert!(
+        folded.contains("the answer"),
+        "non-reasoning blocks stay: {folded}"
+    );
+
+    // The hit-test seam: the cached header row maps to the node key.
+    let (row_index, header_line) = cache
+        .lines()
+        .iter()
+        .enumerate()
+        .find_map(|(i, row)| row.think_header.map(|h| (i, h)))
+        .expect("think header cached");
+    let abs_line: usize = cache.lines()[..row_index]
+        .iter()
+        .map(|row| row.lines.len())
+        .sum::<usize>()
+        + header_line;
+    assert_eq!(
+        cache.think_header_at(abs_line),
+        Some("1:1"),
+        "header row routes to the node key"
+    );
+    assert_eq!(
+        cache.think_header_at(abs_line + 1),
+        None,
+        "rows below the header are not a fold target"
+    );
+
+    // Toggle back: expanded again.
+    cache.toggle_think_fold(&"1:1".to_string());
+    assert!(!cache.think_folded(&"1:1".to_string()));
+    let re_expanded = render_snapshot(&store, &mut cache, 120, 30, 0);
+    assert!(
+        re_expanded.contains("deep secret chain of thought"),
+        "toggle back expands: {re_expanded}"
+    );
+}
+
+/// #45: reasoning content is markdown rendered muted but NOT dimmed (the
+/// DIM modifier washed it out vs the web's think section; the muted color
+/// is theme-driven and unchanged).
+#[test]
+fn reasoning_renders_muted_without_dim() {
+    let store = think_store();
+    let mut cache = RowCache::new();
+    cache.sync(
+        &store,
+        &sid(),
+        &render_ctx(
+            120,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
+    );
+    cache.render_dirty(
+        &store,
+        &sid(),
+        &render_ctx(
+            120,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
+    );
+    let reasoning_line = cache
+        .lines()
+        .iter()
+        .flat_map(|row| row.lines.iter())
+        .find(|line| line.to_string().contains("deep secret chain of thought"))
+        .expect("reasoning line");
+    let span = reasoning_line
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref().contains("deep secret"))
+        .expect("reasoning span");
+    assert!(
+        !span.style.has_modifier(Modifier::DIM),
+        "reasoning is not dimmed: {span:?}"
+    );
+    assert_eq!(
+        span.style.fg,
+        Some(Theme::default().muted),
+        "reasoning stays muted: {span:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// scrollbar
+// ---------------------------------------------------------------------------
+
+/// #45: the scrollbar knob must reach the track bottom when the view is
+/// scrolled to the app's max offset (follow mode). The scrollbar's content
+/// length is the scroll EXTENT (total - viewport + 1), so ratatui's
+/// `position == content_length - 1` == the app's max offset lands the knob
+/// exactly on the bottom track cell.
+#[test]
+fn scrollbar_knob_reaches_the_track_bottom_at_max_offset() {
+    // 40 one-line messages: 40 rows, 39 inter-message blanks → 79 lines.
+    let mut store = SessionStore::new();
+    let mut events = Vec::new();
+    for seq in 1..=40 {
+        events.push(ev(
+            seq,
+            "user/message",
+            user_msg(&format!("m{seq}"), &format!("message {seq}"), user_source()),
+        ));
+    }
+    ingest_all(&mut store, S, events);
+    let mut cache = RowCache::new();
+    cache.sync(
+        &store,
+        &sid(),
+        &render_ctx(
+            120,
+            &Theme::default(),
+            Locale::En,
+            &ImageCache::default(),
+            &std::collections::HashMap::new(),
+        ),
+    );
+    let total: usize = cache.lines().iter().map(|row| row.lines.len()).sum();
+    assert_eq!(total, 79, "fixture: 40 messages, 39 blanks");
+    // The app's max offset (follow mode): total - (area.height - 1).
+    let max_offset = total - 29;
+
+    let backend = TestBackend::new(120, 30);
+    let mut terminal = Terminal::new(backend).expect("test backend");
+    terminal
+        .draw(|frame| {
+            frame.render_widget(
+                ChatView {
+                    store: &store,
+                    session_id: &sid(),
+                    offset: max_offset,
+                    row_cache: &mut cache,
+                    images: &mut ImageCache::default(),
+                    live: None,
+                },
+                frame.area(),
+            );
+        })
+        .expect("draw");
+    let buf = terminal.backend().buffer();
+    // The scrollbar hugs the right edge (col 119); the track spans rows
+    // 1..=28 (the vertical-1 inset). Ratatui's defaults: track `║`,
+    // thumb `█`. At max offset the knob's bottom cell is the track's
+    // bottom cell.
+    assert_eq!(
+        buf[(119, 28)].symbol(),
+        "█",
+        "knob at the track bottom at max offset"
+    );
+    assert_eq!(
+        buf[(119, 1)].symbol(),
+        "║",
+        "track cell above the knob range"
+    );
+    assert!(
+        format!("{}", terminal.backend()).contains("message 40"),
+        "the tail is visible at max offset"
+    );
+
+    // At offset 0 the knob sits at the top of the track.
+    terminal
+        .draw(|frame| {
+            frame.render_widget(
+                ChatView {
+                    store: &store,
+                    session_id: &sid(),
+                    offset: 0,
+                    row_cache: &mut cache,
+                    images: &mut ImageCache::default(),
+                    live: None,
+                },
+                frame.area(),
+            );
+        })
+        .expect("draw");
+    let buf = terminal.backend().buffer();
+    assert_eq!(buf[(119, 1)].symbol(), "█", "knob at the track top");
+    assert_eq!(buf[(119, 28)].symbol(), "║", "track cell below the knob");
 }
 
 // ---------------------------------------------------------------------------

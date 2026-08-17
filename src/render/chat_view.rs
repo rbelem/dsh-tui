@@ -238,7 +238,14 @@ impl Widget for ChatView<'_> {
         // bottom edge. Only when the conversation overflows.
         let viewport = area.height.saturating_sub(1) as usize;
         if total > viewport {
-            let mut state = ScrollbarState::new(total).position(self.offset);
+            // The content length is the app's scroll EXTENT (the number of
+            // distinct offsets: total - viewport + 1), not the raw line
+            // count: ratatui places the knob at the track bottom exactly
+            // when `position == content_length - 1`, which is the app's
+            // max follow offset (total - viewport). With the raw count the
+            // knob rests above the track bottom at full follow-scroll.
+            let content = total.saturating_sub(viewport).saturating_add(1);
+            let mut state = ScrollbarState::new(content).position(self.offset);
             Scrollbar::default()
                 .orientation(ratatui::widgets::ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)

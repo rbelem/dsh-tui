@@ -11,6 +11,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("catalog.group.commands", "commands"),
     ("catalog.group.skills", "skills"),
     ("catalog.loading", "loading…"),
+    ("chat.think", "Think"),
     ("composer.hint_clear", "clear the chat"),
     ("composer.hint_compact", "compact the session"),
     ("composer.hint_help", "show help"),

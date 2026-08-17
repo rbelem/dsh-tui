@@ -11,6 +11,7 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("catalog.group.commands", "命令"),
     ("catalog.group.skills", "技能"),
     ("catalog.loading", "加载中…"),
+    ("chat.think", "思考"),
     ("composer.hint_clear", "清空聊天"),
     ("composer.hint_compact", "压缩会话"),
     ("composer.hint_help", "显示帮助"),

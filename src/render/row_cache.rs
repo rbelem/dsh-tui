@@ -51,6 +51,11 @@ pub struct CachedRow {
     /// the click-toggle fold target and the live running/elapsed
     /// indicator's anchor (`None` on non-tool nodes).
     pub tool_header: Option<usize>,
+    /// #45: the line index (into `lines`) of a think-section header row
+    /// (an assistant node with ≥1 reasoning block) — the click-toggle
+    /// fold target for the app's mouse handler (`None` on nodes without
+    /// a think section).
+    pub think_header: Option<usize>,
     /// Rendered-relevant state at render time (change detection).
     signature: u64,
 }
@@ -65,6 +70,13 @@ pub struct RowCache {
     /// #22: bumped on every rows mutation (recollect, dirty re-render,
     /// width clear) — the selection width cache's invalidation signal.
     generation: u64,
+    /// #45: per-node think-section fold state (absent = expanded — web
+    /// parity: DeepSeek web shows the Think section expanded). Owned here
+    /// (the chat-view layer) so the fold feeds the render signature and
+    /// the reasoning-content skip; the app's mouse handler toggles it via
+    /// [`RowCache::toggle_think_fold`] and routes clicks through
+    /// [`RowCache::think_header_at`].
+    think_folds: HashSet<NodeKey>,
 }
 
 impl RowCache {
@@ -128,7 +140,10 @@ impl RowCache {
             // default), part of the render signature so a toggle
             // re-renders the node.
             let skill_fold = ctx.skill_fold(&node.key);
-            let signature = rendered_signature(node, collapsed, skill_fold);
+            // #45: the think-section fold (absent = expanded), part of the
+            // render signature the same way.
+            let think_folded = self.think_folds.contains(&node.key);
+            let signature = rendered_signature(node, collapsed, skill_fold, think_folded);
             match self.take_row(&node.key) {
                 Some(mut row) => {
                     if row.signature != signature {
@@ -139,7 +154,7 @@ impl RowCache {
                     reordered.push(row);
                 }
                 None => {
-                    let rendered = render_row(node, collapsed, ctx);
+                    let rendered = render_row(node, collapsed, think_folded, ctx);
                     reordered.push(CachedRow {
                         node_key: node.key.clone(),
                         anchor_seq: node.anchor_seq,
@@ -149,6 +164,7 @@ impl RowCache {
                         code_fill: rendered.code_fill,
                         skill_header: rendered.skill_header,
                         tool_header: rendered.tool_header,
+                        think_header: rendered.think_header,
                         signature,
                     });
                     changed = true;
@@ -157,6 +173,11 @@ impl RowCache {
         }
         // Rows whose nodes vanished were never re-collected — dropped.
         self.rows = reordered;
+        // #45: prune the think folds to currently cached nodes (mirrors
+        // the app's skill-fold retain; owned here so the state never
+        // outlives its rows).
+        self.think_folds
+            .retain(|key| self.rows.iter().any(|row| row.node_key == *key));
         // #11: 1 blank row between messages — every row but the last.
         Self::ensure_inter_message_blank(&mut self.rows);
         let changed_any = changed || self.rows.len() != old_len || !self.dirty.is_empty();
@@ -203,7 +224,8 @@ impl RowCache {
                 continue;
             };
             let collapsed = store.fold_state(session_id, &key).collapsed;
-            let rendered = render_row(node, collapsed, ctx);
+            let think_folded = self.think_folds.contains(&key);
+            let rendered = render_row(node, collapsed, think_folded, ctx);
             if let Some(row) = self.rows.iter_mut().find(|row| row.node_key == key) {
                 row.lines = rendered.lines;
                 row.images = rendered.images;
@@ -211,6 +233,7 @@ impl RowCache {
                 row.code_fill = rendered.code_fill;
                 row.skill_header = rendered.skill_header;
                 row.tool_header = rendered.tool_header;
+                row.think_header = rendered.think_header;
                 rendered_any = true;
             }
             // Dirty re-render dropped the inter-message blank; restore it.
@@ -241,6 +264,38 @@ impl RowCache {
     /// The full cached row array in display order (virtualization slices this).
     pub fn lines(&self) -> &[CachedRow] {
         &self.rows
+    }
+
+    /// #45: flip the think-section fold for `key` (insert = folded, remove
+    /// = expanded — the default). The next [`RowCache::sync`] sees the
+    /// render-signature change and re-renders the node's rows.
+    pub fn toggle_think_fold(&mut self, key: &NodeKey) {
+        if !self.think_folds.insert(key.clone()) {
+            self.think_folds.remove(key);
+        }
+    }
+
+    /// #45: whether the node's think section is folded (absent = expanded).
+    pub fn think_folded(&self, key: &NodeKey) -> bool {
+        self.think_folds.contains(key)
+    }
+
+    /// #45: the node key whose think-header row occupies the absolute
+    /// (cache-line) index, if any — the click-toggle fold target. Called by
+    /// the app's mouse handler (mirror of the tool-header routing).
+    pub fn think_header_at(&self, abs_line: usize) -> Option<&str> {
+        let mut cursor = 0usize;
+        for row in &self.rows {
+            let len = row.lines.len();
+            if abs_line >= cursor && abs_line < cursor + len {
+                return match row.think_header {
+                    Some(relative) if relative == abs_line - cursor => Some(&row.node_key),
+                    _ => None,
+                };
+            }
+            cursor += len;
+        }
+        None
     }
 
     /// Map a LINE-space viewport offset (the app scrolls by rendered lines)
@@ -277,16 +332,22 @@ struct WrappedRender {
     code_fill: ratatui::style::Color,
     skill_header: Option<usize>,
     tool_header: Option<usize>,
+    think_header: Option<usize>,
 }
 
-/// Render one node, wrap at `ctx.width`, and re-base the image segments'
-/// and code ranges' pre-wrap indices onto the wrapped line array (filler
-/// lines never split, so each marked input line maps to exactly one output
-/// start). The #11 1-blank-row spacing between messages is maintained by
-/// [`RowCache::ensure_inter_message_blank`], not here (a trailing blank on
-/// the LAST row would break the follow-mode bottom clamp).
-fn render_row(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> WrappedRender {
-    let render = render_node_full(node, collapsed, ctx);
+/// Render one node, wrap at `ctx.width`, and re-base the image segments',
+/// code ranges' and header marks' pre-wrap indices onto the wrapped line
+/// array (filler lines never split, so each marked input line maps to
+/// exactly one output start). The #11 1-blank-row spacing between messages
+/// is maintained by [`RowCache::ensure_inter_message_blank`], not here (a
+/// trailing blank on the LAST row would break the follow-mode bottom clamp).
+fn render_row(
+    node: &ChatNode,
+    collapsed: bool,
+    think_folded: bool,
+    ctx: &RenderContext<'_>,
+) -> WrappedRender {
+    let render = render_node_full(node, collapsed, think_folded, ctx);
     let marks: Vec<usize> = render.images.iter().map(|seg| seg.line_index).collect();
     let wrapped = wrap_lines_marked(
         render.lines,
@@ -295,6 +356,7 @@ fn render_row(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> Wrap
         &render.code_ranges,
         render.skill_header,
         render.tool_header,
+        render.think_header,
     );
     let WrappedLines {
         lines,
@@ -302,6 +364,7 @@ fn render_row(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> Wrap
         code_ranges,
         skill_header,
         tool_header,
+        think_header,
     } = wrapped;
     let images = render
         .images
@@ -319,6 +382,7 @@ fn render_row(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> Wrap
         code_fill: ctx.theme.panel_bg,
         skill_header,
         tool_header,
+        think_header,
     }
 }
 
@@ -332,13 +396,14 @@ fn render_row(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> Wrap
 /// lines form a contiguous run).
 /// The wrapped output of [`wrap_lines_marked`]: the lines plus the
 /// re-based marks (image starts, code ranges, the #31 skill header, the
-/// #39 tool header).
+/// #39 tool header, the #45 think header).
 struct WrappedLines {
     lines: Vec<Line<'static>>,
     image_rebased: Vec<usize>,
     code_ranges: Vec<(usize, usize)>,
     skill_header: Option<usize>,
     tool_header: Option<usize>,
+    think_header: Option<usize>,
 }
 
 fn wrap_lines_marked(
@@ -348,6 +413,7 @@ fn wrap_lines_marked(
     code_ranges: &[(usize, usize)],
     skill_mark: Option<usize>,
     tool_mark: Option<usize>,
+    think_mark: Option<usize>,
 ) -> WrappedLines {
     if width == 0 {
         return WrappedLines {
@@ -356,6 +422,7 @@ fn wrap_lines_marked(
             code_ranges: Vec::new(),
             skill_header: None,
             tool_header: None,
+            think_header: None,
         };
     }
     let width = width as usize;
@@ -363,8 +430,7 @@ fn wrap_lines_marked(
     let mut rebased = Vec::with_capacity(image_marks.len());
     let mut next_mark = image_marks.iter().peekable();
     // Output line count before each input line — maps input ranges to
-    // output ranges (and the #31 skill header / #39 tool header to their
-    // post-wrap lines).
+    // output ranges (and the header marks to their post-wrap lines).
     let mut out_before = Vec::with_capacity(lines.len() + 1);
     for (index, line) in lines.into_iter().enumerate() {
         out_before.push(wrapped.len());
@@ -381,12 +447,14 @@ fn wrap_lines_marked(
         .collect();
     let skill_header = skill_mark.map(|mark| out_before[mark]);
     let tool_header = tool_mark.map(|mark| out_before[mark]);
+    let think_header = think_mark.map(|mark| out_before[mark]);
     WrappedLines {
         lines: wrapped,
         image_rebased: rebased,
         code_ranges,
         skill_header,
         tool_header,
+        think_header,
     }
 }
 
@@ -426,7 +494,12 @@ fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
 
 /// FNV-1a hash over the rendered-relevant fields of a node (kind, anchor,
 /// fold state, flags, and accumulated text lengths).
-fn rendered_signature(node: &ChatNode, collapsed: bool, skill_fold: bool) -> u64 {
+fn rendered_signature(
+    node: &ChatNode,
+    collapsed: bool,
+    skill_fold: bool,
+    think_folded: bool,
+) -> u64 {
     use crate::store::node::NodeData;
 
     let mut hash = 0xcbf29ce484222325u64;
@@ -434,6 +507,7 @@ fn rendered_signature(node: &ChatNode, collapsed: bool, skill_fold: bool) -> u64
     hash_u64(&mut hash, node.anchor_seq as u64);
     hash_u64(&mut hash, collapsed as u64);
     hash_u64(&mut hash, skill_fold as u64);
+    hash_u64(&mut hash, think_folded as u64);
     match &node.data {
         NodeData::User { content, .. } => {
             for block in content {

@@ -440,6 +440,7 @@ fn render_node_wrapper_matches_the_full_render() {
     let wrapped = render_node(
         &chat,
         false,
+        false,
         &render_ctx(
             80,
             &theme,
@@ -450,6 +451,7 @@ fn render_node_wrapper_matches_the_full_render() {
     );
     let full = render_node_full(
         &chat,
+        false,
         false,
         &render_ctx(
             80,
@@ -473,6 +475,7 @@ fn node_data_variants_render_their_markers() {
     let render = |n: &ChatNode| {
         render_node_full(
             n,
+            false,
             false,
             &render_ctx(
                 80,
@@ -624,6 +627,7 @@ fn tool_node_error_paths_render() {
         render_node_full(
             n,
             collapsed,
+            false,
             &render_ctx(
                 80,
                 &theme,
@@ -691,6 +695,7 @@ fn tool_node_error_paths_render() {
     // layer is asserted directly; the TestBackend dump is style-blind).
     let node_lines = render_node_full(
         &error_tool,
+        false,
         false,
         &render_ctx(
             80,
@@ -1062,6 +1067,7 @@ fn markdown_tool_result_false_and_missing_error_code() {
         render_node_full(
             n,
             collapsed,
+            false,
             &render_ctx(
                 80,
                 &theme,
@@ -1153,6 +1159,7 @@ fn tool_details_meta_lines_show_timing_and_schema() {
         render_node_full(
             n,
             collapsed,
+            false,
             &render_ctx(
                 80,
                 &theme,

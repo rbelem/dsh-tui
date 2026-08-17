@@ -62,12 +62,19 @@ pub struct NodeRender {
     /// header row — the click-toggle fold target AND the live
     /// running/elapsed indicator's anchor. `None` on non-tool nodes.
     pub tool_header: Option<usize>,
+    /// #45: the line index (into `lines`, pre-wrap) of a think-section
+    /// header row (an assistant node with ≥1 reasoning block) — the
+    /// click-toggle fold target for the app's mouse handler. `None` on
+    /// nodes without a think section.
+    pub think_header: Option<usize>,
 }
 
 /// Render one chat node to (unwrapped) display lines. `collapsed` is the
 /// node's fold state (Q11): collapsed tool nodes render a one-line summary.
-/// `ctx` is the render-context bag (#32): theme tokens, locale, image
-/// cache, wrap width, and the #31 skill-fold map (resolved per node).
+/// `think_folded` is the #45 think-section fold (an assistant node with
+/// reasoning renders a header row; folded, the reasoning content is
+/// skipped). `ctx` is the render-context bag (#32): theme tokens, locale,
+/// image cache, wrap width, and the #31 skill-fold map (resolved per node).
 ///
 /// Placeholder tier: image blocks always render their `[image: name]`
 /// caption (no image cache consulted). Byte-identical to the pre-image
@@ -75,9 +82,10 @@ pub struct NodeRender {
 pub fn render_node(
     node: &ChatNode,
     collapsed: bool,
+    think_folded: bool,
     ctx: &RenderContext<'_>,
 ) -> Vec<Line<'static>> {
-    render_node_full(node, collapsed, ctx).lines
+    render_node_full(node, collapsed, think_folded, ctx).lines
 }
 
 /// The render-context bag threaded through the markdown pipeline (#32):
@@ -111,7 +119,12 @@ impl RenderContext<'_> {
 /// followed by `rows` blank filler lines (the widget draws over them at
 /// draw time); anything else keeps the bare caption placeholder.
 /// `ctx.width` is the wrap width (the inline fit budget).
-pub fn render_node_full(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_>) -> NodeRender {
+pub fn render_node_full(
+    node: &ChatNode,
+    collapsed: bool,
+    think_folded: bool,
+    ctx: &RenderContext<'_>,
+) -> NodeRender {
     let theme = ctx.theme;
     let locale = ctx.locale;
     // #31: the skill fold is per-node state — resolved here from the map
@@ -122,6 +135,7 @@ pub fn render_node_full(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_
     let mut code_ranges = Vec::new();
     let mut skill_header = None;
     let mut tool_header = None;
+    let mut think_header = None;
     let lines = match &node.data {
         NodeData::User { content, .. } => {
             // The user-message tint (#38): the theme's `user_bg` behind the
@@ -142,9 +156,22 @@ pub fn render_node_full(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_
             ..
         } => {
             let mut lines = Vec::new();
+            // #45: an assistant node with ≥1 reasoning block opens a think
+            // section: a header row (fold glyph + label) above the
+            // reasoning content. Folded, the header stays and the
+            // reasoning blocks' content is skipped; expanded (the default —
+            // web parity: DeepSeek web shows the Think section expanded),
+            // header + content. The header is always the first line.
+            let has_reasoning = blocks
+                .iter()
+                .any(|block| matches!(block, AssistantBlock::Reasoning { .. }));
+            if has_reasoning {
+                think_header = Some(lines.len());
+                lines.push(think_header_line(think_folded, locale, theme));
+            }
             for block in blocks {
                 let (block_lines, block_ranges, block_skill) =
-                    render_assistant_block(block, ctx, skill_fold);
+                    render_assistant_block(block, think_folded, ctx, skill_fold);
                 code_ranges.extend(
                     block_ranges
                         .into_iter()
@@ -213,6 +240,7 @@ pub fn render_node_full(node: &ChatNode, collapsed: bool, ctx: &RenderContext<'_
         code_ranges,
         skill_header,
         tool_header,
+        think_header,
     }
 }
 
@@ -282,9 +310,12 @@ pub fn render_markdown(
 
 /// Render one assistant block into lines; the returned code ranges index
 /// into the returned vec. (Assistant blocks have no image content, so the
-/// image side of the context is not consulted here.)
+/// image side of the context is not consulted here.) #45: a folded think
+/// section skips reasoning blocks entirely — the header row (rendered by
+/// the caller) is all that remains.
 fn render_assistant_block(
     block: &AssistantBlock,
+    think_folded: bool,
     ctx: &RenderContext<'_>,
     skill_fold: bool,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>, Option<usize>) {
@@ -292,14 +323,17 @@ fn render_assistant_block(
         AssistantBlock::Text { text } => {
             render_markdown(text, Style::default().fg(ctx.theme.text), ctx, skill_fold)
         }
-        AssistantBlock::Reasoning { text } => render_markdown(
-            text,
-            Style::default()
-                .fg(ctx.theme.muted)
-                .add_modifier(Modifier::DIM),
-            ctx,
-            skill_fold,
-        ),
+        AssistantBlock::Reasoning { text } => {
+            if think_folded {
+                (Vec::new(), Vec::new(), None)
+            } else {
+                // #45: reasoning is markdown (the web renders the think
+                // section's contents formatted), styled muted for the
+                // section's secondary voice — deliberately NOT dimmed
+                // (readability vs the web's rendering).
+                render_markdown(text, Style::default().fg(ctx.theme.muted), ctx, skill_fold)
+            }
+        }
         // An assistant-block tool-call scaffold is NOT a foldable tool
         // node (no row, no glyph — plain title line).
         AssistantBlock::ToolCall { name, .. } => (
@@ -327,14 +361,10 @@ fn render_content_blocks(
     for block in content {
         let (block_lines, block_ranges, block_skill) = match block {
             ContentBlock::Text { text } => render_markdown(text, text_style, ctx, skill_fold),
-            ContentBlock::Reasoning { text } => render_markdown(
-                text,
-                Style::default()
-                    .fg(ctx.theme.muted)
-                    .add_modifier(Modifier::DIM),
-                ctx,
-                skill_fold,
-            ),
+            ContentBlock::Reasoning { text } => {
+                // #45: muted but not dimmed (see the assistant-block arm).
+                render_markdown(text, Style::default().fg(ctx.theme.muted), ctx, skill_fold)
+            }
             ContentBlock::Image { attachment } => {
                 let name = attachment
                     .name
@@ -572,6 +602,19 @@ fn fold_glyph(collapsed: bool, expandable: bool) -> &'static str {
     } else {
         "▾ "
     }
+}
+
+/// #45: the think-section header row — the fold glyph + the i18n label,
+/// styled like the skill-list header (bold accent glyph, plain label), so
+/// it reads as a clickable fold affordance.
+fn think_header_line(folded: bool, locale: Locale, theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{} ", if folded { "▸" } else { "▾" }),
+            Style::new().add_modifier(Modifier::BOLD).fg(theme.accent),
+        ),
+        Span::styled(tr(locale, "chat.think"), Style::default().fg(theme.text)),
+    ])
 }
 
 /// A one-cell-padded status chip: `fg` text on the panel fill, so a
