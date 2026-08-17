@@ -5,7 +5,7 @@
 use crate::app::AppError;
 use crate::client::WireClient;
 use crate::store::SessionStore;
-use crate::wire::session::{SessionId, SessionSummary};
+use crate::wire::session::{ModelSelection, SessionId, SessionSummary};
 use crate::wire::workspace::WorkspaceListValue;
 
 /// History page size for the attach resume.
@@ -21,12 +21,22 @@ const HISTORY_PAGE: usize = 200;
 ///
 /// Returns the opened session id (`None` when the gateway has no sessions —
 /// the app stays on an empty chat and the caller sets a hint), the full
-/// summary list for the sidebar, and the workspace snapshot.
+/// summary list for the sidebar, the workspace snapshot, and the resumed
+/// session's model selection (#43: `session.models` is TOLERANT too — an
+/// unavailable gateway just leaves the Model/Effort status segments hidden).
 pub async fn attach(
     client: &WireClient,
     store: &mut SessionStore,
     locale: crate::i18n::Locale,
-) -> Result<(Option<SessionId>, Vec<SessionSummary>, WorkspaceListValue), AppError> {
+) -> Result<
+    (
+        Option<SessionId>,
+        Vec<SessionSummary>,
+        WorkspaceListValue,
+        Option<ModelSelection>,
+    ),
+    AppError,
+> {
     let (summaries, workspaces) = {
         let summaries = client.session_list();
         let workspaces = client.workspace_list();
@@ -54,7 +64,7 @@ pub async fn attach(
                 .max_by(|a, b| a.updated_at.total_cmp(&b.updated_at))
         });
     let Some(summary) = chosen else {
-        return Ok((None, summaries, workspaces));
+        return Ok((None, summaries, workspaces, None));
     };
 
     let history = client
@@ -67,6 +77,14 @@ pub async fn attach(
         .collect();
     store.ingest_history(&summary.session_id, entries)?;
 
+    // #43: the resumed session's model selection — tolerant (a gateway
+    // without models leaves the model/effort status segments hidden).
+    let model = client
+        .session_models(summary.session_id.clone())
+        .await
+        .ok()
+        .map(|value| value.current);
+
     eprintln!(
         "{}",
         crate::i18n::trf(
@@ -76,5 +94,5 @@ pub async fn attach(
         )
     );
     let opened = summary.session_id.clone();
-    Ok((Some(opened), summaries, workspaces))
+    Ok((Some(opened), summaries, workspaces, model))
 }

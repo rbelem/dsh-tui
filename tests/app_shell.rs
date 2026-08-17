@@ -184,7 +184,7 @@ async fn attach_history_draw_end_to_end() {
 
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, sessions, _workspaces) = attach(&client, &mut store, Locale::En)
+    let (opened, sessions, _workspaces, _model) = attach(&client, &mut store, Locale::En)
         .await
         .expect("attach");
     assert_eq!(opened, Some(SessionId("s1".into())));
@@ -232,7 +232,7 @@ async fn attach_history_draw_end_to_end() {
         view.contains("streamed hello"),
         "streamed assistant text via mux"
     );
-    assert!(view.contains("session s1"), "status line shows the session");
+    assert!(view.contains("Session: s1"), "the header shows the session");
 
     mock.stop().await;
 }
@@ -672,11 +672,11 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
     assert!(app.view.follow, "at the bottom, follow re-arms");
     // The clamp draw above pinned the bottom at offset 8 (9 rendered lines:
     // 5 messages + 4 #11 inter-message blanks; chat content rows 1: the
-    // pane is 2 tall and ChatView reserves 1 blank top row; composer 2 +
-    // status 1); j at the bottom-lock is a no-op — the offset NEVER passes
+    // pane is 0 tall after header 1 + composer 2 + status1 1 + status2 1;
+    // the ChatView early-returns); j at the bottom-lock is a no-op — the offset NEVER passes
     // the last content line (the old assertion `offset == 4` encoded the
     // unclamped overscroll that blanked the viewport below the tail).
-    assert_eq!(app.view.offset, 8, "j is bottom-locked");
+    assert_eq!(app.view.offset, 9, "j is bottom-locked");
 }
 
 // ---------------------------------------------------------------------------
@@ -685,11 +685,11 @@ async fn follow_sticks_to_bottom_until_manual_scroll() {
 
 #[tokio::test]
 async fn scroll_past_end_locks_the_tail_at_the_bottom() {
-    // Thirty one-line messages at 100x30: chat pane = 27 rows (100x30 minus
-    // composer 2 + status 1), content rows 26 (ChatView reserves 1 blank top
+    // Thirty one-line messages at 100x30: chat pane = 25 rows (100x30 minus
+    // header 1 + composer 2 + status1 1 + status2 1), content rows 26 (ChatView reserves 1 blank top
     // row), and each message carries one #11 inter-message blank, so the
     // rendered total is 30 + 29 = 59 lines and the bottom-locked max offset
-    // is 59 - 26 = 33.
+    // is 59 - 24 = 35.
 
     // Phase 1: hammer j far past the end, then a half-page Ctrl+d. The
     // offset must STOP at the bottom-lock (unclamped it would read 200+13).
@@ -726,24 +726,27 @@ async fn scroll_past_end_locks_the_tail_at_the_bottom() {
 
     // Bottom-locked: 200 j's + a half-page down never pass the last line.
     assert_eq!(
-        app.view.offset, 33,
+        app.view.offset, 35,
         "scroll stops at total - chat_height, not past it"
     );
     // #36: the hammered scrolls landed AT the bottom → follow re-armed.
     assert!(app.view.follow, "at the bottom, follow re-arms");
     let view = format!("{}", term.backend());
     let rows: Vec<&str> = view.lines().collect();
-    // The tail is locked at the chat area's LAST row (row 26; the composer
-    // occupies 27-28, status 29) — directly above the composer, not blank.
+    // The tail is locked at the chat area's LAST row (row 25; the header
+    // owns 0, the composer 26-27, the two status rows 28-29) — directly
+    // above the composer, not blank.
     assert!(
-        rows.get(26).is_some_and(|row| row.contains("text-30")),
+        rows.get(25).is_some_and(|row| row.contains("text-30")),
         "tail at the bottom row: {view}"
     );
-    // The window starts at line 33 (the inter-message blank under text-17,
+    // The window starts at line 35 (the inter-message blank under text-18,
     // ChatView's blank top row aside): the head is gone, the middle intact.
-    // Buffer row 2: row 0 is the sidebar header, row 1 its blank spacer.
+    // text-19 is the first visible message (buffer row 3: row 0 is the
+    // sidebar header, row 1 its blank spacer, row 2 the blank under
+    // text-18).
     assert!(
-        rows.get(2).is_some_and(|row| row.contains("text-18")),
+        rows.get(3).is_some_and(|row| row.contains("text-19")),
         "window start just below the top: {view}"
     );
     assert!(
@@ -805,7 +808,7 @@ async fn no_session_attach_renders_empty_chat() {
     .await;
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, sessions, _workspaces) = attach(&client, &mut store, Locale::En)
+    let (opened, sessions, _workspaces, _model) = attach(&client, &mut store, Locale::En)
         .await
         .expect("attach");
     assert_eq!(opened, None, "no sessions on the gateway");
@@ -891,10 +894,11 @@ async fn follow_clamps_with_a_trailing_code_block() {
         .iter()
         .map(|row| row.lines.len())
         .sum();
-    // Chat pane at 100x24: 24 − composer 2 − status 1 − top blank 1 = 20.
+    // Chat pane at 100x24: 24 − header 1 − composer 2 − status1 1 −
+    // status2 1 − top blank 1 = 18.
     assert_eq!(
         app.view.offset,
-        total.saturating_sub(20),
+        total.saturating_sub(18),
         "clamped to the exact content bottom (total={total})"
     );
     // The code-block message renders as exactly 4 lines — before, blank,
@@ -943,7 +947,7 @@ async fn follow_clamps_with_a_trailing_code_block() {
         .sum();
     assert_eq!(
         app.view.offset,
-        total.saturating_sub(20),
+        total.saturating_sub(18),
         "re-clamped to the new bottom (total={total})"
     );
     assert!(app.view.follow, "follow persists");
@@ -1401,10 +1405,11 @@ async fn follow_stays_clamped_across_a_skill_fold_toggle() {
         .iter()
         .map(|row| row.lines.len())
         .sum();
-    // Chat pane at 100x30: 30 − composer 2 − status 1 − top blank 1 = 26.
+    // Chat pane at 100x30: 30 − header 1 − composer 2 − status1 1 −
+    // status2 1 − top blank 1 = 24.
     assert_eq!(
         app.view.offset,
-        total.saturating_sub(26),
+        total.saturating_sub(24),
         "clamped with the folded skill row (total={total})"
     );
     // Folded: 30 messages × 2 lines + the skill header (1 row) = 61.
@@ -1434,7 +1439,7 @@ async fn follow_stays_clamped_across_a_skill_fold_toggle() {
     assert_eq!(total, 63, "expanded: header + 2 item rows");
     assert_eq!(
         app.view.offset,
-        total.saturating_sub(26),
+        total.saturating_sub(24),
         "still clamped after the expand (total={total})"
     );
     assert!(app.view.follow, "follow persists across the toggle");
@@ -1491,7 +1496,7 @@ async fn scrolled_up_offset_unchanged_across_new_content() {
 
     assert!(!app.view.follow, "scrolled up → follow off");
     assert_eq!(
-        app.view.offset, 27,
+        app.view.offset, 29,
         "new content must not move a scrolled-up viewport"
     );
 }
@@ -1555,7 +1560,7 @@ async fn wheel_down_to_bottom_resumes_follow_and_reclamps() {
         .sum();
     assert_eq!(
         app.view.offset,
-        total.saturating_sub(26),
+        total.saturating_sub(24),
         "the new content re-clamped to the new bottom"
     );
 }
@@ -1597,7 +1602,7 @@ async fn g_jumps_to_the_bottom_and_follows() {
     assert!(app.view.follow, "G follows explicitly");
     assert_eq!(
         app.view.offset,
-        total.saturating_sub(26),
+        total.saturating_sub(24),
         "G jumps to the bottom"
     );
 }

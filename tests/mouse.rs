@@ -237,8 +237,8 @@ async fn wheel_burst_scrolls_30_lines_in_one_draw() {
     let mut term = Terminal::new(backend).unwrap();
     let mut events = vec![draw_force()]; // draw: areas + cache sync (boots
     // follow-locked at offset 33)
-    for _ in 0..11 {
-        events.push(wheel_up(60, 10)); // 33 → 0 (the top bound)
+    for _ in 0..12 {
+        events.push(wheel_up(60, 10)); // 35 → 0 (the top bound)
     }
     for _ in 0..10 {
         events.push(wheel_down(60, 10)); // over the chat: 0 → 30
@@ -248,7 +248,9 @@ async fn wheel_burst_scrolls_30_lines_in_one_draw() {
     run_with(&mut app, &mut term, events).await;
 
     // 30 messages + 29 #11 inter-message blanks = 59 lines; the chat pane
-    // is 27 rows (content 26) → bottom lock at 33. A 10-event burst = 30.
+    // is 25 rows (content 24 — header 1 + two status rows) → bottom lock
+    // at 35. A 10-event burst = 30.
+    // (12 wheel-ups from 35 hit the top bound at 0.)
     assert_eq!(app.view.offset, 30, "10 wheel events × 3 lines");
     assert!(!app.view.follow, "wheel disables follow");
 
@@ -288,8 +290,8 @@ async fn wheel_clamps_at_the_bottom_bound() {
     run_with(&mut app, &mut term, events).await;
 
     assert_eq!(
-        app.view.offset, 33,
-        "wheel never passes total - chat_height (59 - 26)"
+        app.view.offset, 35,
+        "wheel never passes total - chat_height (59 - 24)"
     );
     // And back up: the top bound is 0.
     let mut events = vec![draw_force()];
@@ -364,8 +366,10 @@ async fn composer_click_focuses_and_places_the_caret() {
         vec![
             draw_force(),
             // Composer content x = 25; a click at col 28 → char col 3.
-            down(28, 28),
-            up(28, 28),
+            // The composer sits at rows 26-27 now (header + two status
+            // rows) — a click at row 26 is its first content row.
+            down(28, 26),
+            up(28, 26),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
@@ -541,7 +545,7 @@ async fn drag_into_the_composer_clamps_at_the_chat_boundary() {
             AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             down(26, 1),
-            drag(26, 28), // the composer row: clamped to content row 25
+            drag(26, 28), // the composer row: clamped to content row 23
             draw_force(),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
@@ -549,10 +553,10 @@ async fn drag_into_the_composer_clamps_at_the_chat_boundary() {
     .await;
 
     let (_, current) = app.selection.expect("selection active");
-    assert_eq!(current.row, 25, "clamped to the last chat content row");
+    assert_eq!(current.row, 23, "clamped to the last chat content row");
     // The overlay never renders outside the chat rect: buffer rows below
     // the chat area carry no REVERSED cells.
-    for y in 27..30u16 {
+    for y in 26..30u16 {
         for x in 0..120u16 {
             if let Some(cell) = term.backend().buffer().cell((x, y))
                 && cell.modifier.contains(Modifier::REVERSED)
@@ -566,7 +570,7 @@ async fn drag_into_the_composer_clamps_at_the_chat_boundary() {
     let selected = term
         .backend()
         .buffer()
-        .cell((26, 1))
+        .cell((26, 2))
         .expect("cell in the selection");
     assert!(
         selected.modifier.contains(Modifier::REVERSED),
@@ -743,7 +747,8 @@ async fn wheel_extends_the_selection_over_the_text() {
             AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
             AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
             AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
-            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)), // 53 → 0
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)), // 55 → 0
             down(25, 1),                                              // content (0,0) → abs line 0
             drag(25, 4),                                              // content (3,0) → abs line 3
             draw_force(),
@@ -764,12 +769,12 @@ async fn wheel_extends_the_selection_over_the_text() {
     .await;
 
     // The anchors stayed text-fixed through the wheel burst (rows are
-    // absolute); the copy covers the anchored range 0..18 — 19 entries
-    // (text-1..text-9 with 9 interleaved blanks, then the end row's
-    // empty column-0 slice) = 9×6 chars + 18 separators.
+    // absolute); the copy covers the anchored range 0..17 — 18 entries
+    // (text-1..text-9 with 9 interleaved blanks; the end row is a blank
+    // line, so its column-0 slice is empty) = 9×6 + 9 + 17 separators.
     let flash = app.copied_flash.as_ref().expect("flash after release");
     assert_eq!(
-        flash.0, "copied · 72 chars",
+        flash.0, "copied · 71 chars",
         "the text-anchored range copied (not the screen highlight)"
     );
 }
@@ -819,7 +824,8 @@ async fn text_anchored_overlay_clips_to_the_viewport() {
             AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
             AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
             AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
-            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)), // 53 → 0
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)),
+            AppEvent::Mouse(mouse(MouseEventKind::ScrollUp, 60, 10)), // 55 → 0
             down(25, 1),                                              // abs line 0
             drag(25, 4),                                              // abs line 3
             draw_force(),
@@ -834,13 +840,13 @@ async fn text_anchored_overlay_clips_to_the_viewport() {
     )
     .await;
 
-    // The anchors are unchanged (text-fixed) — rows 0..3 — but the
+    // The anchors are unchanged (text-fixed) — rows 0..2 — but the
     // viewport now starts at line 15, so nothing highlights.
     assert_eq!(
         app.selection,
         Some((
             dsh_tui::app::CellPos { row: 0, col: 0 },
-            dsh_tui::app::CellPos { row: 3, col: 0 },
+            dsh_tui::app::CellPos { row: 2, col: 0 },
         )),
         "anchors text-fixed through the wheel"
     );
@@ -912,8 +918,8 @@ async fn margin_click_anchors_deterministically() {
             AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             down(24, 1), // margin anchor
-            drag(27, 3), // content (0,2), col 2 → abs line 2
-            up(27, 3),
+            drag(27, 4), // content (0,2), col 2 → abs line 2
+            up(27, 4),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
@@ -1013,8 +1019,8 @@ async fn drag_extends_from_the_word_selection() {
             down(32, 1), // double-click
             // "bar" is cells 0..3 of line 2; col 2 is past its mid-point
             // → the moving edge snaps to the word end (col 3).
-            drag(27, 3),
-            up(27, 3),
+            drag(27, 4),
+            up(27, 4),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
@@ -1048,8 +1054,8 @@ async fn drag_extends_from_the_word_selection() {
             draw_force(),
             down(32, 1),
             down(32, 1),
-            drag(26, 3), // col 1 of "bar" → snaps to the word start
-            up(26, 3),
+            drag(26, 4), // col 1 of "bar" → snaps to the word start
+            up(26, 4),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
@@ -1169,7 +1175,7 @@ async fn streaming_growth_reclamps_the_highlight() {
     let highlighted = term
         .backend()
         .buffer()
-        .cell((25 + 15, 1))
+        .cell((25 + 15, 2))
         .expect("cell at col 15")
         .modifier
         .contains(Modifier::REVERSED);
@@ -1298,7 +1304,7 @@ async fn wrapped_skill_header_click_lands_on_the_header_row() {
         &mut app,
         &mut term,
         vec![
-            down(26, 1 + header_line as u16),
+            down(26, 2 + header_line as u16),
             draw_force(),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
@@ -1318,7 +1324,7 @@ async fn wrapped_skill_header_click_lands_on_the_header_row() {
         &mut app,
         &mut term,
         vec![
-            down(26, header_line as u16), // the row above the header
+            down(26, 1 + header_line as u16), // the row above the header
             draw_force(),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],

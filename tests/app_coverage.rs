@@ -814,10 +814,11 @@ async fn composer_rule_row(app: &mut App) -> u16 {
 /// must sit at the same row with and without a queue.
 #[tokio::test]
 async fn empty_queue_strip_renders_zero_height() {
-    // Empty queue: chat 21 + composer 2 + status 1 at 80x24 — rule at 21.
+    // Empty queue at 80x24: header 1 + chat 19 + composer 2 + status1 1 +
+    // status2 1 — the composer rule sits at 20.
     let mut app = app_with_session();
     let empty = composer_rule_row(&mut app).await;
-    assert_eq!(empty, 21, "no strip, no double gap");
+    assert_eq!(empty, 20, "no strip, no double gap");
 
     // One queued item: the strip docks at row 20; the composer stays put.
     let mut app = app_with_session();
@@ -839,7 +840,7 @@ async fn empty_queue_strip_renders_zero_height() {
         })
         .expect("queue frame");
     let with_queue = composer_rule_row(&mut app).await;
-    assert_eq!(with_queue, 21, "composer anchored below the strip");
+    assert_eq!(with_queue, 20, "composer anchored below the strip");
 }
 
 #[tokio::test]

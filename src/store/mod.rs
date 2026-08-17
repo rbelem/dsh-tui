@@ -129,6 +129,10 @@ impl SessionStore {
                 self.state_mut(session_id).apply_queue(items);
                 Ok(())
             }
+            MuxFrame::SessionJobs { session_id, jobs } => {
+                self.state_mut(session_id).apply_jobs(&jobs);
+                Ok(())
+            }
             MuxFrame::StreamError { error } => {
                 self.last_stream_error = Some(stream_error_text(&error));
                 Ok(())
@@ -265,7 +269,6 @@ impl SessionStore {
         state.fold.retain(|key, _| alive.contains(key.as_str()));
     }
 }
-
 /// Aggregate session metrics for the stats bar (#39) and the context meter
 /// (#38), as a pure function of one session's derived state:
 /// - turns: distinct `turn`s among assistant / turn-error / turn-max-tokens
@@ -273,11 +276,17 @@ impl SessionStore {
 /// - steps: distinct `(turn, step)` pairs across assistant AND tool nodes;
 /// - tokens: usage summed across assistant nodes (`cache_*` are optional on
 ///   the wire; absent counts as 0);
+/// - timing: derived from the event window's envelope `time` — LLM duration
+///   = Σ(TurnEnd.time − TurnStart.time), TTFT = mean over turns of
+///   (first AssistantChunk.time − TurnStart.time), tool time = Σ
+///   (result_time − call_time) per settled tool node. A metric stays None /
+///   0-measurable until BOTH of its events are present in the window — a
+///   head-evicted start hides the metric, never fabricates a duration;
 /// - `context_window`: the LAST `request/context` event's `contextWindow`
 ///   in the retained event window — the fold ignores that event, but the
 ///   window still holds it (head-eviction only drops the OLDEST events, so
 ///   the newest window wins). `None` when no context was ever reported.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SessionStats {
     pub turns: u64,
     pub steps: u64,
@@ -286,6 +295,16 @@ pub struct SessionStats {
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
     pub context_window: Option<i64>,
+    /// Summed real LLM duration over turns with BOTH events in-window.
+    pub llm_seconds: f64,
+    /// Turns whose LLM duration was measurable (an in-window start+end).
+    pub measured_turns: u32,
+    /// Mean first-token latency over in-window turns (None when none).
+    pub ttft_seconds: Option<f64>,
+    /// Σ (result_time − call_time) over settled tool nodes with both times.
+    pub tool_seconds: f64,
+    /// Tool nodes whose duration was measurable (both times present).
+    pub measured_tools: u32,
 }
 
 pub fn session_stats(state: &SessionState) -> SessionStats {
@@ -319,6 +338,60 @@ pub fn session_stats(state: &SessionState) -> SessionStats {
     }
     stats.turns = turns.len() as u64;
     stats.steps = steps.len() as u64;
+    // Tool durations: sum (result_time − call_time) over settled tools.
+    for node in &state.nodes {
+        if let NodeData::Tool {
+            result: Some(result),
+            ..
+        } = &node.data
+            && let (Some(start), Some(end)) = (result.call_time, result.result_time)
+        {
+            stats.tool_seconds += (end - start).max(0.0);
+            stats.measured_tools += 1;
+        }
+    }
+    // Per-turn timing: the events are sequential (one open turn at a time),
+    // so a single open-turn cursor suffices. A turn whose start, first
+    // chunk, or end fell outside the retained window contributes nothing.
+    let mut open_turn: Option<(i64, f64)> = None; // (turn, TurnStart.time)
+    let mut first_chunk: Option<f64> = None;
+    let mut ttft_sum = 0.0f64;
+    let mut ttft_turns = 0u64;
+    for stored in state.events() {
+        let time = stored.event.time;
+        match &stored.data {
+            EventData::TurnStart { turn } => {
+                open_turn = Some((*turn, time));
+                first_chunk = None;
+            }
+            EventData::AssistantChunk { turn, .. } => {
+                if let Some((open, _)) = open_turn
+                    && open == *turn
+                    && first_chunk.is_none()
+                {
+                    first_chunk = Some(time);
+                }
+            }
+            EventData::TurnEnd { turn, .. } => {
+                if let Some((open, start)) = open_turn
+                    && open == *turn
+                {
+                    stats.llm_seconds += (time - start).max(0.0);
+                    stats.measured_turns += 1;
+                    if let Some(chunk) = first_chunk {
+                        ttft_sum += (chunk - start).max(0.0);
+                        ttft_turns += 1;
+                    }
+                }
+                open_turn = None;
+                first_chunk = None;
+            }
+            _ => {}
+        }
+    }
+    if ttft_turns > 0 {
+        stats.ttft_seconds = Some(ttft_sum / ttft_turns as f64);
+    }
     for stored in state.events().iter().rev() {
         if let EventData::RequestContext { context_window, .. } = &stored.data {
             stats.context_window = *context_window;
@@ -326,6 +399,17 @@ pub fn session_stats(state: &SessionState) -> SessionStats {
         }
     }
     stats
+}
+
+/// Tokens per second over the measurable LLM duration (#39): 0 guards the
+/// div-by-zero. `None` when no model call was measured (older sessions /
+/// evicted event windows — the stats bar omits the segment).
+pub fn tokens_per_second(stats: &SessionStats) -> Option<f64> {
+    if stats.llm_seconds > 0.0 && stats.output_tokens > 0 {
+        Some(stats.output_tokens as f64 / stats.llm_seconds)
+    } else {
+        None
+    }
 }
 
 /// One log line per RpcError branch (code + message; details are irrelevant).

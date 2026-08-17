@@ -77,9 +77,12 @@ async fn run_app(client: WireClient) -> Result<(), AppError> {
     // Locale resolution (increment 3): config wins, then DSH_TUI_LOCALE,
     // then LANG/LC_ALL (Locale::detect); persisted on Ctrl+L.
     app.locale = dsh_tui::i18n::Locale::detect(app.config.locale.as_deref());
-    let (session_id, sessions, workspace_list) =
+    let (session_id, sessions, workspace_list, session_model) =
         attach(&client, &mut app.store, app.locale).await?;
     app.active_session = session_id.clone();
+    // #43: the resumed session's model selection (None when the gateway
+    // had no sessions or the models RPC was unavailable).
+    app.session_model = session_model;
     app.sessions = sessions;
     app.workspace_order = workspace_list
         .items

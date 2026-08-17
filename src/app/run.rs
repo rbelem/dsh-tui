@@ -35,8 +35,8 @@ use crate::wire::approvals::ApprovalResponseOutcome;
 use crate::wire::questions::{AskUserQuestionAnswer, QuestionAnswerItem};
 use crate::wire::rpc::{RpcReceipt, RpcReceiptReason};
 use crate::wire::session::{
-    PromptContentPart, PromptMode, SessionHistoryValue, SessionId, SessionSearchItem,
-    SessionSearchValue, SessionUpdateQueueValue, UpdateQueueAction,
+    PromptContentPart, PromptMode, SessionHistoryValue, SessionId, SessionModelsValue,
+    SessionSearchItem, SessionSearchValue, SessionUpdateQueueValue, UpdateQueueAction,
 };
 use crate::wire::skills::SkillListValue;
 
@@ -154,7 +154,10 @@ impl App {
                                     self.save_settings(event_tx.clone())
                                 }
                                 Some(Action::SwitchSession(session_id)) => {
-                                    self.fetch_history(session_id, event_tx.clone())
+                                    self.fetch_history(session_id.clone(), event_tx.clone());
+                                    // #43: the model fetch rides the switch
+                                    // (attach/switch contract).
+                                    self.fetch_models(session_id, event_tx.clone());
                                 }
                                 Some(Action::QueueRemove) => {
                                     self.queue_action(UpdateQueueAction::Remove, event_tx.clone())
@@ -257,6 +260,11 @@ impl App {
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                             self.drain_attachment_needs(event_tx.clone());
+                        }
+                        Some(AppEvent::ModelsLoaded { session_id, result }) => {
+                            self.on_models_loaded(session_id, result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
                         }
                         Some(AppEvent::QueueActionDone { kind, result }) => {
                             self.on_queue_action_done(kind, result);
@@ -526,10 +534,25 @@ impl App {
         }
         let queue_height = u16::from(!queue_empty);
         let composer_height = (self.composer.line_count() as u16 + 1).clamp(2, 8);
-        let [chat_area, queue_area, composer_area, status_area] = Layout::vertical([
+        // #41: the session header (title · preset · jobs) docks ABOVE the
+        // chat — one row, hidden when no session is active (the empty-state
+        // rule: no header over the hero). #38/#39: the status area is now
+        // TWO rows — line 1 the model/effort/context segments, line 2 the
+        // metrics bar with the state indicator.
+        let header_height = u16::from(self.active_session.is_some());
+        let [
+            header_area,
+            chat_area,
+            queue_area,
+            composer_area,
+            status1_area,
+            status2_area,
+        ] = Layout::vertical([
+            Constraint::Length(header_height),
             Constraint::Fill(1),
             Constraint::Length(queue_height),
             Constraint::Length(composer_height),
+            Constraint::Length(1),
             Constraint::Length(1),
         ])
         .areas(right);
@@ -641,6 +664,12 @@ impl App {
         // sized to its content so it never wraps; the left absorbs all
         // truncation.
         let (status_left, status_right) = self.status_line(&self.theme);
+        // #38/#43: status line 1's model/effort/context segments (the
+        // wide-tier row — rendered at ≥80 only, like the old full cluster).
+        let status1_left = self.status_meta_line(&self.theme);
+        // #41: the session header line, precomputed (the draw closure's
+        // disjoint-borrow rule — it holds `&mut self.row_cache`).
+        let header_text = self.header_line();
         let status_width = status_right
             .iter()
             .map(|span| UnicodeWidthStr::width(span.content.as_ref()) as u16)
@@ -865,27 +894,49 @@ impl App {
                 },
                 composer_area,
             );
-            // #11 status line: [Fill(1) left, Length(indicator) right] —
-            // a single Line can't right-align; the right cluster never
-            // wraps, the left truncates first. 1/1 horizontal inset. #19:
-            // tiers — <40 indicators only; 40–79 session-id-only left
-            // (truncated with `…`); ≥80 the full left cluster.
-            let status_area = status_area.inner(Margin {
+            // #41: the session header — `Session: <title> | Agent preset:
+            // <preset> | Background jobs: <n>` — one row above the chat.
+            // Rendered whenever a session is active (the area is zero
+            // otherwise); the text truncates with `…` like the status
+            // clusters. Segments omit individually: no preset, or no
+            // running jobs, and the segment drops out.
+            if header_height > 0
+                && let Some(header) = header_text.as_deref()
+            {
+                let text = truncate_ellipsis(header, header_area.width as usize);
+                frame.render_widget(Paragraph::new(Line::raw(text)), header_area);
+            }
+            // #11 status line (TWO rows since #38/#41): each row is
+            // [Fill(1) left, Length(indicator) right] — a single Line
+            // can't right-align; the right cluster never wraps, the left
+            // truncates first. 1/1 horizontal inset. #19: tiers — <40
+            // indicators only (line 2); 40–79 first-span-left only (line
+            // 2, truncated with `…`); ≥80 the full clusters. Line 1 (the
+            // model/effort/context row) is a wide-tier row — hidden
+            // below 80 like the old full cluster was.
+            let status1_area = status1_area.inner(Margin {
                 horizontal: 1,
                 vertical: 0,
             });
+            let status2_area = status2_area.inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            });
+            if size.width >= 80 && !status1_left.is_empty() {
+                frame.render_widget(Paragraph::new(Line::from(status1_left)), status1_area);
+            }
             if size.width < 40 {
                 // #30: below 40 the left cluster is hidden, so no status
                 // hint can render here — the `≡` affordance at the chat's
                 // top-left is the drawer's discoverability path at 32–39.
                 frame.render_widget(
                     Paragraph::new(Line::from(status_right)).right_aligned(),
-                    status_area,
+                    status2_area,
                 );
             } else {
                 let [status_left_area, status_right_area] =
                     Layout::horizontal([Constraint::Fill(1), Constraint::Length(status_width)])
-                        .areas(status_area);
+                        .areas(status2_area);
                 // #30: while the drawer is open it covers the status row's
                 // left edge (full height) — shift the left cluster past its
                 // right edge so the drawer hint stays visible.
@@ -898,11 +949,11 @@ impl App {
                     status_left_area
                 };
                 let left_line = if size.width < 80 {
-                    // The session-id-only cluster: the first span (the
-                    // session line), truncated with `…` to fit the left
-                    // area — seq/mode/toast are dropped below 80. #30: a
-                    // live hint (the drawer's `s sessions · esc close`)
-                    // takes the slot while the drawer is open.
+                    // The first-span-only cluster below 80: the hint (the
+                    // drawer's `s sessions · esc close`) takes the slot
+                    // while the drawer is open, else the first left span —
+                    // now `seq N`, the session id having moved to the
+                    // header — truncated with `…` to fit the left area.
                     let span = match &self.hint {
                         Some(hint) => {
                             Span::styled(hint.clone(), crate::ui::style::hint(&self.theme))
@@ -1489,6 +1540,8 @@ impl App {
                 self.store.open_session(session_id.clone());
                 self.row_cache.invalidate_all();
                 self.active_session = Some(session_id);
+                // #43: brand-new session — no stale model from the last one.
+                self.session_model = None;
                 self.view.offset = 0;
                 self.view.follow = true;
                 self.hint = None;
@@ -1812,6 +1865,21 @@ impl App {
         });
     }
 
+    /// #43: spawn `session.models` for the switched-to session; the result
+    /// lands as [`AppEvent::ModelsLoaded`] and is cached by the
+    /// stale-guarded [`App::on_models_loaded`]. Tolerance: an unavailable
+    /// gateway leaves the cache empty — the Model/Effort status segments
+    /// just stay hidden. No-op without a client.
+    fn fetch_models(&mut self, session_id: SessionId, event_tx: mpsc::UnboundedSender<AppEvent>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        tokio::spawn(async move {
+            let result = client.session_models(session_id.clone()).await;
+            let _ = event_tx.send(AppEvent::ModelsLoaded { session_id, result });
+        });
+    }
+
     /// Spawn `settings.describe` for the settings view (open, or the
     /// conflict refresh): the result arrives as
     /// [`AppEvent::SettingsDescribeDone`]. No-op without a client — the
@@ -1957,6 +2025,23 @@ impl App {
         }
     }
 
+    /// #43: cache the active session's model selection (stale-guarded —
+    /// a result for a session we already left is dropped, keeping the
+    /// cleared-by-switch cache honest). A failed fetch leaves the cache
+    /// unchanged (still `None` after a switch — the segments hide).
+    fn on_models_loaded(
+        &mut self,
+        session_id: SessionId,
+        result: Result<SessionModelsValue, ClientError>,
+    ) {
+        if self.active_session.as_ref() != Some(&session_id) {
+            return; // stale result for a session we already left
+        }
+        if let Ok(value) = result {
+            self.session_model = Some(value.current);
+        }
+    }
+
     /// Apply a finished answer: success resolves the takeover it belongs to
     /// (pending dropped, next takeover promoted or back to chat, toast);
     /// failure (transport error or a `not-pending`/`bad-response` receipt)
@@ -2039,15 +2124,12 @@ impl App {
     fn status_line(&self, theme: &Theme) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
         let body = |text: String| Span::styled(text, Style::default().fg(theme.text));
         let mut parts: Vec<Span<'static>> = Vec::new();
-        match &self.active_session {
-            Some(session_id) => parts.push(body(crate::i18n::trf(
-                self.locale,
-                "status.session",
-                &[session_id.as_ref()],
-            ))),
-            None => parts.push(body(
+        // #41: the session id moved to the header — the empty state keeps
+        // its "no session" left-cluster text.
+        if self.active_session.is_none() {
+            parts.push(body(
                 crate::i18n::tr(self.locale, "status.no_session").into(),
-            )),
+            ));
         }
         let mut truncated = false;
         if let Some(state) = self
@@ -2067,66 +2149,101 @@ impl App {
             "status.focus",
             &[self.focus.label(self.locale)],
         )));
-        // #38/#39: the context meter + session stats bar ride the left
-        // cluster (the ≥80 tier — the tier that already shows seq/focus;
-        // narrower tiers drop them like the rest of the cluster). Both
-        // hide gracefully: the meter when the session never reported a
-        // context window or has no usage yet; the stats bar when the
-        // session has no turn/step nodes at all. Token metrics the event
-        // stream can't produce (LLM time, TTFT, tok/s) are simply absent.
+        // #39: the metrics-bar cluster on status line 2 — the full web
+        // header metric set. Each segment omits when its underlying data
+        // is absent from the retained window (no fabricated timings):
+        // turns/steps from the folded nodes; LLM duration from in-window
+        // TurnStart→TurnEnd pairs; tool duration from settled call→result
+        // times; TTFT from the first chunk of each measurable turn; tok/s
+        // guards the div-by-zero; cache hit from the disjoint input/cache
+        // counts; input/output with K/M compaction.
         if let Some(state) = self
             .active_session
             .as_ref()
             .and_then(|session_id| self.store.session(session_id))
         {
             let stats = crate::store::session_stats(state);
-            let used = stats.input_tokens + stats.cache_read_tokens;
-            if let Some(window) = stats.context_window
-                && window > 0
-                && used > 0
-            {
-                let pct = (used as f64 * 100.0 / window as f64).floor() as i64;
-                parts.push(body(crate::i18n::trf(
-                    self.locale,
-                    "stats.ctx",
-                    &[&format!("{pct}%")],
-                )));
-            }
+            let mut segments: Vec<String> = Vec::new();
             if stats.turns > 0 {
-                let mut cluster = format!(
+                segments.push(format!(
                     "{} · {}",
                     crate::i18n::trf(self.locale, "stats.turns", &[&stats.turns.to_string()],),
                     crate::i18n::trf(self.locale, "stats.steps", &[&stats.steps.to_string()]),
-                );
-                if stats.input_tokens + stats.output_tokens > 0 {
-                    cluster.push_str(" | ");
-                    cluster.push_str(&crate::i18n::trf(
+                ));
+            }
+            // The web's pairings: `LLM x · Tool call y` and
+            // `TTFT avg z · N tok/s` — each member hides independently.
+            let mut timing: Vec<String> = Vec::new();
+            if stats.measured_turns > 0 {
+                timing.push(crate::i18n::trf(
+                    self.locale,
+                    "stats.llm",
+                    &[&crate::render::chat_view::format_duration_compact(
+                        stats.llm_seconds,
+                    )],
+                ));
+            }
+            if stats.measured_tools > 0 {
+                timing.push(crate::i18n::trf(
+                    self.locale,
+                    "stats.tool",
+                    &[&crate::render::chat_view::format_duration_compact(
+                        stats.tool_seconds,
+                    )],
+                ));
+            }
+            if !timing.is_empty() {
+                segments.push(timing.join(" · "));
+            }
+            let mut latency: Vec<String> = Vec::new();
+            if let Some(ttft) = stats.ttft_seconds {
+                latency.push(crate::i18n::trf(
+                    self.locale,
+                    "stats.ttft",
+                    &[&format!("{ttft:.1}")],
+                ));
+            }
+            if let Some(tps) = crate::store::tokens_per_second(&stats) {
+                latency.push(crate::i18n::trf(
+                    self.locale,
+                    "stats.tok_s",
+                    &[&format!("{tps:.0}")],
+                ));
+            }
+            if !latency.is_empty() {
+                segments.push(latency.join(" · "));
+            }
+            // Cache hit = cache reads / (cache reads + uncached input) —
+            // the disjoint-count definition of the wire.
+            let cache_base = stats.input_tokens + stats.cache_read_tokens;
+            if cache_base > 0 {
+                let pct = stats.cache_read_tokens * 100 / cache_base;
+                // The template carries the `%` — pass the bare number.
+                segments.push(crate::i18n::trf(
+                    self.locale,
+                    "stats.cache",
+                    &[&pct.to_string()],
+                ));
+            }
+            if stats.input_tokens + stats.output_tokens > 0 {
+                segments.push(format!(
+                    "{} · {}",
+                    crate::i18n::trf(
                         self.locale,
                         "stats.input",
                         &[&crate::render::chat_view::format_tokens(stats.input_tokens)],
-                    ));
-                    cluster.push_str(" · ");
-                    cluster.push_str(&crate::i18n::trf(
+                    ),
+                    crate::i18n::trf(
                         self.locale,
                         "stats.output",
                         &[&crate::render::chat_view::format_tokens(
-                            stats.output_tokens,
+                            stats.output_tokens
                         )],
-                    ));
-                    // Cache hit = cache reads / (cache reads + uncached
-                    // input) — the disjoint-count definition of the wire.
-                    let cache_base = stats.input_tokens + stats.cache_read_tokens;
-                    if cache_base > 0 {
-                        let pct = stats.cache_read_tokens * 100 / cache_base;
-                        cluster.push_str(" | ");
-                        cluster.push_str(&crate::i18n::trf(
-                            self.locale,
-                            "stats.cache",
-                            &[&format!("{pct}%")],
-                        ));
-                    }
-                }
-                parts.push(body(cluster));
+                    ),
+                ));
+            }
+            if !segments.is_empty() {
+                parts.push(body(segments.join(" | ")));
             }
         }
         if let Some(hint) = &self.hint {
@@ -2184,6 +2301,92 @@ impl App {
             vec![Span::styled(indicator.0, indicator.1)]
         };
         (left, right)
+    }
+
+    /// #38/#43: status line 1's segments — `Model: <model> | Effort:
+    /// <effort> | Context: <abs tok> · <pct>% used`, as one body-styled
+    /// cluster (raw ` | ` separators, per the web header's form). Each
+    /// segment hides independently: model/effort absent until the
+    /// `session.models` fetch lands (or the gateway lacks it); context
+    /// absent until the session reports a window AND has usage. The
+    /// "Full access" permission badge is deliberately absent — verified
+    /// not on the wire. `Vec::new()` (the caller skips the row).
+    fn status_meta_line(&self, theme: &Theme) -> Vec<Span<'static>> {
+        let body = |text: String| Span::styled(text, Style::default().fg(theme.text));
+        let mut segments: Vec<String> = Vec::new();
+        if let Some(selection) = &self.session_model {
+            segments.push(crate::i18n::trf(
+                self.locale,
+                "status1.model",
+                &[&selection.model],
+            ));
+            if let Some(effort) = &selection.reasoning_effort {
+                segments.push(crate::i18n::trf(self.locale, "status1.effort", &[effort]));
+            }
+        }
+        if let Some(state) = self
+            .active_session
+            .as_ref()
+            .and_then(|session_id| self.store.session(session_id))
+        {
+            let stats = crate::store::session_stats(state);
+            let used = stats.input_tokens + stats.cache_read_tokens;
+            if let Some(window) = stats.context_window
+                && window > 0
+                && used > 0
+            {
+                let pct = (used as f64 * 100.0 / window as f64).floor() as i64;
+                // The template carries the `%` — pass the bare numbers.
+                segments.push(crate::i18n::trf(
+                    self.locale,
+                    "status1.context",
+                    &[
+                        &crate::render::chat_view::format_tokens_abs(used),
+                        &pct.to_string(),
+                    ],
+                ));
+            }
+        }
+        if segments.is_empty() {
+            Vec::new()
+        } else {
+            vec![body(segments.join(" | "))]
+        }
+    }
+
+    /// #41: the session header line — `Session: <title> | Agent preset:
+    /// <preset> | Background jobs: <n>` — built from the active session's
+    /// summary (title projection, else the id) and the store's live
+    /// running-job count. Segments omit individually: a summary without
+    /// an agent preset (older gateways), or zero running jobs, drops the
+    /// segment. `None` with no active session — the caller's header area
+    /// is zero-rowed there anyway.
+    fn header_line(&self) -> Option<String> {
+        let active = self.active_session.as_ref()?;
+        let summary = self
+            .sessions
+            .iter()
+            .find(|summary| &summary.session_id == active)?;
+        let title =
+            crate::ui::sidebar::title_of(summary).unwrap_or_else(|| summary.session_id.0.clone());
+        let mut segments = vec![crate::i18n::trf(self.locale, "header.session", &[&title])];
+        if let Some(preset) = &summary.agent_preset {
+            segments.push(crate::i18n::trf(self.locale, "header.preset", &[preset]));
+        }
+        if let Some(state) = self
+            .active_session
+            .as_ref()
+            .and_then(|session_id| self.store.session(session_id))
+            && let Some(jobs) = state.running_jobs
+            && jobs > 0
+        {
+            segments.push(crate::i18n::trf(
+                self.locale,
+                "header.jobs",
+                &[&jobs.to_string()],
+            ));
+        }
+        Some(segments.join(" | "))
     }
 }
 

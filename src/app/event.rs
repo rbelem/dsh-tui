@@ -18,8 +18,8 @@ use crate::wire::events::{HostFrame, MuxFrame};
 use crate::wire::rpc::{RpcId, RpcReceipt};
 use crate::wire::session::{
     AttachmentId, SessionAttachmentValue, SessionCancelValue, SessionCreateValue, SessionForkValue,
-    SessionHistoryValue, SessionId, SessionPromptValue, SessionRenameValue, SessionSearchValue,
-    SessionUpdateQueueValue,
+    SessionHistoryValue, SessionId, SessionModelsValue, SessionPromptValue, SessionRenameValue,
+    SessionSearchValue, SessionUpdateQueueValue,
 };
 use crate::wire::settings::{SettingsDescribeValue, SettingsWriteValue};
 use crate::wire::skills::SkillListValue;
@@ -67,6 +67,12 @@ pub enum AppEvent {
     HistoryLoaded {
         session_id: SessionId,
         result: Result<SessionHistoryValue, ClientError>,
+    },
+    /// A spawned `session.models` fetch finished (#43); the app caches the
+    /// selection only when the session is still active (stale guard).
+    ModelsLoaded {
+        session_id: SessionId,
+        result: Result<SessionModelsValue, ClientError>,
     },
     /// A spawned `session.updateQueue` action finished.
     QueueActionDone {

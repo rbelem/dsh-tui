@@ -228,15 +228,16 @@ async fn sidebar_chat_gap_drops_below_80() {
     )
     .await;
     let buffer = term.backend().buffer();
-    // The drawer-tier affordance at the chat's top-left (0, 0).
+    // The drawer-tier affordance at the chat's top-left — (0, 1) now:
+    // the session header owns row 0.
     assert_eq!(
-        buffer.cell((0, 0)).expect("affordance").symbol(),
+        buffer.cell((0, 1)).expect("affordance").symbol(),
         "≡",
         "drawer affordance at the chat top-left"
     );
-    // The chat content starts at col 2 (its own margin) — no sidebar
-    // column, no gap.
-    let chat = buffer.cell((2, 1)).expect("chat content cell");
+    // The chat content starts at col 2 (its own margin), one row below
+    // the header — no sidebar column, no gap.
+    let chat = buffer.cell((2, 2)).expect("chat content cell");
     assert_eq!(chat.symbol(), "c", "chat at col 0, no sidebar: {chat:?}");
 }
 
@@ -287,8 +288,9 @@ async fn status_indicator_right_aligned_at_width_40() {
     .await;
 
     let view = format!("{}", term.backend());
-    // Height 15: chat 12 + composer 2 + status 1 — the status is row 14.
-    // buffer_view wraps each row in quotes; strip them before trimming.
+    // Height 15: header 1 + chat 10 + composer 2 + status1 1 + status2 1 —
+    // the status row is row 14 (the last). buffer_view wraps each row in
+    // quotes; strip them before trimming.
     let status = view
         .lines()
         .nth(14)
@@ -299,7 +301,10 @@ async fn status_indicator_right_aligned_at_width_40() {
         status.ends_with('●'),
         "idle indicator right-aligned at 40 cols: {status:?}"
     );
-    assert!(view.contains("session s1"), "left context: {view}");
+    assert!(
+        view.contains("Session: s1"),
+        "header shows the session: {view}"
+    );
 }
 
 /// Acceptance 5: the status indicators carry their semantic colors — the
@@ -387,11 +392,15 @@ fn elapsed_formatting() {
     assert_eq!(format_elapsed(Duration::from_secs(3600 + 61)), "(61m 01s)");
 }
 
-/// #37/#38: the tool-details duration / started stamp / token-count
-/// formatters (sub-minute decimals, UTC hh:mm:ss, K/M compaction).
+/// #37/#38/#39: the tool-details duration / started stamp / token-count /
+/// compact-duration formatters (sub-minute decimals, UTC hh:mm:ss, K/M
+/// compaction with `.0` dropped, thousands separators).
 #[test]
 fn detail_and_stats_formatting() {
-    use dsh_tui::render::chat_view::{format_duration, format_timestamp, format_tokens};
+    use dsh_tui::render::chat_view::{
+        format_duration, format_duration_compact, format_timestamp, format_tokens,
+        format_tokens_abs,
+    };
     assert_eq!(format_duration(0.0), "0.0s");
     assert_eq!(format_duration(1.5), "1.5s");
     assert_eq!(format_duration(59.4), "59.4s");
@@ -404,7 +413,19 @@ fn detail_and_stats_formatting() {
     assert_eq!(format_tokens(0), "0");
     assert_eq!(format_tokens(999), "999");
     assert_eq!(format_tokens(1_380), "1.4K");
+    assert_eq!(format_tokens(1_000), "1K", "trailing .0 dropped");
+    assert_eq!(format_tokens(138_000), "138K", "trailing .0 dropped");
     assert_eq!(format_tokens(49_200_000), "49.2M");
+    // The web composer meter's absolute form.
+    assert_eq!(format_tokens_abs(0), "0");
+    assert_eq!(format_tokens_abs(1_234), "1,234");
+    assert_eq!(format_tokens_abs(141_021), "141,021");
+    assert_eq!(format_tokens_abs(49_200_000), "49,200,000");
+    // The stats bar's compact durations (web-header shape, no spaces).
+    assert_eq!(format_duration_compact(9.0), "9s");
+    assert_eq!(format_duration_compact(45.7), "45s");
+    assert_eq!(format_duration_compact(100.0), "1m40s");
+    assert_eq!(format_duration_compact(1_893.0), "31m33s");
 }
 
 /// The busy clock latches on the first tick while running, shows the elapsed
@@ -712,6 +733,178 @@ async fn tool_details_key_without_tools_is_inert() {
 }
 
 // ---------------------------------------------------------------------------
+// #41/#43: the session header + model cache
+// ---------------------------------------------------------------------------
+
+/// The header (row 0, drawer tier — no sidebar) carries the session title
+/// projection, the agent preset, and the live running-job count; the
+/// session id is GONE from the status line (it lives in the header now).
+#[tokio::test]
+async fn session_header_renders_title_preset_and_jobs() {
+    let mut app = App::default();
+    let mut summary = summary("s1", false);
+    summary.agent_preset = Some("Standard Mode".into());
+    summary.projections = Some(dsh_tui::wire::session::SessionProjectionsBlock {
+        as_of_seq: 1,
+        values: serde_json::Map::from_iter([("title".into(), serde_json::json!("My Session"))]),
+    });
+    app.sessions = vec![summary];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    app.store
+        .ingest(MuxFrame::SessionJobs {
+            session_id: SessionId("s1".into()),
+            jobs: vec![dsh_tui::wire::jobs::TaskView {
+                id: dsh_tui::wire::jobs::TaskId("t1".into()),
+                kind: "file-write".into(),
+                label: "write".into(),
+                status: dsh_tui::wire::jobs::TaskStatus::Running,
+                detail: None,
+                started_at: 1,
+                finished_at: None,
+            }],
+        })
+        .expect("ingest jobs");
+    let backend = TestBackend::new(70, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    let header = view
+        .lines()
+        .next()
+        .expect("header row")
+        .trim_matches('"')
+        .trim();
+    assert!(
+        header.contains("Session: My Session | Agent preset: Standard Mode | Background jobs: 1"),
+        "header: {header}"
+    );
+    // The status row no longer starts with the session id.
+    let status = view
+        .lines()
+        .last()
+        .expect("status row")
+        .trim_matches('"')
+        .trim();
+    assert!(
+        !status.contains("session s1"),
+        "the id moved to the header: {status}"
+    );
+}
+
+/// No active session → no header row (the empty-state rule), and the
+/// status line keeps its "no session" text.
+#[tokio::test]
+async fn session_header_hides_without_an_active_session() {
+    let mut app = App::default(); // no sessions, nothing active
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    let view = format!("{}", term.backend());
+    assert!(
+        !view.contains("Session:"),
+        "no header without a session: {view}"
+    );
+    assert!(
+        view.contains("no session"),
+        "status keeps the empty-state text: {view}"
+    );
+}
+
+/// #43: a `session.models` result lands in the cache only while its
+/// session is still active (stale-guarded); a switch clears the cache so
+/// the previous session's model never leaks.
+#[tokio::test]
+async fn models_loaded_caches_only_the_active_session() {
+    use dsh_tui::wire::session::{ModelSelection, SessionModelsValue};
+    let mut app = App::default();
+    app.sessions = vec![summary("s1", false), summary("s2", false)];
+    app.active_session = Some(SessionId("s1".into()));
+    app.focus = Focus::Chat;
+    let models = |model: &str| SessionModelsValue {
+        current: ModelSelection {
+            provider: "p".into(),
+            model: model.into(),
+            reasoning_effort: Some("high".into()),
+        },
+        routable: true,
+        groups: vec![],
+        failures: vec![],
+    };
+    let backend = TestBackend::new(100, 15);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::F(1))),
+            AppEvent::ModelsLoaded {
+                session_id: SessionId("s1".into()),
+                result: Ok(models("m-one")),
+            },
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert_eq!(
+        app.session_model.as_ref().map(|m| m.model.as_str()),
+        Some("m-one"),
+        "the active session's model cached"
+    );
+    // Switch to s2 (sidebar Enter): the cache clears (the new session's
+    // fetch is a no-op without a client in this keyless test).
+    app.focus = Focus::Sidebar;
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::Key(key(KeyCode::Char('j'))),
+            AppEvent::Key(key(KeyCode::Enter)),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert_eq!(app.active_session, Some(SessionId("s2".into())), "switched");
+    assert_eq!(
+        app.session_model, None,
+        "switch cleared the stale model cache"
+    );
+    // A stale ModelsLoaded for the LEFT session is dropped.
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            AppEvent::ModelsLoaded {
+                session_id: SessionId("s1".into()),
+                result: Ok(models("m-stale")),
+            },
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert_eq!(
+        app.session_model, None,
+        "stale result for a left session dropped"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // composer
 // ---------------------------------------------------------------------------
 
@@ -926,7 +1119,7 @@ async fn sidebar_enter_switches_the_active_session() {
     let view = format!("{}", term.backend());
     assert!(view.contains("s2 says that"), "new session renders: {view}");
     assert!(!view.contains("s1 says this"), "old session gone: {view}");
-    assert!(view.contains("session s2"), "status follows: {view}");
+    assert!(view.contains("Session: s2"), "header follows: {view}");
     assert!(view.contains("● s2"), "active marker moved: {view}");
 }
 

@@ -461,8 +461,9 @@ impl SidebarView<'_> {
 }
 
 /// The session title projection, when present (non-blank); `None` when the
-/// row falls back to the session id.
-fn title_of(summary: &SessionSummary) -> Option<String> {
+/// row falls back to the session id. `pub` — the session header (#41)
+/// renders the same title projection.
+pub fn title_of(summary: &SessionSummary) -> Option<String> {
     let title = summary
         .projections
         .as_ref()

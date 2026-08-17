@@ -299,7 +299,7 @@ async fn enter_creates_under_the_selected_workspace_and_switches() {
         "the new session lands in the sidebar list"
     );
     assert!(view.contains("created: s9"), "toast: {view}");
-    assert!(view.contains("session s9"), "status line switched: {view}");
+    assert!(view.contains("Session: s9"), "header switched: {view}");
     mock.stop().await;
 }
 

@@ -119,8 +119,9 @@ async fn grouped_sidebar_renders_headers_and_nested_sessions_120x30() {
     let view = view_at(&mut app, 120, 30).await;
 
     let alpha = view.find("alpha").expect("workspace alpha header");
-    let s1 = view.find("s1").expect("s1 row");
-    let s2 = view.find("s2").expect("s2 row");
+    // "● s1" — the header row's `Session: s1` would win a bare "s1" find.
+    let s1 = view.find("● s1").expect("s1 row");
+    let s2 = view.find("      s2").expect("s2 row");
     let beta = view.find("beta").expect("workspace beta header");
     let s3 = view.find("s3").expect("s3 row");
     let ungrouped = view.find("ungrouped").expect("ungrouped header");
@@ -320,8 +321,9 @@ async fn workspace_removed_reflows_sessions_to_ungrouped() {
     assert!(!view.contains("alpha"), "alpha header gone: {view}");
     let beta = view.find("beta").expect("beta still there");
     let ungrouped = view.find("ungrouped").expect("ungrouped header");
-    let s1 = view.find("s1").expect("s1");
-    let s2 = view.find("s2").expect("s2");
+    // "● s1" — the header row's `Session: s1` would win a bare "s1" find.
+    let s1 = view.find("● s1").expect("s1");
+    let s2 = view.find("      s2").expect("s2");
     assert!(
         beta < ungrouped && ungrouped < s1 && s1 < s2,
         "alpha's sessions reflowed under ungrouped: {view}"
@@ -446,7 +448,7 @@ async fn attach_seeds_workspace_grouping_from_workspace_list() {
 
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, sessions, workspace_list) = attach(&client, &mut store, Locale::En)
+    let (opened, sessions, workspace_list, _model) = attach(&client, &mut store, Locale::En)
         .await
         .expect("attach");
     assert_eq!(opened, Some(SessionId("s1".into())));
@@ -471,9 +473,10 @@ async fn attach_seeds_workspace_grouping_from_workspace_list() {
 
     let view = view_at(&mut app, 120, 30).await;
     let alpha = view.find("alpha").expect("alpha header");
-    let s1 = view.find("s1").expect("s1");
+    // "● s1" — the header row's `Session: s1` would win a bare "s1" find.
+    let s1 = view.find("● s1").expect("s1 row");
     let ungrouped = view.find("ungrouped").expect("ungrouped header");
-    let s2 = view.find("s2").expect("s2");
+    let s2 = view.find("      s2").expect("s2 row");
     let archived = view.find("▸ archived (1)").expect("archived footer");
     assert!(
         alpha < s1 && s1 < ungrouped && ungrouped < s2 && s2 < archived,
@@ -507,7 +510,7 @@ async fn attach_survives_a_missing_workspace_list() {
 
     let client = WireClient::attach(mock.port()).unwrap();
     let mut store = SessionStore::new();
-    let (opened, sessions, workspace_list) = attach(&client, &mut store, Locale::En)
+    let (opened, sessions, workspace_list, _model) = attach(&client, &mut store, Locale::En)
         .await
         .expect("attach tolerates workspace.list failure");
     assert_eq!(opened, Some(SessionId("s1".into())));

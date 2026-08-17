@@ -87,15 +87,48 @@ pub fn format_timestamp(epoch_secs: f64) -> String {
     )
 }
 
-/// #38: compact token counts, web-header style — `999`, `1.2K`, `49.2M`.
+/// #38: compact token counts, web-header style — `999`, `138K`, `49.2M`.
+/// Sub-K values are exact; compact values drop a trailing `.0` (`138K`,
+/// never `138.0K`).
 pub fn format_tokens(count: i64) -> String {
     let n = count.max(0) as f64;
+    let compact = |value: f64, suffix: &str| {
+        let text = format!("{value:.1}");
+        let text = text.strip_suffix(".0").unwrap_or(&text);
+        format!("{text}{suffix}")
+    };
     if n >= 1_000_000.0 {
-        format!("{:.1}M", n / 1_000_000.0)
+        compact(n / 1_000_000.0, "M")
     } else if n >= 1_000.0 {
-        format!("{:.1}K", n / 1_000.0)
+        compact(n / 1_000.0, "K")
     } else {
         count.to_string()
+    }
+}
+
+/// #38: absolute token counts with thousands separators — `141,021`
+/// (the web composer meter's exact form).
+pub fn format_tokens_abs(count: i64) -> String {
+    let digits = count.max(0).to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// #39: a summed duration in the stats bar's compact web shape —
+/// `31m33s` / `10m45s` past a minute, `9s` under it (no decimals, no
+/// spaces — the header's exact form).
+pub fn format_duration_compact(secs: f64) -> String {
+    let total = secs.max(0.0) as u64;
+    if total < 60 {
+        format!("{total}s")
+    } else {
+        format!("{}m{:02}s", total / 60, total % 60)
     }
 }
 

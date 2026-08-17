@@ -45,6 +45,7 @@ use crate::wire::events::{
     ApprovalOutcome, AskUserQuestionItem, HostFrame, MuxFrame, QuestionOutcome,
 };
 use crate::wire::rpc::RpcId;
+use crate::wire::session::ModelSelection;
 use crate::wire::session::{AttachmentId, SessionId, SessionSearchItem, SessionSummary};
 use unicode_width::UnicodeWidthStr;
 
@@ -440,6 +441,13 @@ pub struct App {
     /// draw while the session runs; the chat view reads it to paint the
     /// live spinner + elapsed on the tool's header.
     pub running_tool_since: HashMap<NodeKey, Instant>,
+    /// #43: the active session's model selection, fetched via the
+    /// `session.models` RPC at attach/switch (`Option` because the
+    /// selection is not Sync-friendly across the spawn's awaits — cached
+    /// here, plain field). Cleared on every session switch; a stale
+    /// ModelsLoaded result for a left session is dropped. `None` hides
+    /// the Model/Effort status segments.
+    pub session_model: Option<ModelSelection>,
 }
 
 impl Default for App {
@@ -519,6 +527,7 @@ impl Default for App {
             word_select: false,
             skill_folds: HashMap::new(),
             running_tool_since: HashMap::new(),
+            session_model: None,
         }
     }
 }
@@ -2888,6 +2897,9 @@ impl App {
         self.store.open_session(session_id.clone());
         self.row_cache.invalidate_all();
         self.active_session = Some(session_id.clone());
+        // #43: the model cache belongs to the previous session — the
+        // switch's `session.models` fetch refills it (stale-guarded).
+        self.session_model = None;
         self.view.offset = 0;
         self.view.follow = true;
         self.hint = None;

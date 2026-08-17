@@ -3,6 +3,7 @@ source: tests/tiers.rs
 assertion_line: 250
 expression: "format!(\"{}\", term.backend())"
 ---
+"Session: s1                                                 "
 "≡                                                           "
 "  hi                                                        "
 "                                                            "
@@ -13,8 +14,7 @@ expression: "format!(\"{}\", term.backend())"
 "                                                            "
 "                                                            "
 "                                                            "
-"                                                            "
-"                                                            "
 "────────────────────────────────────────────────────────────"
 "  type a message — enter to send                            "
-" session s1                                               ● "
+"                                                            "
+" seq 1                                                    ● "

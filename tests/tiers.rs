@@ -269,42 +269,97 @@ async fn status_at_39_is_indicators_only() {
     insta::assert_snapshot!("status-39", format!("{}", term.backend()));
 }
 
-/// #38/#39: at ≥80 the full left cluster gains the context meter and the
-/// session stats bar (turns · steps | in · out | cache) — driven by the
-/// store's aggregated usage + the last `request/context` window; both hide
-/// when the session has no data.
+/// #38/#39/#41/#43: with a session active, the wide tier renders the
+/// header (title · preset · jobs), status line 1 (model/effort/context),
+/// and status line 2 (the full metrics bar with the state indicator) —
+/// all driven by the store's aggregated usage + timing events + the
+/// cached `session.models` selection. The session id appears ONLY in the
+/// header now.
 #[tokio::test]
-async fn status_wide_shows_context_meter_and_stats_bar() {
+async fn wide_tier_shows_header_meta_and_full_stats_bar() {
     let mut app = app_with_session();
+    app.sessions[0].agent_preset = Some("Standard Mode".into());
+    // #43: the cached model selection (what a session.models fetch lands).
+    app.session_model = Some(dsh_tui::wire::session::ModelSelection {
+        provider: "deepseek".into(),
+        model: "deepseek-v4-flash".into(),
+        reasoning_effort: Some("high".into()),
+    });
+    // One measurable turn + a settled tool + context window + running job.
+    let ev_at = |seq: i64, time: f64, r#type: &str, data: serde_json::Value| {
+        let mut event = ev(seq, r#type, data);
+        event.time = time;
+        event
+    };
+    for event in [
+        ev_at(
+            1,
+            1.0,
+            "request/context",
+            json!({"provider": "p", "model": "m", "contextWindow": 50}),
+        ),
+        ev_at(2, 2.0, "user/message", user_msg("m1", "hi")),
+        ev_at(3, 10.0, "turn/start", json!({"turn": 1})),
+        ev_at(
+            4,
+            10.3,
+            "assistant/chunk",
+            json!({"turn": 1, "step": 1, "chunk": {"type": "text-delta", "index": 0, "text": "H"}}),
+        ),
+        ev_at(
+            5,
+            10.4,
+            "assistant/message",
+            json!({"turn": 1, "step": 1, "message": {"id": "a1", "role": "assistant", "content": [{"type": "text", "text": "Hi"}], "source": {"kind": "model", "provider": "p", "model": "m"}}, "usage": {"inputTokens": 10, "outputTokens": 100, "cacheReadTokens": 5}}),
+        ),
+        ev_at(
+            6,
+            20.0,
+            "tool/call",
+            json!({"turn": 1, "step": 2, "callId": "c1", "name": "bash", "arguments": "ls"}),
+        ),
+        ev_at(
+            7,
+            25.0,
+            "tool/result",
+            json!({"turn": 1, "step": 2, "message": {"id": "r1", "role": "user", "content": [{"type": "tool-result", "toolCallId": "c1", "content": [{"type": "text", "text": "out"}], "isError": false}], "source": {"kind": "tool", "callId": "c1"}}}),
+        ),
+        ev_at(
+            8,
+            110.0,
+            "turn/end",
+            json!({"turn": 1, "reason": {"kind": "completed"}}),
+        ),
+    ] {
+        app.store.ingest(frame("s1", event)).expect("ingest");
+    }
+    // #41: one running + one completed job → jobs segment shows 1.
     app.store
-        .ingest(frame(
-            "s1",
-            ev(
-                1,
-                "request/context",
-                json!({"provider": "p", "model": "m", "contextWindow": 50}),
-            ),
-        ))
-        .expect("ingest");
-    app.store
-        .ingest(frame(
-            "s1",
-            ev(
-                2,
-                "assistant/message",
-                json!({
-                    "turn": 1, "step": 1,
-                    "message": {
-                        "id": "a1", "role": "assistant",
-                        "content": [{"type": "text", "text": "hi"}],
-                        "source": {"kind": "model", "provider": "p", "model": "m"},
-                    },
-                    "usage": {"inputTokens": 10, "outputTokens": 3, "cacheReadTokens": 5},
-                }),
-            ),
-        ))
-        .expect("ingest");
-    let backend = TestBackend::new(140, 15);
+        .ingest(dsh_tui::wire::events::MuxFrame::SessionJobs {
+            session_id: SessionId("s1".into()),
+            jobs: vec![
+                dsh_tui::wire::jobs::TaskView {
+                    id: dsh_tui::wire::jobs::TaskId("t1".into()),
+                    kind: "file-write".into(),
+                    label: "write".into(),
+                    status: dsh_tui::wire::jobs::TaskStatus::Running,
+                    detail: None,
+                    started_at: 1,
+                    finished_at: None,
+                },
+                dsh_tui::wire::jobs::TaskView {
+                    id: dsh_tui::wire::jobs::TaskId("t2".into()),
+                    kind: "file-write".into(),
+                    label: "done".into(),
+                    status: dsh_tui::wire::jobs::TaskStatus::Completed,
+                    detail: None,
+                    started_at: 1,
+                    finished_at: Some(2),
+                },
+            ],
+        })
+        .expect("ingest jobs");
+    let backend = TestBackend::new(200, 15);
     let mut term = Terminal::new(backend).unwrap();
     run_with(
         &mut app,
@@ -312,14 +367,44 @@ async fn status_wide_shows_context_meter_and_stats_bar() {
         vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
     )
     .await;
-    let row = status_row(&term);
-    // used = input + cache_read = 15 of the 50-token window → 30%.
-    assert!(row.contains("ctx 30%"), "meter: {row}");
-    // The full stats cluster fits at 140 cols (sidebar 22 + gap 1).
+    let view = format!("{}", term.backend());
+    let lines: Vec<&str> = view
+        .lines()
+        .map(|line| line.trim_matches('"').trim())
+        .collect();
+    let header = lines[0];
     assert!(
-        row.contains("1 turns · 1 steps | in 10 · out 3 | cache 33%"),
-        "stats bar: {row}"
+        header.contains("Session: s1 | Agent preset: Standard Mode | Background jobs: 1"),
+        "header: {header}"
     );
+    // Status line 1 = the model/effort/context row (second-to-last).
+    let meta = lines[lines.len() - 2];
+    assert!(
+        meta.contains("Model: deepseek-v4-flash | Effort: high"),
+        "meta: {meta}"
+    );
+    // used = input(10) + cache_read(5) = 15 of the 50-token window → 30%.
+    assert!(
+        meta.contains("Context: 15 tok · 30% used"),
+        "context: {meta}"
+    );
+    // Status line 2 = the metrics bar + indicator. LLM = 110−10 = 100s
+    // → 1m40s; Tool call = 25−20 = 5s; TTFT = 10.3−10 = 0.3s; tok/s =
+    // 100 output / 100s = 1; cache = 5/15 = 33%.
+    let status = lines[lines.len() - 1];
+    assert!(
+        status.contains("1 turns · 2 steps | LLM 1m40s · Tool call 5s | TTFT avg 0.3s · 1 tok/s | Cache hit 33% | Input 10 tok · Output 100 tok"),
+        "metrics: {status}"
+    );
+    assert!(
+        status.contains("seq 8 · focus: chat"),
+        "debug bits: {status}"
+    );
+    assert!(
+        !status.contains("session s1"),
+        "the id moved to the header: {status}"
+    );
+    assert!(status.ends_with('●'), "indicator: {status}");
 }
 
 // ---------------------------------------------------------------------------
@@ -467,9 +552,12 @@ async fn wide_tier_keeps_the_permanent_sidebar() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn compact_status_truncates_a_long_session_id() {
+async fn header_truncates_a_long_session_id() {
+    // #41: the session id moved into the header (row 0) — a long id
+    // truncates with `…` THERE, while the 40-79 status tier keeps its
+    // first-span (`seq N`) + indicator.
     let long_id =
-        "a-very-long-session-identifier-that-overflows-the-status-area-entirely-1234567890";
+        "a-very-long-session-identifier-that-overflows-the-header-area-entirely-1234567890";
     let mut app = app_with_session();
     app.sessions[0].session_id = SessionId(long_id.into());
     app.active_session = Some(SessionId(long_id.into()));
@@ -481,10 +569,22 @@ async fn compact_status_truncates_a_long_session_id() {
         vec![draw_force(), AppEvent::Key(ctrl(KeyCode::Char('q')))],
     )
     .await;
+    let view = format!("{}", term.backend());
+    let header = view
+        .lines()
+        .next()
+        .expect("header row")
+        .trim_matches('"')
+        .trim()
+        .to_string();
+    assert!(
+        header.starts_with("Session: a-very-long-") && header.contains('…'),
+        "#41: the header truncates the long id: {header:?}"
+    );
     let status = status_row(&term);
     assert!(
-        status.starts_with("session a-very-long-") && status.contains('…'),
-        "#19: the id truncates with …: {status:?}"
+        status.starts_with("focus: chat"),
+        "first-span status below 80 (no store state yet → no seq): {status:?}"
     );
     assert!(status.ends_with('●'), "indicator intact: {status:?}");
 }
@@ -628,10 +728,11 @@ async fn multi_row_selection_copies_joined_lines() {
         vec![
             AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
-            // Anchor (0,1) → current (2,3): "i" + blank + "hi".
-            mouse_down(26, 1),
-            drag(28, 3),
-            mouse_up(28, 3),
+            // Anchor (0,1) → current (2,3): "i" + blank + "hi". The +1
+            // row offset accounts for the session header above the chat.
+            mouse_down(26, 2),
+            drag(28, 4),
+            mouse_up(28, 4),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )
@@ -840,10 +941,11 @@ async fn backward_drag_normalizes_the_range() {
             AppEvent::Key(key(KeyCode::Char('v'))),
             draw_force(),
             // Drag upward: anchor (2,3) → current (0,1) — the range
-            // normalizes to the same text as the forward drag.
-            mouse_down(28, 3),
-            drag(26, 1),
-            mouse_up(26, 1),
+            // normalizes to the same text as the forward drag. The +1
+            // row offset accounts for the session header above the chat.
+            mouse_down(28, 4),
+            drag(26, 2),
+            mouse_up(26, 2),
             AppEvent::Key(ctrl(KeyCode::Char('q'))),
         ],
     )

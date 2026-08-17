@@ -1723,4 +1723,281 @@ fn session_stats_hide_gracefully_without_usage_or_context() {
     assert_eq!(stats.steps, 0);
     assert_eq!(stats.input_tokens, 0);
     assert_eq!(stats.context_window, None, "never reported — hidden");
+    assert_eq!(stats.llm_seconds, 0.0, "no in-window turn timing");
+    assert_eq!(stats.ttft_seconds, None, "no measurable turn — TTFT hidden");
+    assert_eq!(
+        dsh_tui::store::tokens_per_second(&stats),
+        None,
+        "no output or duration — tok/s hidden"
+    );
+}
+
+/// #39: the per-turn timing metrics — LLM duration from in-window
+/// TurnStart→TurnEnd pairs, TTFT from the first chunk, tool duration from
+/// call→result, tok/s from output / LLM duration. Events with envelope
+/// times (the `ev_at` helper) — the window's `time` is the source.
+#[test]
+fn session_stats_derive_timing_from_the_event_window() {
+    let mut store = SessionStore::new();
+    let s = "s1";
+    let ev_at = |seq: i64, time: f64, r#type: &str, data: serde_json::Value| {
+        let mut event = ev(seq, r#type, data);
+        event.time = time;
+        event
+    };
+    ingest_all(
+        &mut store,
+        s,
+        vec![
+            ev_at(1, 1.0, "user/message", user_msg("m1", "hi", user_source())),
+            // Turn 1: start 10 → first chunk 10.3 → end 110 (100s LLM).
+            ev_at(2, 10.0, "turn/start", json!({"turn": 1})),
+            ev_at(
+                3,
+                10.3,
+                "assistant/chunk",
+                chunk(1, 1, json!({"type": "text-delta", "index": 0, "text": "H"})),
+            ),
+            ev_at(
+                4,
+                10.4,
+                "assistant/message",
+                json!({
+                    "turn": 1, "step": 1,
+                    "message": {
+                        "id": "a1", "role": "assistant",
+                        "content": [{"type": "text", "text": "Hi"}],
+                        "source": {"kind": "model", "provider": "p", "model": "m"},
+                    },
+                    "usage": {"inputTokens": 10, "outputTokens": 100, "cacheReadTokens": 5},
+                }),
+            ),
+            // A settled tool: 20 → 25 (5s).
+            ev_at(
+                5,
+                20.0,
+                "tool/call",
+                json!({"turn": 1, "step": 2, "callId": "c1", "name": "bash", "arguments": "ls"}),
+            ),
+            ev_at(
+                6,
+                25.0,
+                "tool/result",
+                json!({
+                    "turn": 1, "step": 2,
+                    "message": {
+                        "id": "r1", "role": "user",
+                        "content": [{"type": "tool-result", "toolCallId": "c1", "content": [{"type": "text", "text": "out"}], "isError": false}],
+                        "source": {"kind": "tool", "callId": "c1"},
+                    },
+                }),
+            ),
+            ev_at(
+                7,
+                110.0,
+                "turn/end",
+                json!({"turn": 1, "reason": {"kind": "completed"}}),
+            ),
+            // Turn 2: start 210 → first chunk 210.4 → end 260 (50s LLM).
+            ev_at(8, 210.0, "turn/start", json!({"turn": 2})),
+            ev_at(
+                9,
+                210.4,
+                "assistant/chunk",
+                chunk(2, 1, json!({"type": "text-delta", "index": 0, "text": "A"})),
+            ),
+            ev_at(
+                10,
+                210.5,
+                "assistant/message",
+                json!({
+                    "turn": 2, "step": 1,
+                    "message": {
+                        "id": "a2", "role": "assistant",
+                        "content": [{"type": "text", "text": "Again"}],
+                        "source": {"kind": "model", "provider": "p", "model": "m"},
+                    },
+                    "usage": {"inputTokens": 2, "outputTokens": 50},
+                }),
+            ),
+            ev_at(
+                11,
+                260.0,
+                "turn/end",
+                json!({"turn": 2, "reason": {"kind": "completed"}}),
+            ),
+        ],
+    );
+    let stats = dsh_tui::store::session_stats(session_state(&store, s));
+    assert_eq!(stats.turns, 2);
+    assert_eq!(stats.steps, 3, "two assistant steps + one tool step");
+    assert_eq!(stats.llm_seconds, 150.0, "100s + 50s");
+    assert_eq!(stats.measured_turns, 2);
+    // TTFT = mean(0.3, 0.4) = 0.35 (f64 mean — compare approximately).
+    let ttft = stats.ttft_seconds.expect("ttft");
+    assert!((ttft - 0.35).abs() < 1e-9, "ttft: {ttft}");
+    assert_eq!(stats.tool_seconds, 5.0, "25 − 20");
+    assert_eq!(stats.measured_tools, 1);
+    // 150 output tokens / 150s = 1 tok/s.
+    assert_eq!(dsh_tui::store::tokens_per_second(&stats), Some(1.0));
+}
+
+/// #39: a turn whose start fell outside the retained window contributes
+/// nothing — the LLM/TTFT segments hide rather than fabricate. An
+/// interrupted turn (no TurnEnd) is ignored too.
+#[test]
+fn session_stats_skip_window_cut_and_open_turns() {
+    let mut store = SessionStore::new();
+    let s = "s1";
+    let ev_at = |seq: i64, time: f64, r#type: &str, data: serde_json::Value| {
+        let mut event = ev(seq, r#type, data);
+        event.time = time;
+        event
+    };
+    ingest_all(
+        &mut store,
+        s,
+        vec![
+            // TurnEnd WITHOUT its TurnStart (window cut at seq 1).
+            ev_at(
+                1,
+                50.0,
+                "turn/end",
+                json!({"turn": 1, "reason": {"kind": "completed"}}),
+            ),
+            // Turn 2: start in-window but NO end (still open).
+            ev_at(2, 10.0, "turn/start", json!({"turn": 2})),
+            ev_at(
+                3,
+                10.2,
+                "assistant/chunk",
+                chunk(2, 1, json!({"type": "text-delta", "index": 0, "text": "H"})),
+            ),
+        ],
+    );
+    let stats = dsh_tui::store::session_stats(session_state(&store, s));
+    assert_eq!(stats.measured_turns, 0, "no complete turn in-window");
+    assert_eq!(stats.llm_seconds, 0.0);
+    assert_eq!(stats.ttft_seconds, None);
+    assert_eq!(
+        dsh_tui::store::tokens_per_second(&stats),
+        None,
+        "no duration → no tok/s"
+    );
+}
+
+/// #39: a closed turn WITHOUT a first chunk (immediate turn-error) must not
+/// dilute or fabricate TTFT — the mean divides by chunked turns only, and an
+/// all-chunkless window hides TTFT entirely.
+#[test]
+fn session_stats_ttft_excludes_chunkless_turns() {
+    let mut store = SessionStore::new();
+    let s = "s1";
+    let ev_at = |seq: i64, time: f64, r#type: &str, data: serde_json::Value| {
+        let mut event = ev(seq, r#type, data);
+        event.time = time;
+        event
+    };
+    ingest_all(
+        &mut store,
+        s,
+        vec![
+            // Turn 1: chunked — TTFT 0.3.
+            ev_at(1, 10.0, "turn/start", json!({"turn": 1})),
+            ev_at(
+                2,
+                10.3,
+                "assistant/chunk",
+                chunk(1, 1, json!({"type": "text-delta", "index": 0, "text": "H"})),
+            ),
+            ev_at(
+                3,
+                110.0,
+                "turn/end",
+                json!({"turn": 1, "reason": {"kind": "completed"}}),
+            ),
+            // Turn 2: closed WITHOUT any chunk (immediate turn-error).
+            ev_at(4, 200.0, "turn/start", json!({"turn": 2})),
+            ev_at(
+                5,
+                201.0,
+                "turn/end",
+                json!({"turn": 2, "reason": {"kind": "error", "error": {"code": "provider-error", "message": "boom"}}}),
+            ),
+        ],
+    );
+    let stats = dsh_tui::store::session_stats(session_state(&store, s));
+    assert_eq!(stats.measured_turns, 2, "both closed turns counted");
+    assert_eq!(stats.llm_seconds, 101.0, "100s + 1s");
+    let ttft = stats
+        .ttft_seconds
+        .expect("ttft measured over chunked turns only");
+    assert!(
+        (ttft - 0.3).abs() < 1e-9,
+        "ttft: {ttft} — chunkless turn excluded"
+    );
+
+    // All-chunkless window: TTFT hidden, not 0.0.
+    let mut store = SessionStore::new();
+    ingest_all(
+        &mut store,
+        s,
+        vec![
+            ev_at(1, 10.0, "turn/start", json!({"turn": 1})),
+            ev_at(
+                2,
+                11.0,
+                "turn/end",
+                json!({"turn": 1, "reason": {"kind": "error", "error": {"code": "provider-error", "message": "boom"}}}),
+            ),
+        ],
+    );
+    let stats = dsh_tui::store::session_stats(session_state(&store, s));
+    assert_eq!(stats.measured_turns, 1);
+    assert_eq!(
+        stats.ttft_seconds, None,
+        "no chunked turn — TTFT hidden, never 0.0"
+    );
+}
+
+/// #41: `session/jobs` frames update the running-task count live —
+/// Running/Stopping count, other statuses don't; a later frame replaces
+/// the count wholesale; no frame yet → `None` (the header's jobs segment
+/// stays hidden).
+#[test]
+fn session_jobs_frame_tracks_running_tasks() {
+    let mut store = SessionStore::new();
+    let s = "s1";
+    let jobs_frame = |jobs: Vec<serde_json::Value>| dsh_tui::wire::events::MuxFrame::SessionJobs {
+        session_id: SessionId(s.into()),
+        jobs: jobs
+            .into_iter()
+            .map(|value| serde_json::from_value(value).expect("task view"))
+            .collect(),
+    };
+    store
+        .ingest(jobs_frame(vec![
+            json!({"id": "t1", "kind": "file-write", "label": "w", "status": "running", "startedAt": 1}),
+            json!({"id": "t2", "kind": "file-write", "label": "s", "status": "stopping", "startedAt": 1}),
+            json!({"id": "t3", "kind": "file-write", "label": "c", "status": "completed", "startedAt": 1, "finishedAt": 2}),
+        ]))
+        .unwrap();
+    assert_eq!(
+        session_state(&store, s).running_jobs,
+        Some(2),
+        "running + stopping count"
+    );
+    // A later frame replaces the count (all done → 0, still Some(0)).
+    store
+        .ingest(jobs_frame(vec![json!({"id": "t1", "kind": "file-write", "label": "w", "status": "killed", "startedAt": 1, "finishedAt": 2})]))
+        .unwrap();
+    assert_eq!(session_state(&store, s).running_jobs, Some(0));
+    // No jobs frame yet → None (the header's segment stays hidden).
+    let mut fresh = SessionStore::new();
+    fresh.open_session(SessionId(s.into()));
+    assert_eq!(
+        session_state(&fresh, s).running_jobs,
+        None,
+        "never reported — hidden"
+    );
 }

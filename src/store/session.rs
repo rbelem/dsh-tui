@@ -66,6 +66,10 @@ pub struct SessionState {
     pub projections: HashMap<String, ProjectionValue>,
     /// Full snapshot from the last `session/queue` frame.
     pub queue: Option<QueueSnapshot>,
+    /// Running-task count from the LAST `session/jobs` frame (#41): tasks
+    /// with status Running or Stopping. `None` until the first jobs frame
+    /// arrives — the header's jobs segment stays hidden (graceful absence).
+    pub running_jobs: Option<usize>,
     /// Derived chat nodes in display order (rebuilt on window changes).
     pub nodes: Vec<ChatNode>,
     /// Fold state keyed by node key; survives node-list rebuilds.
@@ -88,6 +92,7 @@ impl SessionState {
             truncated: false,
             projections: HashMap::new(),
             queue: None,
+            running_jobs: None,
             nodes: Vec::new(),
             fold: HashMap::new(),
             last_stream_error: None,
@@ -137,6 +142,23 @@ impl SessionState {
     /// Replace the queue snapshot wholesale (full replacement, no incremental ops).
     pub(crate) fn apply_queue(&mut self, items: Vec<QueueItem>) {
         self.queue = Some(QueueSnapshot { items });
+    }
+
+    /// Replace the running-task view (#41): full replacement from the last
+    /// `session/jobs` frame — the count of Running/Stopping tasks (0 → the
+    /// segment omits, per the header contract).
+    pub(crate) fn apply_jobs(&mut self, jobs: &[crate::wire::jobs::TaskView]) {
+        self.running_jobs = Some(
+            jobs.iter()
+                .filter(|job| {
+                    matches!(
+                        job.status,
+                        crate::wire::jobs::TaskStatus::Running
+                            | crate::wire::jobs::TaskStatus::Stopping
+                    )
+                })
+                .count(),
+        );
     }
 
     /// `session/subscribed` baseline: set `durable_seq`, drop buffered events
