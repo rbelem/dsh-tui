@@ -428,6 +428,18 @@ impl App {
         Ok(())
     }
 
+    /// #51: force one immediate frame — the first-frame fast paint: the
+    /// onboarding takeover paints BEFORE the blocking attach round-trip in
+    /// `main::run_app` (the attach streams the workspace picker afterwards
+    /// via [`crate::app::App::on_attach_workspace_list`]).
+    pub fn paint<B>(&mut self, term: &mut Terminal<B>) -> Result<(), AppError>
+    where
+        B: Backend,
+        B::Error: Into<AppError>,
+    {
+        self.draw(term).map_err(Into::into)
+    }
+
     /// Sync the row cache, apply follow, and render the three surfaces:
     /// sidebar | chat over composer over the status line. A takeover (Q6)
     /// replaces the whole layout.

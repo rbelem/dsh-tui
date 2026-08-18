@@ -51,15 +51,11 @@ impl AppUnderTest {
             XDG_SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::create_dir_all(&xdg);
-        // #47: seed a completed-onboarding flag — the e2e harness tests the
-        // app, not the first-run Q&A, so a fresh config must not take the
-        // onboarding takeover at startup.
-        let _ = std::fs::create_dir_all(xdg.join("dsh-tui"));
-        std::fs::write(
-            xdg.join("dsh-tui/config.toml"),
-            "onboarding_complete = true\n",
-        )
-        .expect("write seeded config");
+        // #51: onboarding ALWAYS shows at startup now (the old
+        // `onboarding_complete` config flag no longer gates) — the harness
+        // bypasses it through the explicit `DSH_TUI_SKIP_ONBOARDING` env.
+        // The XDG isolation above still keeps the child off the host config.
+        cmd.env("DSH_TUI_SKIP_ONBOARDING", "1");
         cmd.env("XDG_CONFIG_HOME", &xdg);
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -611,13 +607,14 @@ async fn missing_dsh_port_exits_with_a_hint() {
     // with the resolved-port hint on stderr.
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_dsh-tui"));
     cmd.env("DSH_TUI_LOCALE", "en");
+    // #51: onboarding always shows now — bypass it explicitly so the
+    // no-gateway exit contract is what drives the startup path.
+    cmd.env("DSH_TUI_SKIP_ONBOARDING", "1");
     let xdg = std::env::temp_dir().join(format!("dsh-tui-e2e-xdg-{}", std::process::id()));
     let _ = std::fs::create_dir_all(xdg.join("dsh-tui"));
     std::fs::write(
         xdg.join("dsh-tui/config.toml"),
-        // #47: the onboarding flag must be set — a first-run takeover would
-        // intercept the no-gateway exit contract.
-        "onboarding_complete = true\n[gateway]\nport = 18769\nauto_start = false\n",
+        "[gateway]\nport = 18769\nauto_start = false\n",
     )
     .expect("write isolated config");
     cmd.env("XDG_CONFIG_HOME", &xdg);

@@ -77,26 +77,10 @@ async fn run_app(client: WireClient) -> Result<(), AppError> {
     // Locale resolution (increment 3): config wins, then DSH_TUI_LOCALE,
     // then LANG/LC_ALL (Locale::detect); persisted on Ctrl+L.
     app.locale = dsh_tui::i18n::Locale::detect(app.config.locale.as_deref());
-    let (session_id, sessions, workspace_list, session_model) =
-        attach(&client, &mut app.store, app.locale).await?;
-    app.active_session = session_id.clone();
-    // #43: the resumed session's model selection (None when the gateway
-    // had no sessions or the models RPC was unavailable).
-    app.session_model = session_model;
-    app.sessions = sessions;
-    app.workspace_order = workspace_list
-        .items
-        .iter()
-        .map(|workspace| workspace.workspace_id.clone())
-        .collect();
-    app.workspaces = workspace_list.items;
-    app.archived_session_ids = workspace_list.archived_session_ids;
-    app.client = Some(client.clone());
-    if session_id.is_none() {
-        app.last_error = Some(dsh_tui::i18n::tr(app.locale, "main.no_sessions").into());
-    }
-    // #47: first run (no `onboarding_complete` flag) → the onboarding Q&A
-    // takeover runs after the gateway attaches.
+    // #51: onboarding ALWAYS enters (no config gate) — and it must happen
+    // BEFORE the blocking attach so the takeover's first frame paints
+    // instantly. The workspace picker is seeded empty here; the gateway
+    // workspace list streams in once attach lands.
     app.maybe_enter_onboarding();
 
     let mut terminal = run::setup_terminal()?;
@@ -108,7 +92,33 @@ async fn run_app(client: WireClient) -> Result<(), AppError> {
     // Resolved before the first draw.
     app.refresh_terminal_theme();
 
+    // #51: paint the onboarding takeover immediately (blazing fast) —
+    // before the blocking attach round-trip below.
+    app.paint(&mut terminal)?;
+
     let mut events = EventChannel::new();
+    let (session_id, sessions, workspace_list, session_model) =
+        attach(&client, &mut app.store, app.locale).await?;
+    app.active_session = session_id.clone();
+    // #43: the resumed session's model selection (None when the gateway
+    // had no sessions or the models RPC was unavailable).
+    app.session_model = session_model;
+    app.sessions = sessions;
+    // #51: the gateway workspace list landed — stream the paths into the
+    // onboarding picker (clamped) and redraw.
+    app.on_attach_workspace_list(&workspace_list);
+    app.workspace_order = workspace_list
+        .items
+        .iter()
+        .map(|workspace| workspace.workspace_id.clone())
+        .collect();
+    app.workspaces = workspace_list.items;
+    app.archived_session_ids = workspace_list.archived_session_ids;
+    app.client = Some(client.clone());
+    if session_id.is_none() {
+        app.last_error = Some(dsh_tui::i18n::tr(app.locale, "main.no_sessions").into());
+    }
+
     event::spawn_input_bridge(events.tx.clone());
     event::spawn_frame_bridge(client.mux_stream(), events.tx.clone());
     event::spawn_host_bridge(client.host_stream(), events.tx.clone());

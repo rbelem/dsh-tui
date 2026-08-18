@@ -1860,23 +1860,44 @@ impl App {
             ));
     }
 
-    /// #47: first-run detection — the config's `onboarding_complete` flag
-    /// absent/false (a missing config file counts) → enter the onboarding
-    /// Q&A takeover at startup. Called from `main` after the gateway
-    /// attaches. #50: the Workspace picker is seeded with the gateway's
-    /// workspace paths (updated_at desc) + the real cwd; the zoxide-recent
-    /// list is fetched lazily on the first Workspace-step touch.
+    /// #47/#51: the onboarding Q&A takeover ALWAYS enters at startup in the
+    /// normal (non-`--light`) path — the `onboarding_complete` flag no
+    /// longer gates it (a persisted or leaked `true` must not suppress the
+    /// flow). The ONLY bypass is the explicit `DSH_TUI_SKIP_ONBOARDING`
+    /// env (used by the e2e/light harnesses); a real user always sees it.
+    /// Called from `main` BEFORE the blocking attach so the first frame
+    /// paints instantly: seeded with the gateway workspace paths (empty
+    /// pre-attach; streamed in afterwards via
+    /// [`OnboardingState::set_workspace_paths`]/[`App::on_attach_workspace_list`])
+    /// + the real cwd; the zoxide-recent list stays lazy.
     pub fn maybe_enter_onboarding(&mut self) {
-        if !self.config.onboarding_complete {
-            let workspace_paths = crate::ui::onboarding::workspace_paths_sorted(&self.workspaces);
-            let cwd = std::env::current_dir()
-                .map(|dir| dir.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            self.mode = Mode::Onboarding(crate::ui::onboarding::OnboardingState::for_workspaces(
-                workspace_paths,
-                cwd,
+        if std::env::var("DSH_TUI_SKIP_ONBOARDING").is_ok() {
+            return;
+        }
+        let workspace_paths = crate::ui::onboarding::workspace_paths_sorted(&self.workspaces);
+        let cwd = std::env::current_dir()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.mode = Mode::Onboarding(crate::ui::onboarding::OnboardingState::for_workspaces(
+            workspace_paths,
+            cwd,
+        ));
+    }
+
+    /// #51: post-attach — stream the gateway's workspace paths into the
+    /// onboarding picker (the pre-attach takeover painted with an empty
+    /// list) and request a redraw so the candidates appear once attach
+    /// lands.
+    pub fn on_attach_workspace_list(
+        &mut self,
+        workspace_list: &crate::wire::workspace::WorkspaceListValue,
+    ) {
+        if let Mode::Onboarding(state) = &mut self.mode {
+            state.set_workspace_paths(crate::ui::onboarding::workspace_paths_sorted(
+                &workspace_list.items,
             ));
         }
+        self.needs_draw = true;
     }
 
     /// #47: onboarding bindings — typing edits the active question's
@@ -2008,10 +2029,12 @@ impl App {
         }
     }
 
-    /// #47: finish the Q&A — persist the completed flag + chosen values to
-    /// the config, return to the chat, and dispatch `workspace.create` for
-    /// the chosen workspace directory (the sidebar absorbs it via the
-    /// existing create-done path).
+    /// #47/#51: finish the Q&A — persist the chosen values to the config,
+    /// return to the chat, and dispatch `workspace.create` for the chosen
+    /// workspace directory (the sidebar absorbs it via the existing
+    /// create-done path). The `onboarding_complete` write is kept for
+    /// config compatibility only — it is NEVER read as a gate again (#51:
+    /// onboarding always shows at startup).
     fn complete_onboarding(&mut self, path: String, preset: String) -> Action {
         self.config.onboarding_complete = true;
         self.config.workspace_path = Some(path.clone());

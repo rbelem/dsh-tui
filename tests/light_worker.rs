@@ -521,6 +521,31 @@ async fn worker_usage_and_no_gateway_exit_2() {
 }
 
 // ---------------------------------------------------------------------------
+// 3b. #51: the worker lane never renders the onboarding takeover
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn light_worker_never_renders_onboarding() {
+    // #51: onboarding ALWAYS shows in the TUI path, but `--light` is a
+    // separate lane that never builds an App — even against a live gateway
+    // and WITHOUT the skip env, the worker output must not paint the
+    // onboarding takeover.
+    let mock = mock_happy_turn().await;
+    let (status, stdout, stderr) = run_worker(Some(mock.port()), &["--light", "--task", "hello"]);
+    assert_eq!(status, Some(0), "worker still succeeds; stderr: {stderr}");
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        !combined.contains(" first run ") && !combined.contains("workspace live?"),
+        "no onboarding takeover on the worker lane: {combined}"
+    );
+    assert!(
+        stdout.contains("dsh-worker: done"),
+        "the worker result still streams: {stdout}"
+    );
+    mock.stop().await;
+}
+
+// ---------------------------------------------------------------------------
 // 4. herdr lifecycle reporting (T2)
 // ---------------------------------------------------------------------------
 

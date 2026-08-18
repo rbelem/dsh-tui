@@ -199,6 +199,29 @@ impl OnboardingState {
         self.zoxide_dirs = fetch_zoxide();
     }
 
+    /// #51: the gateway attach streams the workspace paths into the picker
+    /// AFTER onboarding already entered (the fast-paint first frame shows
+    /// an empty picker). An empty stream is a no-op — the pre-attach state
+    /// stays as-is (blank Enter commits the cwd); a non-empty list replaces
+    /// the workspace section and the selection is re-clamped.
+    pub fn set_workspace_paths(&mut self, workspace_paths: Vec<String>) {
+        if workspace_paths.is_empty() {
+            return;
+        }
+        self.workspace_paths = workspace_paths;
+        self.clamp_selection();
+    }
+
+    /// Clamp `selection` into the visible candidate list when it is
+    /// non-empty (an empty list keeps it untouched — blank Enter commits
+    /// the cwd).
+    pub fn clamp_selection(&mut self) {
+        let len = self.visible_len();
+        if len > 0 {
+            self.selection = self.selection.min(len - 1);
+        }
+    }
+
     /// The picker's visible rows for the current editor needle: (workspace
     /// matches, recent matches), each filtered and score-ranked.
     pub fn visible_candidates(&self) -> (Vec<String>, Vec<String>) {
@@ -648,6 +671,36 @@ mod tests {
         assert!(
             !view.contains("/z/recent-00"),
             "scrolled-past head dropped: {view}"
+        );
+    }
+
+    #[test]
+    fn workspace_paths_stream_in_after_attach_and_clamp() {
+        // #51: pre-attach the picker is seeded empty.
+        let mut state = OnboardingState::for_workspaces(Vec::new(), "/home/u".into());
+        assert!(
+            state.workspace_paths.is_empty(),
+            "pre-attach: no candidates"
+        );
+        // An out-of-range selection (the picker had no rows).
+        state.selection = 3;
+
+        // The attach streams the workspace list in (already updated_at
+        // desc via the callers) and clamps the selection to the rows.
+        state.set_workspace_paths(vec!["/ws/new".into(), "/ws/old".into()]);
+        assert_eq!(state.workspace_paths, vec!["/ws/new", "/ws/old"]);
+        assert!(
+            state.selection <= 1,
+            "selection clamped: {}",
+            state.selection
+        );
+
+        // An empty stream is a no-op (pre-attach state + blank-Enter-cwd).
+        state.set_workspace_paths(Vec::new());
+        assert_eq!(
+            state.workspace_paths,
+            vec!["/ws/new", "/ws/old"],
+            "empty stream leaves the section untouched"
         );
     }
 }

@@ -1,7 +1,10 @@
-//! First-run onboarding (#47): the state machine (no config → onboarding
-//! at startup, the Q&A transitions, completion persists the flag to the
-//! config file), the Esc semantics, and the full UI flow against the mock
-//! gateway (onboarding renders on first run, completion reaches the chat).
+//! First-run onboarding (#47/#51): the takeover ALWAYS enters at startup
+//! (no config gate — the `onboarding_complete` flag is back-compat only),
+//! bypassed only by the explicit `DSH_TUI_SKIP_ONBOARDING` env. The tests
+//! cover flag-independence, the env bypass, the fast-paint ordering (the
+//! onboarding enters before attach; workspace paths stream in after), the
+//! Q&A transitions, completion persisting the config, the Esc semantics,
+//! and the full UI flow against the mock gateway.
 
 use std::path::Path;
 use std::time::Duration;
@@ -136,20 +139,34 @@ impl Drop for XdgGuard {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn first_run_detection_and_completion_persists_the_flag() {
-    let dir = TempDir::new("sm");
+fn onboarding_enters_regardless_of_the_flag() {
+    // #51: the `onboarding_complete` flag no longer gates the flow — the
+    // onboarding takeover enters whether the config is missing, has the
+    // flag false, or has it true (a persisted/leaked true must not
+    // suppress it).
+    let dir = TempDir::new("flag");
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    with_config_root(&dir.0, |config_root| {
-        // No config file: onboarding enters at startup.
+    with_config_root(&dir.0, |_config_root| {
+        // Missing config → enters.
         let mut app = App::default();
         app.load_theme_config();
         app.maybe_enter_onboarding();
         assert!(
             matches!(app.mode, Mode::Onboarding(_)),
-            "no config → onboarding"
+            "missing config → onboarding"
         );
 
-        // With the completed flag: onboarding is skipped.
+        // Explicit false → enters.
+        Config::default().save().expect("save");
+        let mut app = App::default();
+        app.load_theme_config();
+        app.maybe_enter_onboarding();
+        assert!(
+            matches!(app.mode, Mode::Onboarding(_)),
+            "flag false → onboarding"
+        );
+
+        // A persisted (or leaked) TRUE → STILL enters.
         Config {
             onboarding_complete: true,
             ..Config::default()
@@ -159,9 +176,33 @@ fn first_run_detection_and_completion_persists_the_flag() {
         let mut app = App::default();
         app.load_theme_config();
         app.maybe_enter_onboarding();
-        assert!(matches!(app.mode, Mode::Chat), "flag → no onboarding");
-        assert!(Config::load().onboarding_complete, "flag persisted");
-        let _ = config_root;
+        assert!(
+            matches!(app.mode, Mode::Onboarding(_)),
+            "flag true → onboarding (never a gate again)"
+        );
+        assert!(
+            Config::load().onboarding_complete,
+            "flag stays persisted (back-compat)"
+        );
+    });
+}
+
+#[test]
+fn env_bypass_skips_onboarding() {
+    // #51: the only bypass is the explicit DSH_TUI_SKIP_ONBOARDING env
+    // (used by the e2e/light harnesses); without it onboarding always shows.
+    let dir = TempDir::new("skip");
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_env_var("DSH_TUI_SKIP_ONBOARDING", Some("1"), || {
+        with_config_root(&dir.0, |_config_root| {
+            let mut app = App::default();
+            app.load_theme_config();
+            app.maybe_enter_onboarding();
+            assert!(
+                matches!(app.mode, Mode::Chat),
+                "the env bypass skips onboarding"
+            );
+        });
     });
 }
 
@@ -234,6 +275,62 @@ fn esc_quits_on_the_first_question() {
         app.load_theme_config();
         app.maybe_enter_onboarding();
         assert_eq!(app.handle_key(key(KeyCode::Esc)), Some(Action::Quit));
+    });
+}
+
+#[test]
+fn onboarding_enters_before_attach_and_streams_workspaces() {
+    // #51 fast-paint ordering: onboarding enters BEFORE the blocking attach
+    // (seeded with an EMPTY picker), and post-attach the gateway workspace
+    // list streams into the picker (updated_at desc) with the selection
+    // kept valid — the first frame paints, then the candidates appear.
+    use dsh_tui::wire::session::WorkspaceId;
+    use dsh_tui::wire::workspace::{WorkspaceListValue, WorkspaceView};
+
+    let dir = TempDir::new("order");
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    with_env_var("DSH_TUI_SKIP_ONBOARDING", None, || {
+        with_config_root(&dir.0, |_config_root| {
+            // Pre-attach: onboarding entered, picker empty.
+            let mut app = App::default();
+            app.load_theme_config();
+            app.maybe_enter_onboarding();
+            let Mode::Onboarding(state) = &app.mode else {
+                panic!("onboarding entered before attach");
+            };
+            assert!(
+                state.workspace_paths.is_empty(),
+                "pre-attach: the picker streams in later"
+            );
+
+            // Post-attach: the workspace list lands (updated_at desc), the
+            // picker seats the paths and the selection stays valid.
+            let ws = |id: &str, path: &str, updated: &str| WorkspaceView {
+                workspace_id: WorkspaceId(id.into()),
+                path: path.into(),
+                title: path.into(),
+                session_ids: vec![],
+                created_at: "2026-01-01T00:00:00Z".into(),
+                updated_at: updated.into(),
+            };
+            let list = WorkspaceListValue {
+                items: vec![
+                    ws("w-old", "/ws/old", "2026-01-01T00:00:00Z"),
+                    ws("w-new", "/ws/new", "2026-02-01T00:00:00Z"),
+                ],
+                archived_session_ids: vec![],
+            };
+            app.on_attach_workspace_list(&list);
+            let Mode::Onboarding(state) = &app.mode else {
+                panic!("still onboarding");
+            };
+            assert_eq!(
+                state.workspace_paths,
+                vec!["/ws/new", "/ws/old"],
+                "the workspace paths streamed in, updated_at desc"
+            );
+            assert_eq!(state.selection, 0, "selection stays valid");
+        });
     });
 }
 
