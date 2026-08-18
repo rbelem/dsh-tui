@@ -102,6 +102,18 @@ pub enum AppEvent {
     WorkspaceCreateDone {
         result: Result<crate::wire::workspace::WorkspaceCreateValue, ClientError>,
     },
+    /// A spawned sidebar `workspace.rename` finished (#46: the context
+    /// menu's rename).
+    WorkspaceRenameDone {
+        result: Result<crate::wire::workspace::WorkspaceRenameValue, ClientError>,
+    },
+    /// A spawned sidebar `workspace.delete` finished (#46: the context
+    /// menu's delete; the value carries only `deleted`, so the id rides
+    /// the event).
+    WorkspaceDeleteDone {
+        workspace_id: crate::wire::session::WorkspaceId,
+        result: Result<crate::wire::workspace::WorkspaceDeleteValue, ClientError>,
+    },
     /// A spawned sidebar-search `session.search` finished (`/`). `query`
     /// echoes the POSTed text so a stale result (the buffer moved on while
     /// the POST was in flight) is detected and re-searched.

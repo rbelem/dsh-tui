@@ -2001,3 +2001,227 @@ fn session_jobs_frame_tracks_running_tasks() {
         "never reported — hidden"
     );
 }
+
+/// Coverage variants: the fold's less-traveled branches — non-compact
+/// surface replacements (degrade to Unknown), unknown/negative/oversized
+/// stream chunks, result-first tool cuts (backfill on the later call), and
+/// out-of-order compaction events.
+#[test]
+fn fold_coverage_variants() {
+    // (a) A NON-compact surface-replace user message degrades to Unknown
+    // (the fold refuses to guess at replacement semantics).
+    let mut store = SessionStore::new();
+    ingest_all(
+        &mut store,
+        "s1",
+        vec![ev_surface(
+            1,
+            "user/message",
+            user_msg(
+                "m1",
+                "rewritten",
+                json!({"kind": "plugin", "plugin": "rewriter"}),
+            ),
+            json!({"op": "replace", "start": 1, "end": 5}),
+        )],
+    );
+    assert!(
+        nodes(&store, "s1")
+            .iter()
+            .any(|node| matches!(node.data, NodeData::Unknown { .. })),
+        "non-compact replace degrades: {:?}",
+        nodes(&store, "s1")
+    );
+
+    // (b) Stream-chunk edges: an unknown block type, deltas landing on
+    // fresh slots, and negative/oversized indices (all tolerated).
+    let mut store = SessionStore::new();
+    ingest_all(
+        &mut store,
+        "s2",
+        vec![
+            ev(1, "step/start", json!({"turn": 1, "step": 1})),
+            ev(
+                2,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "block-start", "index": 0, "blockType": "mystery"}),
+                ),
+            ),
+            ev(
+                3,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "reasoning-delta", "index": 0, "text": "think"}),
+                ),
+            ),
+            ev(
+                4,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "tool-call-delta", "index": 1, "id": "c1", "name": "bash", "argumentsDelta": "{\"cmd\":"}),
+                ),
+            ),
+            ev(
+                5,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "tool-call-delta", "index": -1, "id": "c2", "argumentsDelta": "x"}),
+                ),
+            ),
+            ev(
+                6,
+                "assistant/chunk",
+                chunk(
+                    1,
+                    1,
+                    json!({"type": "tool-call-delta", "index": 9999, "id": "c3", "argumentsDelta": "y"}),
+                ),
+            ),
+        ],
+    );
+    // The streamed tool call surfaces once the step closes (as a ToolCall
+    // block inside the assistant node — the fold's chunk shape).
+    ingest_all(
+        &mut store,
+        "s2",
+        vec![ev(7, "step/end", json!({"turn": 1, "step": 1}))],
+    );
+    assert!(
+        nodes(&store, "s2").iter().any(|node| matches!(
+            &node.data,
+            NodeData::Assistant { blocks, .. }
+                if blocks.iter().any(|block| matches!(block, dsh_tui::store::AssistantBlock::ToolCall { call_id, .. } if call_id == "c1"))
+        )),
+        "fresh-slot tool call delta folded: {:?}",
+        nodes(&store, "s2")
+    );
+
+    // (c) Result-first tool cut: the result arrives before the call; the
+    // later call backfills the fold, and a re-settled result re-publishes
+    // the node with the backfilled call.
+    let mut store = SessionStore::new();
+    ingest_all(
+        &mut store,
+        "s3",
+        vec![
+            ev(
+                1,
+                "tool/result",
+                json!({"turn": 1, "step": 1, "message": {"id": "tr1", "content": [{"type": "tool-result", "toolCallId": "cX", "content": [{"type": "text", "text": "out"}], "isError": false}], "source": {"kind": "tool", "callId": "cX"}}, "error": null, "meta": null}),
+            ),
+            ev(
+                2,
+                "tool/call",
+                json!({"turn": 1, "step": 1, "callId": "cX", "name": "bash", "arguments": "{}"}),
+            ),
+            ev(
+                3,
+                "tool/result",
+                json!({"turn": 1, "step": 1, "message": {"id": "tr1", "content": [{"type": "tool-result", "toolCallId": "cX", "content": [{"type": "text", "text": "out"}], "isError": false}], "source": {"kind": "tool", "callId": "cX"}}, "error": null, "meta": null}),
+            ),
+        ],
+    );
+    let tool = nodes(&store, "s3")
+        .iter()
+        .find(|node| {
+            matches!(
+                &node.data,
+                NodeData::Tool { call: Some(call), .. } if call.call_id == "cX"
+            )
+        })
+        .expect("settled tool");
+    match &tool.data {
+        NodeData::Tool {
+            call: Some(call),
+            result: Some(_),
+            ..
+        } => assert_eq!(call.name, "bash", "backfilled call"),
+        other => panic!("expected backfilled tool, got {other:?}"),
+    }
+
+    // (d) assistant/message with a replace surface degrades to Unknown.
+    let mut store = SessionStore::new();
+    ingest_all(
+        &mut store,
+        "s4",
+        vec![ev_surface(
+            1,
+            "assistant/message",
+            json!({"turn": 1, "step": 1, "message": {"id": "m1", "content": [{"type": "text", "text": "hi"}], "source": {"kind": "model"}}, "usage": null}),
+            json!({"op": "replace", "start": 1, "end": 5}),
+        )],
+    );
+    assert!(
+        nodes(&store, "s4")
+            .iter()
+            .any(|node| matches!(node.data, NodeData::Unknown { .. })),
+        "assistant replace degrades: {:?}",
+        nodes(&store, "s4")
+    );
+
+    // (e) Compaction events out of order: a summary BEFORE its start, a
+    // checkpoint without a compactionId (skipped), and a summary whose
+    // text blocks are non-Text (no marker text).
+    let mut store = SessionStore::new();
+    ingest_all(
+        &mut store,
+        "s5",
+        vec![
+            ev(
+                1,
+                "compaction/summary",
+                json!({"compactionId": "cE", "summary": [{"type": "plugin-block", "x": 1}], "shadowedSeqs": [1], "shadowedTokenCount": 10}),
+            ),
+            ev_surface(
+                2,
+                "user/message",
+                user_msg(
+                    "mE",
+                    "replacement",
+                    json!({"kind": "plugin", "plugin": "compact"}),
+                ),
+                json!({"op": "replace", "start": 1, "end": 5}),
+            ),
+            ev_surface(
+                3,
+                "user/message",
+                user_msg(
+                    "mF",
+                    "replacement 2",
+                    json!({"kind": "plugin", "plugin": "compact", "compactionId": "cE"}),
+                ),
+                json!({"op": "replace", "start": 1, "end": 5}),
+            ),
+        ],
+    );
+    let markers: Vec<_> = nodes(&store, "s5")
+        .iter()
+        .filter(|node| matches!(node.data, NodeData::Compaction { .. }))
+        .collect();
+    assert_eq!(
+        markers.len(),
+        1,
+        "one checkpoint marker: {:?}",
+        nodes(&store, "s5")
+    );
+    match &markers[0].data {
+        NodeData::Compaction {
+            summary,
+            shadowed_item_count,
+            ..
+        } => {
+            assert_eq!(summary, &None, "non-Text summary has no marker text");
+            assert_eq!(shadowed_item_count, &Some(1));
+        }
+        other => panic!("expected compaction marker, got {other:?}"),
+    }
+}

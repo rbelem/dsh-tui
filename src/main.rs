@@ -95,6 +95,9 @@ async fn run_app(client: WireClient) -> Result<(), AppError> {
     if session_id.is_none() {
         app.last_error = Some(dsh_tui::i18n::tr(app.locale, "main.no_sessions").into());
     }
+    // #47: first run (no `onboarding_complete` flag) → the onboarding Q&A
+    // takeover runs after the gateway attaches.
+    app.maybe_enter_onboarding();
 
     let mut terminal = run::setup_terminal()?;
     let _guard = run::TerminalGuard;

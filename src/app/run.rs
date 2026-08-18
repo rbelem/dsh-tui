@@ -185,6 +185,12 @@ impl App {
                                 Some(Action::RenameSession { session_id, title }) => {
                                     self.rename_session(session_id, title, event_tx.clone())
                                 }
+                                Some(Action::RenameWorkspace { workspace_id, title }) => {
+                                    self.rename_workspace(workspace_id, title, event_tx.clone())
+                                }
+                                Some(Action::DeleteWorkspace(workspace_id)) => {
+                                    self.delete_workspace(workspace_id, event_tx.clone())
+                                }
                                 Some(Action::ForkSession(session_id)) => {
                                     self.fork_session(session_id, event_tx.clone())
                                 }
@@ -239,6 +245,19 @@ impl App {
                         }
                         Some(AppEvent::WorkspaceCreateDone { result }) => {
                             self.on_workspace_create_done(result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::WorkspaceRenameDone { result }) => {
+                            self.on_workspace_rename_done(result);
+                            self.needs_draw = true;
+                            self.draw_if_due(term, true)?;
+                        }
+                        Some(AppEvent::WorkspaceDeleteDone {
+                            workspace_id,
+                            result,
+                        }) => {
+                            self.on_workspace_delete_done(workspace_id, result);
                             self.needs_draw = true;
                             self.draw_if_due(term, true)?;
                         }
@@ -463,6 +482,15 @@ impl App {
                         },
                         area,
                     ),
+                    Mode::Onboarding(state) => frame.render_widget(
+                        crate::ui::onboarding::OnboardingView {
+                            state,
+                            notice,
+                            theme: &self.theme,
+                            locale: self.locale,
+                        },
+                        area,
+                    ),
                     Mode::Image(viewer) => frame.render_widget(
                         crate::ui::image_viewer::ImageViewerView {
                             viewer,
@@ -620,15 +648,18 @@ impl App {
             self.row_cache.sync(&self.store, session_id, &ctx);
             self.row_cache.render_dirty(&self.store, session_id, &ctx);
             if self.view.follow {
-                // Follow in LINE space: the viewport offset counts rendered
-                // lines (scroll moves by lines), so the bottom anchor is
-                // total lines minus the viewport height.
-                let total: usize = self
-                    .row_cache
-                    .lines()
-                    .iter()
-                    .map(|row| row.lines.len())
-                    .sum();
+                // #44: follow anchors in the VISIBLE view's row space —
+                // the trajectory ledger's rows in trajectory mode, the
+                // chat's rendered lines otherwise.
+                let total: usize = if self.view_mode == crate::app::ViewMode::Trajectory {
+                    crate::render::trajectory::ledger_rows(&self.store, session_id).len()
+                } else {
+                    self.row_cache
+                        .lines()
+                        .iter()
+                        .map(|row| row.lines.len())
+                        .sum()
+                };
                 self.view.offset = total.saturating_sub(chat_height as usize);
             }
         }
@@ -862,6 +893,10 @@ impl App {
                             selected: self.sidebar.selected,
                             focused: self.focus == Focus::Sidebar,
                             editor: self.rename_editor.as_ref().map(|(_, editor)| editor),
+                            workspace_rename: self
+                                .workspace_rename
+                                .as_ref()
+                                .map(|(id, editor)| (id, editor)),
                             workspace_editor: self.workspace_editor.as_ref(),
                             drawer: false,
                             theme: &self.theme,
@@ -871,35 +906,66 @@ impl App {
                     );
                 }
             }
-            if let Some(session_id) = &session_id {
-                frame.render_widget(
-                    ChatView {
-                        store: &self.store,
-                        session_id,
-                        offset,
-                        row_cache: &mut self.row_cache,
-                        images: &mut self.image_cache,
-                        // #39: the live running/elapsed overlay for tool
-                        // headers (empty map = idle — no per-tick chrome).
-                        live: Some(LiveChatState {
-                            frame: self.spinner_frame,
-                            running: &self.running_tool_since,
-                            spinner_style: style::active(&self.theme),
-                            elapsed_style: style::hint(&self.theme),
-                        }),
-                    },
-                    chat_area,
-                );
-            } else {
-                // No session selected: the empty-chat hero (title, subtitle,
-                // key hints) instead of a blank panel.
-                frame.render_widget(
-                    crate::ui::HeroView {
-                        theme: &self.theme,
-                        locale: self.locale,
-                    },
-                    chat_area,
-                );
+            // #44: the chat-area view — the chat transcript or the
+            // trajectory ledger — dispatches on `view_mode` (both render
+            // into the same `chat_area`; no session shows the hero either
+            // way).
+            match self.view_mode {
+                crate::app::ViewMode::Chat => {
+                    if let Some(session_id) = &session_id {
+                        frame.render_widget(
+                            ChatView {
+                                store: &self.store,
+                                session_id,
+                                offset,
+                                row_cache: &mut self.row_cache,
+                                images: &mut self.image_cache,
+                                // #39: the live running/elapsed overlay for tool
+                                // headers (empty map = idle — no per-tick chrome).
+                                live: Some(LiveChatState {
+                                    frame: self.spinner_frame,
+                                    running: &self.running_tool_since,
+                                    spinner_style: style::active(&self.theme),
+                                    elapsed_style: style::hint(&self.theme),
+                                }),
+                            },
+                            chat_area,
+                        );
+                    } else {
+                        // No session selected: the empty-chat hero (title,
+                        // subtitle, key hints) instead of a blank panel.
+                        frame.render_widget(
+                            crate::ui::HeroView {
+                                theme: &self.theme,
+                                locale: self.locale,
+                            },
+                            chat_area,
+                        );
+                    }
+                }
+                crate::app::ViewMode::Trajectory => {
+                    if let Some(session_id) = &session_id {
+                        frame.render_widget(
+                            crate::render::TrajectoryView {
+                                store: &self.store,
+                                session_id,
+                                offset,
+                                theme: &self.theme,
+                                locale: self.locale,
+                            },
+                            chat_area,
+                        );
+                    } else {
+                        // No session selected: the same empty-chat hero.
+                        frame.render_widget(
+                            crate::ui::HeroView {
+                                theme: &self.theme,
+                                locale: self.locale,
+                            },
+                            chat_area,
+                        );
+                    }
+                }
             }
             // #12: the transient selection highlight (REVERSED — reintroduced
             // for text selection only; the `▎`-stripe chrome is a different
@@ -1031,6 +1097,10 @@ impl App {
                         selected: self.sidebar.selected,
                         focused: true, // the drawer owns focus while open
                         editor: self.rename_editor.as_ref().map(|(_, editor)| editor),
+                        workspace_rename: self
+                            .workspace_rename
+                            .as_ref()
+                            .map(|(id, editor)| (id, editor)),
                         workspace_editor: None, // the drawer has no Add button
                         drawer: true,
                         theme: &self.theme,
@@ -1217,6 +1287,29 @@ impl App {
                     selected,
                     flat: sidebar_flat,
                     order_updated: order_by_updated,
+                    theme: &self.theme,
+                    locale: self.locale,
+                };
+                let (width, height) = popup.size(sidebar_area.width, sidebar_area.height);
+                let area = Rect {
+                    x: sidebar_area.x + sidebar_area.width.saturating_sub(width) / 2,
+                    y: sidebar_area.y + sidebar_area.height.saturating_sub(height) / 2,
+                    width,
+                    height: height.min(sidebar_area.height),
+                };
+                if area.height > 0 {
+                    frame.render_widget(popup, area);
+                }
+            }
+
+            // #46: the context menu (the sidebar's `m` key / the kebab
+            // clicks): a centered overlay over the sidebar pane, sized
+            // like the view-options popup.
+            if let Some(menu) = &self.context_menu {
+                let popup = crate::ui::context_menu::ContextMenuPopup {
+                    target: &menu.target,
+                    items: &menu.items,
+                    selected: menu.selected,
                     theme: &self.theme,
                     locale: self.locale,
                 };
@@ -1577,6 +1670,108 @@ impl App {
                     .clamp(crate::ui::sidebar::SidebarGroup::visible_len(
                         &self.sidebar_groups(),
                     ));
+            }
+            Err(error) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.sidebar_action_failed",
+                &[&error.to_string()],
+            )),
+        }
+    }
+
+    /// #46: spawn `workspace.rename` for the context menu's rename; the
+    /// result lands as [`AppEvent::WorkspaceRenameDone`]. One sidebar
+    /// action in flight at a time (the shared `sidebar_action_sending`
+    /// guard).
+    fn rename_workspace(
+        &mut self,
+        workspace_id: crate::wire::session::WorkspaceId,
+        title: String,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self.sidebar_action_sending {
+            return;
+        }
+        self.sidebar_action_sending = true;
+        self.workspace_rename = None; // a commit closes the editor
+        tokio::spawn(async move {
+            let result = client.workspace_rename(workspace_id, title).await;
+            let _ = event_tx.send(AppEvent::WorkspaceRenameDone { result });
+        });
+    }
+
+    /// #46: apply a finished `workspace.rename`: swap the workspace row's
+    /// title in place (the sidebar header reads it) and toast; a failure
+    /// toasts with the guard re-armed and no state change.
+    fn on_workspace_rename_done(
+        &mut self,
+        result: Result<crate::wire::workspace::WorkspaceRenameValue, ClientError>,
+    ) {
+        self.sidebar_action_sending = false;
+        match result {
+            Ok(value) => {
+                if let Some(existing) = self
+                    .workspaces
+                    .iter_mut()
+                    .find(|ws| ws.workspace_id == value.workspace.workspace_id)
+                {
+                    existing.title = value.workspace.title;
+                }
+                self.set_toast(crate::i18n::tr(self.locale, "toast.renamed"));
+            }
+            Err(error) => self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.sidebar_action_failed",
+                &[&error.to_string()],
+            )),
+        }
+    }
+
+    /// #46: spawn `workspace.delete` for the context menu's delete; the
+    /// result lands as [`AppEvent::WorkspaceDeleteDone`].
+    fn delete_workspace(
+        &mut self,
+        workspace_id: crate::wire::session::WorkspaceId,
+        event_tx: mpsc::UnboundedSender<AppEvent>,
+    ) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        if self.sidebar_action_sending {
+            return;
+        }
+        self.sidebar_action_sending = true;
+        tokio::spawn(async move {
+            let result = client.workspace_delete(workspace_id.clone()).await;
+            let _ = event_tx.send(AppEvent::WorkspaceDeleteDone {
+                workspace_id,
+                result,
+            });
+        });
+    }
+
+    /// #46: apply a finished `workspace.delete`: drop the workspace row and
+    /// its durable-order entry (its sessions reflow to ungrouped via the
+    /// membership derivation) and toast; a failure toasts with the guard
+    /// re-armed.
+    fn on_workspace_delete_done(
+        &mut self,
+        workspace_id: crate::wire::session::WorkspaceId,
+        result: Result<crate::wire::workspace::WorkspaceDeleteValue, ClientError>,
+    ) {
+        self.sidebar_action_sending = false;
+        match result {
+            Ok(_) => {
+                self.workspaces.retain(|ws| ws.workspace_id != workspace_id);
+                self.workspace_order.retain(|id| *id != workspace_id);
+                self.sidebar
+                    .clamp(crate::ui::sidebar::SidebarGroup::visible_len(
+                        &self.sidebar_groups(),
+                    ));
+                self.set_toast(crate::i18n::tr(self.locale, "toast.workspace_deleted"));
             }
             Err(error) => self.set_toast(crate::i18n::trf(
                 self.locale,

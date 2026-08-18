@@ -22,9 +22,11 @@ pub mod highlight;
 pub mod image;
 pub mod markdown;
 pub mod row_cache;
+pub mod trajectory;
 
 pub use chat_view::ChatView;
 pub use chat_view::{LiveChatState, SPINNER_FRAMES, format_elapsed};
 pub use image::{ImageCache, ImageProtocol, detect_protocol, picker_for};
 pub use markdown::{render_markdown, render_node};
 pub use row_cache::{CachedRow, RowCache};
+pub use trajectory::TrajectoryView;

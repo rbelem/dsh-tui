@@ -552,6 +552,9 @@ fn config_write_read_back_and_apply() {
             locale: None,
             keymap: dsh_tui::theme::Keymap::default(),
             gateway: Default::default(),
+            onboarding_complete: false,
+            workspace_path: None,
+            agent_preset: None,
         };
         config.save().expect("save");
         let path = Config::path().expect("config path");

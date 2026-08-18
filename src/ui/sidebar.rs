@@ -120,6 +120,10 @@ pub fn action_button_at(col: u16, locale: Locale) -> SidebarAction {
 pub struct SidebarGroup {
     /// Header text; `None` in flat mode (no header row rendered).
     pub title: Option<String>,
+    /// #46: the workspace this group's header names (workspace groups
+    /// only — ungrouped/archived headers carry `None`). The context
+    /// menu's rename/delete target and the header kebab.
+    pub workspace_id: Option<WorkspaceId>,
     /// Collapsed groups render only the header; their sessions are hidden
     /// and excluded from navigation (the archived group, v1).
     pub collapsed: bool,
@@ -192,6 +196,7 @@ pub fn build_groups(
         // Flat mode: the pre-grouping look, one title-less group.
         return vec![SidebarGroup {
             title: None,
+            workspace_id: None,
             collapsed: false,
             is_archived: false,
             sessions: (0..sessions.len()).collect(),
@@ -207,6 +212,7 @@ pub fn build_groups(
         if !live.is_empty() {
             groups.push(SidebarGroup {
                 title: None,
+                workspace_id: None,
                 collapsed: false,
                 is_archived: false,
                 sessions: live,
@@ -246,6 +252,7 @@ pub fn build_groups(
             }
             groups.push(SidebarGroup {
                 title: Some(workspace.title.clone()),
+                workspace_id: Some(workspace.workspace_id.clone()),
                 collapsed: false,
                 is_archived: false,
                 sessions: members,
@@ -260,6 +267,7 @@ pub fn build_groups(
         if !ungrouped.is_empty() {
             groups.push(SidebarGroup {
                 title: Some(tr(locale, "sidebar.ungrouped").to_string()),
+                workspace_id: None,
                 collapsed: false,
                 is_archived: false,
                 sessions: ungrouped,
@@ -273,6 +281,7 @@ pub fn build_groups(
                 "sidebar.archived",
                 &[&archived_group_sessions.len().to_string()],
             )),
+            workspace_id: None,
             collapsed: !archived_expanded,
             is_archived: true,
             sessions: archived_group_sessions,
@@ -379,6 +388,9 @@ pub struct SidebarView<'a> {
     /// The inline rename editor (`r`): while open it replaces the selected
     /// session row with an editable line (mirrors the queue editor).
     pub editor: Option<&'a Composer>,
+    /// #46: the inline workspace rename editor (the context menu's rename):
+    /// while open it replaces the matching workspace header row.
+    pub workspace_rename: Option<(&'a WorkspaceId, &'a Composer)>,
     /// 6g: the inline workspace-path editor (the `Add` button): while open
     /// it replaces the Search/Options/Add buttons row.
     pub workspace_editor: Option<&'a Composer>,
@@ -550,12 +562,47 @@ impl Widget for SidebarView<'_> {
                         .title
                         .as_deref()
                         .unwrap_or_default();
+                    // #46: the workspace rename editor replaces its header
+                    // row while open (mirrors the session rename editor).
+                    if let Some((workspace_id, editor)) = self.workspace_rename
+                        && self.groups[*group_index].workspace_id.as_ref() == Some(workspace_id)
+                    {
+                        let line = Line::from(vec![
+                            Span::styled("▎", style::selection_stripe(self.theme)),
+                            Span::styled(" > ", style::active(self.theme)),
+                            Span::styled(
+                                if editor.buffer().is_empty() {
+                                    tr(self.locale, "sidebar.rename_hint").to_string()
+                                } else {
+                                    editor.buffer().to_string()
+                                },
+                                style::active(self.theme),
+                            ),
+                            Span::styled("|", style::hint(self.theme)),
+                        ]);
+                        buf.set_line(inner.x, y, &line, inner.width);
+                        continue;
+                    }
                     buf.set_line(
                         inner.x,
                         y,
                         &Line::styled(title, style::hint(self.theme)),
                         inner.width,
                     );
+                    // #46: the workspace header's right-end `⋯` kebab opens
+                    // the workspace context menu (click target — the app's
+                    // mouse handler hit-tests the same edge).
+                    if self.groups[*group_index].workspace_id.is_some()
+                        && !self.groups[*group_index].is_archived
+                    {
+                        buf.set_stringn(
+                            inner.x + inner.width - 1,
+                            y,
+                            "⋯",
+                            1,
+                            style::hint(self.theme),
+                        );
+                    }
                 }
                 DisplayRow::Session { index, ordinal } => {
                     let summary = &self.sessions[*index];
@@ -628,6 +675,18 @@ impl Widget for SidebarView<'_> {
                         ));
                     }
                     buf.set_line(inner.x, y, &Line::from(spans), inner.width);
+                    // #46: the selected row's right-end `⋯` kebab opens the
+                    // session context menu (the web's per-row kebab; the
+                    // `m` key opens the same menu on the selected row).
+                    if selected {
+                        buf.set_stringn(
+                            inner.x + inner.width - 1,
+                            y,
+                            "⋯",
+                            1,
+                            style::hint(self.theme),
+                        );
+                    }
                 }
             }
         }
@@ -735,7 +794,7 @@ mod tests {
             SidebarAction::None,
             "past the row"
         );
-                // zh: "搜索"(0-3) gap(4) "选项"(5-8) gap(9) "添加"(10-13) — the
+        // zh: "搜索"(0-3) gap(4) "选项"(5-8) gap(9) "添加"(10-13) — the
         // CJK labels are 2 chars × 2 cells = 4 wide, so the ranges differ.
         assert_eq!(action_button_at(0, Locale::Zh), SidebarAction::Search);
         assert_eq!(action_button_at(3, Locale::Zh), SidebarAction::Search);
@@ -763,6 +822,7 @@ mod tests {
             groups,
             vec![SidebarGroup {
                 title: None,
+                workspace_id: None,
                 collapsed: false,
                 is_archived: false,
                 sessions: vec![0, 1],

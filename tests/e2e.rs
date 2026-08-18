@@ -41,8 +41,25 @@ impl AppUnderTest {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("TERM", "xterm-256color");
         // Isolate from the host config (~/.config/dsh-tui) for determinism.
-        let xdg = std::env::temp_dir().join(format!("dsh-tui-e2e-xdg-{}", std::process::id()));
+        // The per-spawn suffix keeps concurrent tests from clobbering each
+        // other's seeded config (the dir is created fresh each spawn).
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static XDG_SEQ: AtomicUsize = AtomicUsize::new(0);
+        let xdg = std::env::temp_dir().join(format!(
+            "dsh-tui-e2e-xdg-{}-{}",
+            std::process::id(),
+            XDG_SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::create_dir_all(&xdg);
+        // #47: seed a completed-onboarding flag — the e2e harness tests the
+        // app, not the first-run Q&A, so a fresh config must not take the
+        // onboarding takeover at startup.
+        let _ = std::fs::create_dir_all(xdg.join("dsh-tui"));
+        std::fs::write(
+            xdg.join("dsh-tui/config.toml"),
+            "onboarding_complete = true\n",
+        )
+        .expect("write seeded config");
         cmd.env("XDG_CONFIG_HOME", &xdg);
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -598,7 +615,9 @@ async fn missing_dsh_port_exits_with_a_hint() {
     let _ = std::fs::create_dir_all(xdg.join("dsh-tui"));
     std::fs::write(
         xdg.join("dsh-tui/config.toml"),
-        "[gateway]\nport = 18769\nauto_start = false\n",
+        // #47: the onboarding flag must be set — a first-run takeover would
+        // intercept the no-gateway exit contract.
+        "onboarding_complete = true\n[gateway]\nport = 18769\nauto_start = false\n",
     )
     .expect("write isolated config");
     cmd.env("XDG_CONFIG_HOME", &xdg);

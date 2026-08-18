@@ -76,6 +76,16 @@ pub enum Focus {
     Sidebar,
 }
 
+/// #44: the chat-area view: the chat transcript or the trajectory ledger
+/// (both render into the same `chat_area`; the mode is app-lifetime state,
+/// surviving session switches).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ViewMode {
+    #[default]
+    Chat,
+    Trajectory,
+}
+
 impl Focus {
     /// The next surface in the Tab cycle.
     pub fn next(self) -> Self {
@@ -139,6 +149,16 @@ pub enum Action {
     /// Sidebar `a`: archive the session (spawned `workspace.archiveSession`;
     /// the result lands as [`AppEvent::ArchiveDone`]).
     ArchiveSession(SessionId),
+    /// #46: the context menu's workspace rename committed (spawned
+    /// `workspace.rename`; the result lands as
+    /// [`AppEvent::WorkspaceRenameDone`]).
+    RenameWorkspace {
+        workspace_id: crate::wire::session::WorkspaceId,
+        title: String,
+    },
+    /// #46: the context menu's delete (spawned `workspace.delete`; the
+    /// result lands as [`AppEvent::WorkspaceDeleteDone`]).
+    DeleteWorkspace(crate::wire::session::WorkspaceId),
     /// 6g: the Add-button path editor committed this path (spawned
     /// `workspace.create`; the result lands as
     /// [`AppEvent::WorkspaceCreateDone`]).
@@ -288,6 +308,9 @@ pub struct App {
     pub store: SessionStore,
     pub row_cache: RowCache,
     pub view: ViewState,
+    /// #44: whether the chat area shows the chat transcript or the
+    /// trajectory ledger (`T` toggles; app-lifetime state).
+    pub view_mode: ViewMode,
     pub active_session: Option<SessionId>,
     /// The sidebar's session rows: the attach flow's `session.list` snapshot
     /// plus live host-stream updates (`host/session-added|removed|status`).
@@ -322,6 +345,16 @@ pub struct App {
     /// 6f: the view-options popup (`Options` button) — None while closed.
     /// Owns the keyboard while open.
     pub view_options: Option<ViewOptionsState>,
+    /// #46: the context menu popup (`m` in the sidebar, or the kebab on a
+    /// workspace header / session row) — None while closed. Owns the
+    /// keyboard while open (mirrors the view-options popup).
+    pub context_menu: Option<crate::ui::context_menu::ContextMenuState>,
+    /// #46: the inline rename editor for a workspace (the context menu's
+    /// rename): the target workspace id plus a Composer seeded with the
+    /// current title; Enter commits (spawned `workspace.rename`), Esc
+    /// cancels, and all navigation is inert while it's open (mirrors
+    /// `rename_editor`).
+    pub workspace_rename: Option<(crate::wire::session::WorkspaceId, Composer)>,
     /// 6g: the inline workspace-path editor (the `Add` button): a Composer
     /// seeded with a path; Enter commits `workspace.create` (spawned via
     /// the back-channel), Esc cancels, and sidebar navigation is inert
@@ -495,6 +528,7 @@ impl Default for App {
             store: SessionStore::new(),
             row_cache: RowCache::new(),
             view: ViewState::default(),
+            view_mode: ViewMode::default(),
             active_session: None,
             sessions: Vec::new(),
             workspaces: Vec::new(),
@@ -506,6 +540,8 @@ impl Default for App {
             order_by_updated: false,
             view_options: None,
             workspace_editor: None,
+            context_menu: None,
+            workspace_rename: None,
             focus: Focus::Composer,
             pane_prefix: false,
             composer: Composer::new(),
@@ -919,6 +955,12 @@ impl App {
         if self.view_options.is_some() {
             return Some(self.handle_view_options_key(key));
         }
+        // #46: the context menu owns the keyboard while open (`m` in the
+        // sidebar, or the kebab on a workspace header / session row;
+        // Ctrl+Q/Ctrl+C above stay global).
+        if self.context_menu.is_some() {
+            return Some(self.handle_context_menu_key(key));
+        }
         // #19/#27: the narrow-terminal drawer owns the keys while open —
         // ↑/↓ navigate, Enter selects (and closes), Esc/s close. Precedence
         // over the normal keys (it is NOT part of any_overlay_open — the
@@ -937,6 +979,17 @@ impl App {
             } else {
                 self.toggle_sidebar_collapse()
             });
+        }
+        // #44: `T` (rebindable via `[keymap] trajectory-toggle`) switches
+        // the chat area between the chat transcript and the trajectory
+        // ledger. Focus-gated so the composer keeps typing `T` (the chat
+        // and sidebar both toggle; a fresh toggle re-clamps the scroll).
+        if self.config.keymap.matches("trajectory-toggle", key) && self.focus != Focus::Composer {
+            self.view_mode = match self.view_mode {
+                ViewMode::Chat => ViewMode::Trajectory,
+                ViewMode::Trajectory => ViewMode::Chat,
+            };
+            return Some(Action::None);
         }
         // Ctrl+W arms the vim pane prefix; the next h/j/k/l moves focus
         // (Sidebar/Chat/Composer), any other key disarms it.
@@ -1028,6 +1081,122 @@ impl App {
             self.focus = Focus::Chat;
         }
         Action::None
+    }
+
+    /// #46: the context menu's bindings: `j`/`k` (or arrows) move the
+    /// cursor, `Enter` executes the highlighted action, `Esc` closes.
+    /// Everything else is inert while the menu is open.
+    fn handle_context_menu_key(&mut self, key: KeyEvent) -> Action {
+        use crate::ui::context_menu::{ContextMenuAction, ContextMenuTarget};
+        use crossterm::event::KeyCode;
+        let Some(state) = &mut self.context_menu else {
+            return Action::None;
+        };
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => state.move_cursor(-1),
+            KeyCode::Down | KeyCode::Char('j') => state.move_cursor(1),
+            KeyCode::Enter => {
+                let action = state.items.get(state.selected).map(|item| item.action);
+                let target = state.target.clone();
+                self.context_menu = None; // every execute closes the menu
+                // The in-flight guard mirrors the r/f/a shortcuts: while a
+                // sidebar action is being sent, executes are inert.
+                if self.sidebar_action_sending {
+                    return Action::None;
+                }
+                let Some(action) = action else {
+                    return Action::None;
+                };
+                return match (target, action) {
+                    (ContextMenuTarget::Session { id }, ContextMenuAction::Rename) => {
+                        self.open_rename_editor_for(&id);
+                        Action::None
+                    }
+                    (ContextMenuTarget::Session { id }, ContextMenuAction::Fork) => {
+                        Action::ForkSession(id)
+                    }
+                    (ContextMenuTarget::Session { id }, ContextMenuAction::Archive) => {
+                        Action::ArchiveSession(id)
+                    }
+                    (ContextMenuTarget::Workspace { id }, ContextMenuAction::Rename) => {
+                        self.open_workspace_rename_editor(&id);
+                        Action::None
+                    }
+                    (ContextMenuTarget::Workspace { id }, ContextMenuAction::DeleteWorkspace) => {
+                        Action::DeleteWorkspace(id)
+                    }
+                    // Menus only build valid target/action pairs; the
+                    // remaining combinations are defensive no-ops.
+                    _ => Action::None,
+                };
+            }
+            KeyCode::Esc => self.context_menu = None,
+            _ => {}
+        }
+        Action::None
+    }
+
+    /// #46: open the session context menu for the sidebar's selected row
+    /// (`m`): Rename / Fork / Archive. Inert while an action is in flight
+    /// (mirrors the `r`/`f`/`a` guard).
+    fn open_context_menu(&mut self) {
+        if self.sidebar_action_sending {
+            return;
+        }
+        let Some(index) = crate::ui::sidebar::SidebarGroup::visible_session(
+            &self.sidebar_groups(),
+            self.sidebar.selected,
+        ) else {
+            return;
+        };
+        let session_id = self.sessions[index].session_id.clone();
+        self.open_context_menu_for(&session_id);
+    }
+
+    /// #46: the shared session-menu opener (the `m` key and the row kebab
+    /// click both land here).
+    fn open_context_menu_for(&mut self, session_id: &SessionId) {
+        if self.sidebar_action_sending {
+            return;
+        }
+        self.context_menu = Some(crate::ui::context_menu::ContextMenuState::for_session(
+            session_id.clone(),
+            self.locale,
+        ));
+    }
+
+    /// #46: open the workspace context menu for `workspace_id` (the kebab
+    /// on a workspace header): Rename / Delete workspace.
+    pub fn open_workspace_context_menu(
+        &mut self,
+        workspace_id: &crate::wire::session::WorkspaceId,
+    ) {
+        if self.sidebar_action_sending {
+            return;
+        }
+        self.context_menu = Some(crate::ui::context_menu::ContextMenuState::for_workspace(
+            workspace_id.clone(),
+            self.locale,
+        ));
+    }
+
+    /// #46: open the inline workspace rename editor, seeded with the
+    /// workspace's current title (the context menu's rename).
+    pub fn open_workspace_rename_editor(
+        &mut self,
+        workspace_id: &crate::wire::session::WorkspaceId,
+    ) {
+        let title = self
+            .workspaces
+            .iter()
+            .find(|ws| &ws.workspace_id == workspace_id)
+            .map(|ws| ws.title.clone())
+            .unwrap_or_default();
+        let mut editor = Composer::new();
+        for c in title.chars() {
+            editor.insert_char(c);
+        }
+        self.workspace_rename = Some((workspace_id.clone(), editor));
     }
 
     /// 6f: the view-options popup's bindings: `j`/`k` (or arrows) move the
@@ -1691,6 +1860,125 @@ impl App {
             ));
     }
 
+    /// #47: first-run detection — the config's `onboarding_complete` flag
+    /// absent/false (a missing config file counts) → enter the onboarding
+    /// Q&A takeover at startup. Called from `main` after the gateway
+    /// attaches.
+    pub fn maybe_enter_onboarding(&mut self) {
+        if !self.config.onboarding_complete {
+            self.mode = Mode::Onboarding(crate::ui::onboarding::OnboardingState::new());
+        }
+    }
+
+    /// #47: onboarding bindings — typing edits the active question's
+    /// inline editor, `Enter` advances (Workspace → Preset → done), `Esc`
+    /// quits on the first question and goes back on later ones.
+    fn handle_onboarding_key(&mut self, key: KeyEvent) -> Action {
+        use crate::ui::onboarding::OnboardingStep;
+        use crossterm::event::KeyCode;
+        let step = match &self.mode {
+            Mode::Onboarding(state) => state.step,
+            _ => return Action::None,
+        };
+        match key.code {
+            KeyCode::Char(c) => {
+                if let Mode::Onboarding(state) = &mut self.mode {
+                    match state.step {
+                        OnboardingStep::Workspace => state.path_editor.insert_char(c),
+                        OnboardingStep::Preset => state.preset_editor.insert_char(c),
+                    }
+                }
+                Action::None
+            }
+            KeyCode::Backspace => {
+                if let Mode::Onboarding(state) = &mut self.mode {
+                    match state.step {
+                        OnboardingStep::Workspace => state.path_editor.backspace(),
+                        OnboardingStep::Preset => state.preset_editor.backspace(),
+                    }
+                }
+                Action::Input
+            }
+            KeyCode::Left => {
+                if let Mode::Onboarding(state) = &mut self.mode {
+                    match state.step {
+                        OnboardingStep::Workspace => state.path_editor.move_left(),
+                        OnboardingStep::Preset => state.preset_editor.move_left(),
+                    }
+                }
+                Action::None
+            }
+            KeyCode::Right => {
+                if let Mode::Onboarding(state) = &mut self.mode {
+                    match state.step {
+                        OnboardingStep::Workspace => state.path_editor.move_right(),
+                        OnboardingStep::Preset => state.preset_editor.move_right(),
+                    }
+                }
+                Action::None
+            }
+            KeyCode::Enter => {
+                // Read the editors (owned) so the completion path can
+                // dispatch on `self` without a conflicting borrow.
+                let (path, preset) = match &self.mode {
+                    Mode::Onboarding(state) => (
+                        state.path_editor.buffer().to_string(),
+                        state.preset_editor.buffer().to_string(),
+                    ),
+                    _ => return Action::None,
+                };
+                match step {
+                    OnboardingStep::Workspace => {
+                        if path.trim().is_empty() {
+                            self.hint = Some(
+                                crate::i18n::tr(self.locale, "onboarding.path_required").into(),
+                            );
+                            return Action::None;
+                        }
+                        if let Mode::Onboarding(state) = &mut self.mode {
+                            state.step = OnboardingStep::Preset;
+                        }
+                        Action::None
+                    }
+                    OnboardingStep::Preset => self.complete_onboarding(path, preset),
+                }
+            }
+            KeyCode::Esc => match step {
+                OnboardingStep::Workspace => Action::Quit,
+                OnboardingStep::Preset => {
+                    if let Mode::Onboarding(state) = &mut self.mode {
+                        state.step = OnboardingStep::Workspace;
+                    }
+                    Action::None
+                }
+            },
+            _ => Action::None,
+        }
+    }
+
+    /// #47: finish the Q&A — persist the completed flag + chosen values to
+    /// the config, return to the chat, and dispatch `workspace.create` for
+    /// the chosen workspace directory (the sidebar absorbs it via the
+    /// existing create-done path).
+    fn complete_onboarding(&mut self, path: String, preset: String) -> Action {
+        self.config.onboarding_complete = true;
+        self.config.workspace_path = Some(path.clone());
+        if !preset.trim().is_empty() {
+            self.config.agent_preset = Some(preset.trim().to_string());
+        }
+        if let Err(error) = self.config.save() {
+            self.set_toast(crate::i18n::trf(
+                self.locale,
+                "toast.config_save_failed",
+                &[&error.to_string()],
+            ));
+        } else {
+            self.set_toast(crate::i18n::tr(self.locale, "onboarding.done"));
+        }
+        self.mode = Mode::Chat;
+        Action::CreateWorkspace(path)
+    }
+
     /// Takeover bindings (Q6/Q13). Approval: `y` allow once, `n`/`Esc`
     /// reject (blocking — there is no dismiss, the server waits for a
     /// response). Question: `Tab` cycles questions, `Up`/`Down`/`j`/`k`
@@ -1756,6 +2044,7 @@ impl App {
                 _ => Action::None,
             },
             Mode::Settings(_) => self.handle_settings_key(key),
+            Mode::Onboarding(_) => self.handle_onboarding_key(key),
             Mode::Image(viewer) => match key.code {
                 KeyCode::Char('n') => {
                     viewer.next();
@@ -2609,6 +2898,14 @@ impl App {
         };
         match display {
             crate::ui::sidebar::DisplayRow::Header(group_index) => {
+                // #46: a click on a workspace header's right-end `⋯` kebab
+                // opens that workspace's context menu (rename/delete).
+                if let Some(workspace_id) = &groups[*group_index].workspace_id
+                    && col >= inner.width.saturating_sub(1)
+                {
+                    self.open_workspace_context_menu(workspace_id);
+                    return Action::None;
+                }
                 // Only the archived group is collapsible in the v1 model —
                 // its header click toggles the expansion (workspace and
                 // ungrouped headers are inert).
@@ -2621,6 +2918,13 @@ impl App {
             }
             crate::ui::sidebar::DisplayRow::Session { index, ordinal } => {
                 self.sidebar.selected = *ordinal;
+                // #46: a click on the row's right-end `⋯` kebab opens the
+                // session context menu instead of switching.
+                if col >= inner.width.saturating_sub(1) {
+                    let session_id = self.sessions[*index].session_id.clone();
+                    self.open_context_menu_for(&session_id);
+                    return Action::None;
+                }
                 self.switch_to_session(self.sessions[*index].session_id.clone())
             }
         }
@@ -2808,6 +3112,40 @@ impl App {
     /// expanded archived group's rows are reachable like any other.
     fn handle_sidebar_key(&mut self, key: KeyEvent) -> Option<Action> {
         use crossterm::event::KeyCode;
+        // #46: the inline workspace rename editor (`m` → Rename): typing
+        // edits, Enter commits (spawned `workspace.rename`), Esc cancels,
+        // and every other key is inert while it's open (mirrors the
+        // rename editor).
+        if self.workspace_rename.is_some() {
+            match key.code {
+                KeyCode::Char(c) => {
+                    if let Some((_, editor)) = &mut self.workspace_rename {
+                        editor.insert_char(c);
+                    }
+                }
+                KeyCode::Backspace => {
+                    if let Some((_, editor)) = &mut self.workspace_rename {
+                        editor.backspace();
+                    }
+                }
+                KeyCode::Enter => {
+                    let Some((workspace_id, mut editor)) = self.workspace_rename.take() else {
+                        return Some(Action::None);
+                    };
+                    let title = editor.take();
+                    if title.trim().is_empty() {
+                        return Some(Action::None); // empty rename: cancel
+                    }
+                    return Some(Action::RenameWorkspace {
+                        workspace_id,
+                        title,
+                    });
+                }
+                KeyCode::Esc => self.workspace_rename = None,
+                _ => {}
+            }
+            return Some(Action::None);
+        }
         // 6g: the inline workspace-path editor (the `Add` button): typing
         // edits, Enter commits (spawned `workspace.create`), Esc cancels,
         // and every other key is inert while it's open (mirrors the
@@ -2925,6 +3263,12 @@ impl App {
                 self.open_rename_editor();
                 Some(Action::None)
             }
+            // #46: `m` opens the session context menu (Rename / Fork /
+            // Archive) for the selected row — the web's kebab menu.
+            KeyCode::Char('m') => {
+                self.open_context_menu();
+                Some(Action::None)
+            }
             KeyCode::Char('f') => {
                 if self.sidebar_action_sending {
                     return Some(Action::None);
@@ -2969,7 +3313,20 @@ impl App {
         ) else {
             return;
         };
-        let summary = &self.sessions[index];
+        let session_id = self.sessions[index].session_id.clone();
+        self.open_rename_editor_for(&session_id);
+    }
+
+    /// #46: the shared rename-editor opener (the sidebar `r` key and the
+    /// context menu's rename both land here).
+    fn open_rename_editor_for(&mut self, session_id: &SessionId) {
+        let Some(summary) = self
+            .sessions
+            .iter()
+            .find(|summary| &summary.session_id == session_id)
+        else {
+            return;
+        };
         let title = summary
             .projections
             .as_ref()
@@ -3332,12 +3689,23 @@ impl App {
                 .offset
                 .saturating_sub(delta.unsigned_abs() as usize);
         }
-        let total: usize = self
-            .row_cache
-            .lines()
-            .iter()
-            .map(|row| row.lines.len())
-            .sum();
+        // #44: the scroll extent is the visible view's row count — the
+        // trajectory ledger's rows in trajectory mode, the chat's cached
+        // lines otherwise.
+        let total: usize = if self.view_mode == ViewMode::Trajectory {
+            self.active_session
+                .as_ref()
+                .map(|session_id| {
+                    crate::render::trajectory::ledger_rows(&self.store, session_id).len()
+                })
+                .unwrap_or(0)
+        } else {
+            self.row_cache
+                .lines()
+                .iter()
+                .map(|row| row.lines.len())
+                .sum()
+        };
         let max = total.saturating_sub(self.view.viewport_height as usize);
         self.view.offset = self.view.offset.min(max);
         // #36: the bottom re-arms follow (content that fits the viewport

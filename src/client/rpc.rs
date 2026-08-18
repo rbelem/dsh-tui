@@ -30,7 +30,8 @@ use crate::wire::settings::{
 use crate::wire::skills::{SkillListRequest, SkillListValue};
 use crate::wire::workspace::{
     WorkspaceArchiveSessionRequest, WorkspaceArchiveSessionValue, WorkspaceCreateRequest,
-    WorkspaceCreateValue, WorkspaceListRequest, WorkspaceListValue,
+    WorkspaceCreateValue, WorkspaceDeleteRequest, WorkspaceDeleteValue, WorkspaceListRequest,
+    WorkspaceListValue, WorkspaceRenameRequest, WorkspaceRenameValue,
 };
 
 impl WireClient {
@@ -265,6 +266,32 @@ impl WireClient {
             WorkspaceArchiveSessionRequest { session_id },
         )
         .await
+    }
+
+    /// `workspace.rename` — set the workspace title (host-validated).
+    pub async fn workspace_rename(
+        &self,
+        workspace_id: WorkspaceId,
+        title: String,
+    ) -> Result<WorkspaceRenameValue, ClientError> {
+        self.call(
+            "workspace.rename",
+            WorkspaceRenameRequest {
+                workspace_id,
+                title,
+            },
+        )
+        .await
+    }
+
+    /// `workspace.delete` — delete the workspace row (its sessions reflow
+    /// to ungrouped via the membership derivation).
+    pub async fn workspace_delete(
+        &self,
+        workspace_id: WorkspaceId,
+    ) -> Result<WorkspaceDeleteValue, ClientError> {
+        self.call("workspace.delete", WorkspaceDeleteRequest { workspace_id })
+            .await
     }
 
     /// Answer an `approval/requested` frame. `rpc_id` MUST echo the frame's

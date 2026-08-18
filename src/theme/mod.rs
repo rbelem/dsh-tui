@@ -319,6 +319,19 @@ pub struct Config {
     /// Gateway lifecycle settings (port fallback + auto-start).
     #[serde(default)]
     pub gateway: GatewayConfig,
+    /// #47: the first-run onboarding Q&A was completed. Absent/false (a
+    /// missing config file parses to `false`) triggers the onboarding
+    /// takeover at startup.
+    #[serde(default)]
+    pub onboarding_complete: bool,
+    /// #47: the workspace directory chosen during onboarding. Persisted
+    /// (and `workspace.create` runs against it on completion).
+    #[serde(default)]
+    pub workspace_path: Option<String>,
+    /// #47: the agent preset chosen during onboarding (the `session.create`
+    /// `agent_preset` param — a later lane can use it for new sessions).
+    #[serde(default)]
+    pub agent_preset: Option<String>,
 }
 
 impl Config {
@@ -380,6 +393,10 @@ pub const DEFAULT_KEYBINDINGS: &[(&str, &str)] = &[
     // #19: the narrow-terminal drawer (`s` toggles it at <80 cols; never
     // intercepts composer typing — the keymap check is focus-gated).
     ("drawer-toggle", "s"),
+    // #44: `T` (shift+t) switches the chat area between the chat transcript
+    // and the trajectory ledger (focus-gated so the composer keeps typing
+    // `T`; rebindable via `[keymap]`).
+    ("trajectory-toggle", "T"),
     // composer
     ("composer.submit", "enter"),
     ("composer.newline", "shift+enter"),

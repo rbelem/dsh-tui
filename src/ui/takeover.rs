@@ -36,6 +36,9 @@ pub enum Mode {
     Question(QuestionTakeover),
     /// The two-pane settings view (Ctrl+, opens, Esc closes).
     Settings(crate::ui::settings::SettingsState),
+    /// #47: the first-run onboarding Q&A (a full-screen takeover; Enter
+    /// advances, Esc quits on the first question and goes back after).
+    Onboarding(crate::ui::onboarding::OnboardingState),
     /// The full-screen image viewer (`v` from the chat; Esc/q closes).
     Image(crate::ui::image_viewer::ImageViewer),
 }

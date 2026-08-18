@@ -1590,3 +1590,144 @@ async fn tool_header_click_toggles_the_fold() {
     assert!(view.contains("▸ [tool] bash"), "collapsed again: {view}");
     assert!(!view.contains("file.txt"), "output hidden again: {view}");
 }
+
+// ---------------------------------------------------------------------------
+// sidebar chrome rows (6a–6h): the fixed rows above the list window
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sidebar_chrome_clicks_open_the_right_surfaces() {
+    let mut app = App::default();
+    app.focus = Focus::Composer;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            // brand row: the right-end `«` collapses the sidebar.
+            down(19, 0),
+            up(19, 0),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(app.sidebar_collapsed, "brand `«` collapsed the sidebar");
+
+    // Reopen (the collapsed gutter is one big reopen affordance).
+    let mut app = App::default();
+    app.focus = Focus::Composer;
+    app.sidebar_collapsed = true;
+    app.terminal_width = 120;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(0, 5), // the 1-col gutter: any click reopens
+            up(0, 5),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(!app.sidebar_collapsed, "gutter click reopened the sidebar");
+
+    // New Session button (row 1), the Workspaces header (row 3), and the
+    // Settings row (the second-to-last inner row) route their surfaces.
+    let mut app = App::default();
+    app.focus = Focus::Composer;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(5, 1), // the New Session button
+            up(5, 1),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(app.new_session.is_some(), "New Session opened the picker");
+
+    let mut app = App::default();
+    app.focus = Focus::Composer;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(5, 3), // the Workspaces section header — inert
+            up(5, 3),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert_eq!(app.mode, dsh_tui::ui::takeover::Mode::Chat, "header inert");
+
+    let mut app = App::default();
+    app.focus = Focus::Composer;
+    let backend = TestBackend::new(120, 30);
+    let mut term = Terminal::new(backend).unwrap();
+    run_with(
+        &mut app,
+        &mut term,
+        vec![
+            draw_force(),
+            down(5, 28), // the Settings row
+            up(5, 28),
+            AppEvent::Key(ctrl(KeyCode::Char('q'))),
+        ],
+    )
+    .await;
+    assert!(
+        matches!(app.mode, dsh_tui::ui::takeover::Mode::Settings(_)),
+        "Settings row opened the settings view"
+    );
+}
+
+#[tokio::test]
+async fn sidebar_buttons_row_routes_search_options_add() {
+    // Row 4: Search / Options / Add, hit-tested by column. Each opens its
+    // surface (the clicks execute the sidebar_click chrome arms); ctrl+q
+    // quits globally even with the popup open.
+    // (col, the surface the click should have opened)
+    type SurfaceCheck = (u16, fn(&App) -> bool);
+    let surfaces: [SurfaceCheck; 3] = [
+        (2, |app| app.sidebar_search.is_some()), // Search (cols 2..8)
+        (10, |app| app.view_options.is_some()),  // Options (cols 9..16)
+        (18, |app| app.workspace_editor.is_some()), // Add (cols 17..20)
+    ];
+    for (col, opened) in surfaces {
+        let mut app = App::default();
+        app.focus = Focus::Composer;
+        let backend = TestBackend::new(120, 30);
+        let mut term = Terminal::new(backend).unwrap();
+        run_with(
+            &mut app,
+            &mut term,
+            vec![
+                AppEvent::Key(key(KeyCode::F(1))),
+                down(col, 4),
+                up(col, 4),
+                AppEvent::Key(key(KeyCode::F(1))), // draw the opened surface
+                AppEvent::Key(ctrl(KeyCode::Char('q'))),
+            ],
+        )
+        .await;
+        assert!(opened(&app), "button at col {col} opened its surface");
+        // Search/Options never steal focus; the Add path editor takes it.
+        let expected = if col == 18 {
+            Focus::Sidebar
+        } else {
+            Focus::Composer
+        };
+        assert_eq!(app.focus, expected, "focus at col {col}");
+    }
+}
