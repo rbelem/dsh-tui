@@ -98,8 +98,10 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("marker.tool_result_failed", "[工具结果] 失败：{0}"),
     ("marker.turn_error", "[回合错误：{0}]"),
     ("marker.unknown", "[未知：{0}]"),
+    ("onboarding.cwd_default", "留空则提交当前目录：{0}"),
     ("onboarding.done", "欢迎 — 工作区已就绪"),
-    ("onboarding.path_required", "请输入目录路径以继续"),
+    ("onboarding.picker_recent", "最近"),
+    ("onboarding.picker_workspaces", "工作区"),
     ("onboarding.placeholder", "输入 — 回车继续"),
     (
         "onboarding.placeholder_workspace",

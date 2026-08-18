@@ -110,11 +110,13 @@ pub const STRINGS: &[(&str, &str)] = &[
     ("marker.tool_result_failed", "[tool-result] failed: {0}"),
     ("marker.turn_error", "[turn error: {0}]"),
     ("marker.unknown", "[unknown: {0}]"),
-    ("onboarding.done", "welcome — workspace set up"),
     (
-        "onboarding.path_required",
-        "enter a directory path to continue",
+        "onboarding.cwd_default",
+        "blank commits the current directory: {0}",
     ),
+    ("onboarding.done", "welcome — workspace set up"),
+    ("onboarding.picker_recent", "recent"),
+    ("onboarding.picker_workspaces", "workspaces"),
     ("onboarding.placeholder", "type — enter to continue"),
     (
         "onboarding.placeholder_workspace",

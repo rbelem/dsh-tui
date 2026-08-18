@@ -1863,16 +1863,28 @@ impl App {
     /// #47: first-run detection — the config's `onboarding_complete` flag
     /// absent/false (a missing config file counts) → enter the onboarding
     /// Q&A takeover at startup. Called from `main` after the gateway
-    /// attaches.
+    /// attaches. #50: the Workspace picker is seeded with the gateway's
+    /// workspace paths (updated_at desc) + the real cwd; the zoxide-recent
+    /// list is fetched lazily on the first Workspace-step touch.
     pub fn maybe_enter_onboarding(&mut self) {
         if !self.config.onboarding_complete {
-            self.mode = Mode::Onboarding(crate::ui::onboarding::OnboardingState::new());
+            let workspace_paths = crate::ui::onboarding::workspace_paths_sorted(&self.workspaces);
+            let cwd = std::env::current_dir()
+                .map(|dir| dir.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            self.mode = Mode::Onboarding(crate::ui::onboarding::OnboardingState::for_workspaces(
+                workspace_paths,
+                cwd,
+            ));
         }
     }
 
     /// #47: onboarding bindings — typing edits the active question's
     /// inline editor, `Enter` advances (Workspace → Preset → done), `Esc`
-    /// quits on the first question and goes back on later ones.
+    /// quits on the first question and goes back on later ones. #50: on
+    /// the Workspace step, Up/k and Down/j move the picker's highlight,
+    /// typing re-filters, and `Enter` commits the highlighted candidate,
+    /// else the typed path, else the cwd.
     fn handle_onboarding_key(&mut self, key: KeyEvent) -> Action {
         use crate::ui::onboarding::OnboardingStep;
         use crossterm::event::KeyCode;
@@ -1880,24 +1892,75 @@ impl App {
             Mode::Onboarding(state) => state.step,
             _ => return Action::None,
         };
+        // #50: the zoxide-recent list is fetched once, lazily, the first
+        // time the picker step is touched (never during tests — the state
+        // is injected with fetched dirs). Esc (quit) skips the fetch.
+        if step == OnboardingStep::Workspace
+            && key.code != KeyCode::Esc
+            && let Mode::Onboarding(state) = &mut self.mode
+        {
+            state.ensure_zoxide();
+        }
         match key.code {
-            KeyCode::Char(c) => {
-                if let Mode::Onboarding(state) = &mut self.mode {
-                    match state.step {
-                        OnboardingStep::Workspace => state.path_editor.insert_char(c),
-                        OnboardingStep::Preset => state.preset_editor.insert_char(c),
+            KeyCode::Esc => match step {
+                OnboardingStep::Workspace => Action::Quit,
+                OnboardingStep::Preset => {
+                    if let Mode::Onboarding(state) = &mut self.mode {
+                        state.step = OnboardingStep::Workspace;
                     }
+                    Action::None
+                }
+            },
+            KeyCode::Enter => {
+                // Read the editors (owned) so the completion path can
+                // dispatch on `self` without a conflicting borrow.
+                let (path, preset) = match &self.mode {
+                    Mode::Onboarding(state) => (
+                        state.path_editor.buffer().to_string(),
+                        state.preset_editor.buffer().to_string(),
+                    ),
+                    _ => return Action::None,
+                };
+                match step {
+                    OnboardingStep::Workspace => {
+                        // #50: Enter commits the highlighted candidate,
+                        // else the typed path, else the cwd — the chosen
+                        // path is written into the editor so the next step
+                        // (and the completion's `workspace.create`) read it.
+                        let commit = match &self.mode {
+                            Mode::Onboarding(state) => state.workspace_commit_path(),
+                            _ => return Action::None,
+                        };
+                        if let Mode::Onboarding(state) = &mut self.mode {
+                            state.path_editor.set_text(&commit);
+                            state.step = OnboardingStep::Preset;
+                        }
+                        let _ = path;
+                        Action::None
+                    }
+                    OnboardingStep::Preset => self.complete_onboarding(path, preset),
+                }
+            }
+            // #50: the picker's highlight moves (clamped to the visible
+            // list) on the Workspace step — before the generic Char arm so
+            // `j`/`k` never type into the path buffer.
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Mode::Onboarding(state) = &mut self.mode
+                    && state.step == OnboardingStep::Workspace
+                {
+                    state.selection = state.selection.saturating_sub(1);
                 }
                 Action::None
             }
-            KeyCode::Backspace => {
-                if let Mode::Onboarding(state) = &mut self.mode {
-                    match state.step {
-                        OnboardingStep::Workspace => state.path_editor.backspace(),
-                        OnboardingStep::Preset => state.preset_editor.backspace(),
-                    }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Mode::Onboarding(state) = &mut self.mode
+                    && state.step == OnboardingStep::Workspace
+                {
+                    let max = state.visible_len().saturating_sub(1);
+                    state.selection = state.selection.min(max);
+                    state.selection = state.selection.saturating_add(1).min(max);
                 }
-                Action::Input
+                Action::None
             }
             KeyCode::Left => {
                 if let Mode::Onboarding(state) = &mut self.mode {
@@ -1917,41 +1980,30 @@ impl App {
                 }
                 Action::None
             }
-            KeyCode::Enter => {
-                // Read the editors (owned) so the completion path can
-                // dispatch on `self` without a conflicting borrow.
-                let (path, preset) = match &self.mode {
-                    Mode::Onboarding(state) => (
-                        state.path_editor.buffer().to_string(),
-                        state.preset_editor.buffer().to_string(),
-                    ),
-                    _ => return Action::None,
-                };
-                match step {
-                    OnboardingStep::Workspace => {
-                        if path.trim().is_empty() {
-                            self.hint = Some(
-                                crate::i18n::tr(self.locale, "onboarding.path_required").into(),
-                            );
-                            return Action::None;
+            KeyCode::Backspace => {
+                if let Mode::Onboarding(state) = &mut self.mode {
+                    match state.step {
+                        OnboardingStep::Workspace => {
+                            state.path_editor.backspace();
+                            state.selection = 0;
                         }
-                        if let Mode::Onboarding(state) = &mut self.mode {
-                            state.step = OnboardingStep::Preset;
-                        }
-                        Action::None
+                        OnboardingStep::Preset => state.preset_editor.backspace(),
                     }
-                    OnboardingStep::Preset => self.complete_onboarding(path, preset),
                 }
+                Action::Input
             }
-            KeyCode::Esc => match step {
-                OnboardingStep::Workspace => Action::Quit,
-                OnboardingStep::Preset => {
-                    if let Mode::Onboarding(state) = &mut self.mode {
-                        state.step = OnboardingStep::Workspace;
+            KeyCode::Char(c) => {
+                if let Mode::Onboarding(state) = &mut self.mode {
+                    match state.step {
+                        OnboardingStep::Workspace => {
+                            state.path_editor.insert_char(c);
+                            state.selection = 0;
+                        }
+                        OnboardingStep::Preset => state.preset_editor.insert_char(c),
                     }
-                    Action::None
                 }
-            },
+                Action::None
+            }
             _ => Action::None,
         }
     }
@@ -3008,15 +3060,37 @@ impl App {
 
     /// Paste: insert into the composer only while it is focused (and no
     /// popup owns the keyboard); everywhere else the payload is dropped.
+    /// #50: the onboarding takeover's ACTIVE editor accepts paste too — it
+    /// runs as a `Mode`, so the composer-focus gate below would drop it.
     pub fn handle_paste(&mut self, text: String) -> Action {
+        // #50: paste on the onboarding editor (before the #20/#27 overlay
+        // gate — the mode is a takeover, focus is never Composer there).
+        if matches!(self.mode, Mode::Onboarding(_)) {
+            if let Mode::Onboarding(state) = &mut self.mode {
+                match state.step {
+                    crate::ui::onboarding::OnboardingStep::Workspace => {
+                        for c in text.chars() {
+                            state.path_editor.insert_char(c);
+                        }
+                        state.selection = 0;
+                    }
+                    crate::ui::onboarding::OnboardingStep::Preset => {
+                        for c in text.chars() {
+                            state.preset_editor.insert_char(c);
+                        }
+                    }
+                }
+            }
+            return Action::None;
+        }
         // #20/#27: one overlay predicate gates paste (the too-small
         // screen's invisible composer included; the seed popup's composer
         // is an overlay too — the #20 asymmetry fix).
         if self.focus != Focus::Composer || self.any_overlay_open() {
             return Action::None;
         }
-        for ch in text.chars() {
-            self.composer.insert_char(ch);
+        for c in text.chars() {
+            self.composer.insert_char(c);
         }
         Action::None
     }
